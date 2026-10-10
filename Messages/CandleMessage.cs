@@ -1,646 +1,667 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// Candle states.
+/// </summary>
+[DataContract]
+[Serializable]
+public enum CandleStates
 {
-	using System;
-	using System.Runtime.Serialization;
-
-	using Ecng.Common;
-	using Ecng.Serialization;
-
-	using StockSharp.Localization;
+	/// <summary>
+	/// Empty state (candle doesn't exist).
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.NoneKey)]
+	None,
 
 	/// <summary>
-	/// Состояния свечи.
+	/// Candle active.
 	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public enum CandleStates
-	{
-		/// <summary>
-		/// Пустое состояние (свеча отсутствует).
-		/// </summary>
-		[EnumMember]
-		None,
-
-		/// <summary>
-		/// Свеча запущена на формирование.
-		/// </summary>
-		[EnumMember]
-		Started,
-
-		/// <summary>
-		/// Свеча изменена.
-		/// </summary>
-		[EnumMember]
-		Changed,
-
-		/// <summary>
-		/// Свеча закончена.
-		/// </summary>
-		[EnumMember]
-		Finished,
-	}
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.ActiveKey)]
+	Active,
 
 	/// <summary>
-	/// Сообщение, содержащее данные о свече.
+	/// Candle finished.
 	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public abstract class CandleMessage : Message
-	{
-		/// <summary>
-		/// Идентификатор инструмента.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.SecurityIdKey)]
-		[DescriptionLoc(LocalizedStrings.SecurityIdKey, true)]
-		[MainCategory]
-		public SecurityId SecurityId { get; set; }
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.FinishedKey)]
+	Finished,
+}
 
-		/// <summary>
-		/// Время начала свечи.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.CandleOpenTimeKey)]
-		[DescriptionLoc(LocalizedStrings.CandleOpenTimeKey, true)]
-		[MainCategory]
-		public DateTimeOffset OpenTime { get; set; }
+/// <summary>
+/// The message contains information about the candle.
+/// </summary>
+/// <remarks>
+/// Initialize <see cref="CandleMessage"/>.
+/// </remarks>
+/// <param name="type">Message type.</param>
+[DataContract]
+[Serializable]
+public abstract class CandleMessage(MessageTypes type) : Message(type), ISubscriptionIdMessage, ICandleMessage
+{
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SecurityIdKey,
+		Description = LocalizedStrings.SecurityIdKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	[BasicSetting]
+	public SecurityId SecurityId { get; set; }
 
-		/// <summary>
-		/// Время максимума свечи.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.CandleHighTimeKey)]
-		[DescriptionLoc(LocalizedStrings.CandleHighTimeKey, true)]
-		[MainCategory]
-		public DateTimeOffset HighTime { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CandleOpenTimeKey,
+		Description = LocalizedStrings.CandleOpenTimeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	[BasicSetting]
+	public DateTime OpenTime { get; set; }
 
-		/// <summary>
-		/// Время минимума свечи.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.CandleLowTimeKey)]
-		[DescriptionLoc(LocalizedStrings.CandleLowTimeKey, true)]
-		[MainCategory]
-		public DateTimeOffset LowTime { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CandleHighTimeKey,
+		Description = LocalizedStrings.CandleHighTimeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public DateTime HighTime { get; set; }
 
-		/// <summary>
-		/// Время окончания свечи.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.CandleCloseTimeKey)]
-		[DescriptionLoc(LocalizedStrings.CandleCloseTimeKey, true)]
-		[MainCategory]
-		public DateTimeOffset CloseTime { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CandleLowTimeKey,
+		Description = LocalizedStrings.CandleLowTimeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public DateTime LowTime { get; set; }
 
-		/// <summary>
-		/// Цена открытия.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str79Key)]
-		[DescriptionLoc(LocalizedStrings.Str80Key)]
-		[MainCategory]
-		public decimal OpenPrice { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CandleCloseTimeKey,
+		Description = LocalizedStrings.CandleCloseTimeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public DateTime CloseTime { get; set; }
 
-		/// <summary>
-		/// Максимальная цена.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str81Key)]
-		[DescriptionLoc(LocalizedStrings.Str82Key)]
-		[MainCategory]
-		public decimal HighPrice { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.OpenPriceKey,
+		Description = LocalizedStrings.CandleOpenPriceKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	[BasicSetting]
+	public decimal OpenPrice { get; set; }
 
-		/// <summary>
-		/// Минимальная цена.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str83Key)]
-		[DescriptionLoc(LocalizedStrings.Str84Key)]
-		[MainCategory]
-		public decimal LowPrice { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.HighestPriceKey,
+		Description = LocalizedStrings.HighPriceOfCandleKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	[BasicSetting]
+	public decimal HighPrice { get; set; }
 
-		/// <summary>
-		/// Цена закрытия.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.ClosingPriceKey)]
-		[DescriptionLoc(LocalizedStrings.Str86Key)]
-		[MainCategory]
-		public decimal ClosePrice { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.LowestPriceKey,
+		Description = LocalizedStrings.LowPriceOfCandleKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	[BasicSetting]
+	public decimal LowPrice { get; set; }
 
-		/// <summary>
-		/// Объем открытия.
-		/// </summary>
-		[DataMember]
-		[Nullable]
-		public decimal? OpenVolume { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ClosingPriceKey,
+		Description = LocalizedStrings.ClosePriceOfCandleKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	[BasicSetting]
+	public decimal ClosePrice { get; set; }
 
-		/// <summary>
-		/// Объем закрытия.
-		/// </summary>
-		[DataMember]
-		[Nullable]
-		public decimal? CloseVolume { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	//[Nullable]
+	public decimal? OpenVolume { get; set; }
 
-		/// <summary>
-		/// Максимальный объем.
-		/// </summary>
-		[DataMember]
-		[Nullable]
-		public decimal? HighVolume { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	//[Nullable]
+	public decimal? CloseVolume { get; set; }
 
-		/// <summary>
-		/// Минимальный объем.
-		/// </summary>
-		[DataMember]
-		[Nullable]
-		public decimal? LowVolume { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	//[Nullable]
+	public decimal? HighVolume { get; set; }
 
-		/// <summary>
-		/// Относительный объем.
-		/// </summary>
-		[DataMember]
-		public decimal RelativeVolume { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	//[Nullable]
+	public decimal? LowVolume { get; set; }
 
-		/// <summary>
-		/// Суммарный объем.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.VolumeKey)]
-		[DescriptionLoc(LocalizedStrings.TotalCandleVolumeKey)]
-		[MainCategory]
-		public decimal TotalVolume { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	public decimal? RelativeVolume { get; set; }
 
-		/// <summary>
-		/// Открытый интерес.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.OIKey)]
-		[DescriptionLoc(LocalizedStrings.OpenInterestKey)]
-		[MainCategory]
-		public decimal? OpenInterest { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TotalPriceKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public decimal TotalPrice { get; set; }
 
-		/// <summary>
-		/// Количество тиковых сделок.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.TicksKey)]
-		[DescriptionLoc(LocalizedStrings.TickCountKey)]
-		[MainCategory]
-		public int TotalTicks { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.VolumeKey,
+		Description = LocalizedStrings.TotalCandleVolumeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	[BasicSetting]
+	public decimal TotalVolume { get; set; }
 
-		/// <summary>
-		/// Количество восходящих тиковых сделок.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.TickUpKey)]
-		[DescriptionLoc(LocalizedStrings.TickUpCountKey)]
-		[MainCategory]
-		public int UpTicks { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.BuyVolumeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public decimal? BuyVolume { get; set; }
 
-		/// <summary>
-		/// Количество нисходящих тиковых сделок.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.TickDownKey)]
-		[DescriptionLoc(LocalizedStrings.TickDownCountKey)]
-		[MainCategory]
-		public int DownTicks { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SellVolumeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public decimal? SellVolume { get; set; }
 
-		/// <summary>
-		/// Состояние.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.StateKey)]
-		[DescriptionLoc(LocalizedStrings.CandleStateKey)]
-		[MainCategory]
-		public CandleStates State { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.OIKey,
+		Description = LocalizedStrings.OpenInterestDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public decimal? OpenInterest { get; set; }
 
-		/// <summary>
-		/// Идентификатор первоначального сообщения <see cref="MarketDataMessage.TransactionId"/>,
-		/// для которого данное сообщение является ответом.
-		/// </summary>
-		[DataMember]
-		public long OriginalTransactionId { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TicksKey,
+		Description = LocalizedStrings.TickCountKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public int? TotalTicks { get; set; }
 
-		/// <summary>
-		/// Является ли сообщение последним в запрашиваемом пакете свечек.
-		/// </summary>
-		[DataMember]
-		public bool IsFinished { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TickUpKey,
+		Description = LocalizedStrings.TickUpCountKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public int? UpTicks { get; set; }
 
-		/// <summary>
-		/// Параметр свечи.
-		/// </summary>
-		public abstract object Arg { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TickDownKey,
+		Description = LocalizedStrings.TickDownCountKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public int? DownTicks { get; set; }
 
-		/// <summary>
-		/// Инициализировать <see cref="CandleMessage"/>.
-		/// </summary>
-		/// <param name="type">Тип сообщения.</param>
-		protected CandleMessage(MessageTypes type)
-			: base(type)
-		{
-		}
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.StateKey,
+		Description = LocalizedStrings.CandleStateKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public CandleStates State { get; set; }
 
-		/// <summary>
-		/// Скопировать параметры.
-		/// </summary>
-		/// <param name="copy">Копия.</param>
-		/// <returns>Копия.</returns>
-		protected CandleMessage CopyTo(CandleMessage copy)
-		{
-			if (copy == null)
-				throw new ArgumentNullException("copy");
+	/// <inheritdoc />
+	[DataMember]
+	[XmlIgnore]
+	public IEnumerable<CandlePriceLevel> PriceLevels { get; set; }
 
-			copy.LocalTime = LocalTime;
-			copy.ClosePrice = ClosePrice;
-			copy.CloseTime = CloseTime;
-			copy.CloseVolume = CloseVolume;
-			copy.HighPrice = HighPrice;
-			copy.HighVolume = HighVolume;
-			copy.LowPrice = LowPrice;
-			copy.LowVolume = LowVolume;
-			copy.OpenInterest = OpenInterest;
-			copy.OpenPrice = OpenPrice;
-			copy.OpenTime = OpenTime;
-			copy.OpenVolume = OpenVolume;
-			copy.SecurityId = SecurityId;
-			copy.TotalVolume = TotalVolume;
-			copy.OriginalTransactionId = OriginalTransactionId;
-			copy.DownTicks = DownTicks;
-			copy.UpTicks = UpTicks;
-			copy.TotalTicks = TotalTicks;
-			copy.IsFinished = IsFinished;
-
-			return copy;
-		}
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return "{0},T={1:yyyy/MM/dd HH:mm:ss.fff},O={2},H={3},L={4},C={5},V={6}".Put(Type, LocalTime, OpenPrice, HighPrice, LowPrice, ClosePrice, TotalVolume);
-		}
-	}
+	/// <inheritdoc />
+	public abstract object Arg { get; }
 
 	/// <summary>
-	/// Сообщение, содержащее данные о тайм-фрейм свече.
+	/// <see cref="DataType.Arg"/> type.
 	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public class TimeFrameCandleMessage : CandleMessage
+	public abstract Type ArgType { get; }
+
+	private DataType _dataType;
+
+	/// <inheritdoc />
+	public DataType DataType
 	{
-		/// <summary>
-		/// Создать <see cref="TimeFrameCandleMessage"/>.
-		/// </summary>
-		public TimeFrameCandleMessage()
-			: base(MessageTypes.CandleTimeFrame)
+		get
 		{
-		}
-
-		/// <summary>
-		/// Тайм-фрейм.
-		/// </summary>
-		[DataMember]
-		public TimeSpan TimeFrame { get; set; }
-
-		/// <summary>
-		/// Создать копию объекта <see cref="TimeFrameCandleMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			return CopyTo(new TimeFrameCandleMessage
+			if (_dataType is null)
 			{
-				TimeFrame = TimeFrame
-			});
-		}
+				var arg = Arg;
 
-		/// <summary>
-		/// Параметр свечи.
-		/// </summary>
-		public override object Arg
-		{
-			get { return TimeFrame; }
-			set { TimeFrame = (TimeSpan)value; }
-		}
-	}
-
-	/// <summary>
-	/// Сообщение, содержащее данные о свече, группируемая по количеству сделок.
-	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public class TickCandleMessage : CandleMessage
-	{
-		/// <summary>
-		/// Создать <see cref="TickCandleMessage"/>.
-		/// </summary>
-		public TickCandleMessage()
-			: base(MessageTypes.CandleTick)
-		{
-		}
-
-		/// <summary>
-		/// Максимальное количество сделок, которое может содержать свеча.
-		/// </summary>
-		[DataMember]
-		public int MaxTradeCount { get; set; }
-
-		/// <summary>
-		/// Создать копию объекта <see cref="TickCandleMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			return CopyTo(new TickCandleMessage
-			{
-				MaxTradeCount = MaxTradeCount
-			});
-		}
-
-		/// <summary>
-		/// Параметр свечи.
-		/// </summary>
-		public override object Arg
-		{
-			get { return MaxTradeCount; }
-			set { MaxTradeCount = (int)value; }
-		}
-	}
-
-	/// <summary>
-	/// Сообщение, содержащее данные о свече, группируемая по количеству контрактов.
-	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public class VolumeCandleMessage : CandleMessage
-	{
-		/// <summary>
-		/// Создать <see cref="VolumeCandleMessage"/>.
-		/// </summary>
-		public VolumeCandleMessage()
-			: base(MessageTypes.CandleVolume)
-		{
-		}
-
-		/// <summary>
-		/// Максимальное количество контрактов, которое может содержать свеча.
-		/// </summary>
-		[DataMember]
-		public decimal Volume { get; set; }
-
-		/// <summary>
-		/// Создать копию объекта <see cref="VolumeCandleMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			return CopyTo(new VolumeCandleMessage
-			{
-				Volume = Volume
-			});
-		}
-
-		/// <summary>
-		/// Параметр свечи.
-		/// </summary>
-		public override object Arg
-		{
-			get { return Volume; }
-			set { Volume = (decimal)value; }
-		}
-	}
-
-	/// <summary>
-	/// Сообщение, содержащее данные о свече, группируемая по ценовому диапазону.
-	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public class RangeCandleMessage : CandleMessage
-	{
-		/// <summary>
-		/// Создать <see cref="RangeCandleMessage"/>.
-		/// </summary>
-		public RangeCandleMessage()
-			: base(MessageTypes.CandleRange)
-		{
-		}
-
-		/// <summary>
-		/// Дельта цены, в рамках которой свеча может содержать сделки.
-		/// </summary>
-		[DataMember]
-		public Unit PriceRange { get; set; }
-
-		/// <summary>
-		/// Создать копию объекта <see cref="RangeCandleMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			return CopyTo(new RangeCandleMessage
-			{
-				PriceRange = PriceRange
-			});
-		}
-
-		/// <summary>
-		/// Параметр свечи.
-		/// </summary>
-		public override object Arg
-		{
-			get { return PriceRange; }
-			set { PriceRange = (Unit)value; }
-		}
-	}
-
-	/// <summary>
-	/// Типы символов.
-	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public enum PnFTypes
-	{
-		/// <summary>
-		/// Крестики (цена растет).
-		/// </summary>
-		[EnumMember]
-		X,
-
-		/// <summary>
-		/// Нолики (цена падает).
-		/// </summary>
-		[EnumMember]
-		O,
-	}
-
-	/// <summary>
-	/// Значение параметров пункто-цифрового графика (график крестики-нолики).
-	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public class PnFArg : Equatable<PnFArg>
-	{
-		private Unit _boxSize = new Unit();
-
-		/// <summary>
-		/// Изменение цены, при превышении которого регистрируется новый <see cref="PnFTypes.X"/> или <see cref="PnFTypes.O"/>.
-		/// </summary>
-		[DataMember]
-		public Unit BoxSize
-		{
-			get { return _boxSize; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
-
-				_boxSize = value;
+				if (!arg.IsNull(true))
+					_dataType = DataType.Create(GetType(), arg);
 			}
-		}
 
-		/// <summary>
-		/// Величина противоположного движения цены, при котором происходит смена <see cref="PnFTypes.X"/> на <see cref="PnFTypes.O"/> (или наоборот).
-		/// </summary>
-		[DataMember]
-		public int ReversalAmount { get; set; }
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return "Box = {0} RA = {1}".Put(BoxSize, ReversalAmount);
+			return _dataType;
 		}
+		set => _dataType = value;
+	}
 
-		/// <summary>
-		/// Создать копию объекта <see cref="PnFArg"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override PnFArg Clone()
-		{
-			return new PnFArg
-			{
-				BoxSize = BoxSize.Clone(),
-				ReversalAmount = ReversalAmount,
-			};
-		}
+	/// <inheritdoc />
+	[DataMember]
+	public long OriginalTransactionId { get; set; }
 
-		/// <summary>
-		/// Сравнить на эквивалентность.
-		/// </summary>
-		/// <param name="other">Значение параметров пункто-цифрового графика, с которым необходимо сделать сравнение.</param>
-		/// <returns><see langword="true"/>, если значения равны. Иначе, <see langword="false"/>.</returns>
-		protected override bool OnEquals(PnFArg other)
-		{
-			return other.BoxSize == BoxSize && other.ReversalAmount == ReversalAmount;
-		}
+	/// <inheritdoc />
+	[XmlIgnore]
+	public long SubscriptionId { get; set; }
 
-		/// <summary>
-		/// Рассчитать хеш-код объекта <see cref="PnFArg"/>.
-		/// </summary>
-		/// <returns>Хеш-код.</returns>
-		public override int GetHashCode()
-		{
-			return BoxSize.GetHashCode() ^ ReversalAmount.GetHashCode();
-		}
+	/// <inheritdoc />
+	[XmlIgnore]
+	public long[] SubscriptionIds { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public DataType BuildFrom { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public long SeqNum { get; set; }
+
+	/// <summary>
+	/// Copy parameters.
+	/// </summary>
+	/// <param name="copy">Copy.</param>
+	/// <returns>Copy.</returns>
+	protected CandleMessage CopyTo(CandleMessage copy)
+	{
+		base.CopyTo(copy);
+
+		copy.OriginalTransactionId = OriginalTransactionId;
+		copy.SubscriptionId = SubscriptionId;
+		copy.SubscriptionIds = SubscriptionIds;//?.ToArray();
+		copy.DataType = DataType;
+
+		copy.OpenPrice = OpenPrice;
+		copy.OpenTime = OpenTime;
+		copy.OpenVolume = OpenVolume;
+		copy.ClosePrice = ClosePrice;
+		copy.CloseTime = CloseTime;
+		copy.CloseVolume = CloseVolume;
+		copy.HighPrice = HighPrice;
+		copy.HighVolume = HighVolume;
+		copy.HighTime = HighTime;
+		copy.LowPrice = LowPrice;
+		copy.LowVolume = LowVolume;
+		copy.LowTime = LowTime;
+		copy.OpenInterest = OpenInterest;
+		copy.SecurityId = SecurityId;
+		copy.TotalVolume = TotalVolume;
+		copy.BuyVolume = BuyVolume;
+		copy.SellVolume = SellVolume;
+		copy.RelativeVolume = RelativeVolume;
+		copy.DownTicks = DownTicks;
+		copy.UpTicks = UpTicks;
+		copy.TotalTicks = TotalTicks;
+		copy.PriceLevels = PriceLevels?/*.Select(l => l.Clone())*/.ToArray();
+		copy.State = State;
+		copy.BuildFrom = BuildFrom;
+		copy.SeqNum = SeqNum;
+
+		return copy;
+	}
+
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		var str = $"{Type},Sec={SecurityId},A={DataType?.Arg},T={OpenTime:yyyy/MM/dd HH:mm:ss.fff},O={OpenPrice},H={HighPrice},L={LowPrice},C={ClosePrice},V={TotalVolume},S={State},TransId={OriginalTransactionId}";
+
+		if (SeqNum != default)
+			str += $",SQ={SeqNum}";
+
+		return str;
+	}
+
+	DateTime IServerTimeMessage.ServerTime
+	{
+		get => OpenTime;
+		set => OpenTime = value;
+	}
+}
+
+/// <summary>
+/// Typed <see cref="CandleMessage"/>.
+/// </summary>
+/// <typeparam name="TArg"><see cref="TypedArg"/> type.</typeparam>
+/// <remarks>
+/// Initialize <see cref="CandleMessage"/>.
+/// </remarks>
+/// <param name="type">Message type.</param>
+/// <param name="arg"><see cref="TypedArg"/>.</param>
+[DataContract]
+[Serializable]
+public abstract class TypedCandleMessage<TArg>(MessageTypes type, TArg arg) : CandleMessage(type)
+{
+
+	/// <inheritdoc />
+	public override object Arg => TypedArg;
+
+	/// <inheritdoc />
+	public override Type ArgType => typeof(TArg);
+
+	/// <summary>
+	/// Candle arg.
+	/// </summary>
+	public TArg TypedArg { get; set; } = arg;
+
+	/// <summary>
+	/// Copy to candle.
+	/// </summary>
+	protected TypedCandleMessage<TArg> CopyTo(TypedCandleMessage<TArg> copy)
+	{
+		base.CopyTo(copy);
+
+		if(typeof(TArg).IsValueType)
+			copy.TypedArg = TypedArg;
+		else if(TypedArg is ICloneable cloneable)
+			copy.TypedArg = (TArg)cloneable.Clone();
+		else
+			throw new InvalidOperationException($"unable to copy {nameof(TypedArg)}");
+
+		return copy;
+	}
+}
+
+/// <summary>
+/// The message contains information about the time-frame candle.
+/// </summary>
+[DataContract]
+[Serializable]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.TFKey,
+	Description = LocalizedStrings.TimeFrameCandleKey
+)]
+public class TimeFrameCandleMessage : TypedCandleMessage<TimeSpan>, ITimeFrameCandleMessage
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="TimeFrameCandleMessage"/>.
+	/// </summary>
+	public TimeFrameCandleMessage()
+		: this(MessageTypes.CandleTimeFrame)
+	{
 	}
 
 	/// <summary>
-	/// Сообщение, содержащее данные о свече пункто-цифрового графика (график крестики-нолики).
+	/// Initializes a new instance of the <see cref="TimeFrameCandleMessage"/>.
 	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public class PnFCandleMessage : CandleMessage
+	/// <param name="type">Message type.</param>
+	protected TimeFrameCandleMessage(MessageTypes type)
+		: base(type, default)
 	{
-		/// <summary>
-		/// Создать <see cref="PnFCandleMessage"/>.
-		/// </summary>
-		public PnFCandleMessage()
-			: base(MessageTypes.CandlePnF)
-		{
-		}
-
-		/// <summary>
-		/// Значение параметров.
-		/// </summary>
-		[DataMember]
-		public PnFArg PnFArg { get; set; }
-
-		/// <summary>
-		/// Тип символов.
-		/// </summary>
-		[DataMember]
-		public PnFTypes PnFType { get; set; }
-
-		/// <summary>
-		/// Создать копию объекта <see cref="PnFCandleMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			return CopyTo(new PnFCandleMessage
-			{
-				PnFArg = PnFArg,
-				PnFType = PnFType
-			});
-		}
-
-		/// <summary>
-		/// Параметр свечи.
-		/// </summary>
-		public override object Arg
-		{
-			get { return PnFArg; }
-			set { PnFArg = (PnFArg)value; }
-		}
 	}
 
 	/// <summary>
-	/// Сообщение, содержащее данные о Рэнко свече.
+	/// Time frame.
 	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public class RenkoCandleMessage : CandleMessage
+	public TimeSpan TimeFrame => TypedArg;
+
+	/// <summary>
+	/// Create a copy of <see cref="TimeFrameCandleMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone() => CopyTo(new TimeFrameCandleMessage());
+}
+
+/// <summary>
+/// The message contains information about the tick candle.
+/// </summary>
+[DataContract]
+[Serializable]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.TickKey,
+	Description = LocalizedStrings.TickCandleKey
+)]
+public class TickCandleMessage : TypedCandleMessage<int>, ITickCandleMessage
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="TickCandleMessage"/>.
+	/// </summary>
+	public TickCandleMessage()
+		: base(MessageTypes.CandleTick, default)
 	{
-		/// <summary>
-		/// Создать <see cref="RenkoCandleMessage"/>.
-		/// </summary>
-		public RenkoCandleMessage()
-			: base(MessageTypes.CandleRenko)
-		{
-		}
+	}
 
-		/// <summary>
-		/// Изменение цены, при превышении которого регистрируется новая свеча.
-		/// </summary>
-		[DataMember]
-		public Unit BoxSize { get; set; }
+	/// <summary>
+	/// Create a copy of <see cref="TickCandleMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone() => CopyTo(new TickCandleMessage());
+}
 
-		/// <summary>
-		/// Создать копию объекта <see cref="RenkoCandleMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			return CopyTo(new RenkoCandleMessage
-			{
-				BoxSize = BoxSize
-			});
-		}
+/// <summary>
+/// The message contains information about the volume candle.
+/// </summary>
+[DataContract]
+[Serializable]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.VolumeKey,
+	Description = LocalizedStrings.VolumeCandleKey
+)]
+public class VolumeCandleMessage : TypedCandleMessage<decimal>, IVolumeCandleMessage
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="VolumeCandleMessage"/>.
+	/// </summary>
+	public VolumeCandleMessage()
+		: base(MessageTypes.CandleVolume, default)
+	{
+	}
 
-		/// <summary>
-		/// Параметр свечи.
-		/// </summary>
-		public override object Arg
+	/// <summary>
+	/// Create a copy of <see cref="VolumeCandleMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone() => CopyTo(new VolumeCandleMessage());
+}
+
+/// <summary>
+/// The message contains information about the range candle.
+/// </summary>
+[DataContract]
+[Serializable]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.RangeKey,
+	Description = LocalizedStrings.RangeCandleKey
+)]
+public class RangeCandleMessage : TypedCandleMessage<Unit>, IRangeCandleMessage
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="RangeCandleMessage"/>.
+	/// </summary>
+	public RangeCandleMessage()
+		: base(MessageTypes.CandleRange, new())
+	{
+	}
+
+	/// <summary>
+	/// Create a copy of <see cref="RangeCandleMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone() => CopyTo(new RangeCandleMessage());
+}
+
+/// <summary>
+/// Point in figure (X0) candle arg.
+/// </summary>
+[DataContract]
+[Serializable]
+public class PnFArg : Equatable<PnFArg>
+{
+	private Unit _boxSize = new(1);
+
+	/// <summary>
+	/// Range of price above which increase the candle body.
+	/// </summary>
+	[DataMember]
+	public Unit BoxSize
+	{
+		get => _boxSize;
+		set => _boxSize = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	private int _reversalAmount = 1;
+
+	/// <summary>
+	/// The number of boxes required to cause a reversal.
+	/// </summary>
+	[DataMember]
+	public int ReversalAmount
+	{
+		get => _reversalAmount;
+		set
 		{
-			get { return BoxSize; }
-			set { BoxSize = (Unit)value; }
+			if (value < 1)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
+
+			_reversalAmount = value;
 		}
 	}
+
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		return $"Box = {BoxSize} RA = {ReversalAmount}";
+	}
+
+	/// <summary>
+	/// Create a copy of <see cref="PnFArg"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override PnFArg Clone()
+	{
+		return new PnFArg
+		{
+			BoxSize = BoxSize.Clone(),
+			ReversalAmount = ReversalAmount,
+		};
+	}
+
+	/// <summary>
+	/// Compare <see cref="PnFArg"/> on the equivalence.
+	/// </summary>
+	/// <param name="other">Another value with which to compare.</param>
+	/// <returns><see langword="true" />, if the specified object is equal to the current object, otherwise, <see langword="false" />.</returns>
+	protected override bool OnEquals(PnFArg other)
+	{
+		return other.BoxSize == BoxSize && other.ReversalAmount == ReversalAmount;
+	}
+
+	/// <summary>
+	/// Get the hash code of the object <see cref="PnFArg"/>.
+	/// </summary>
+	/// <returns>A hash code.</returns>
+	public override int GetHashCode()
+	{
+		return BoxSize.GetHashCode() ^ ReversalAmount.GetHashCode();
+	}
+}
+
+/// <summary>
+/// The message contains information about the X0 candle.
+/// </summary>
+[DataContract]
+[Serializable]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.PnFKey,
+	Description = LocalizedStrings.PnFCandleKey
+)]
+public class PnFCandleMessage : TypedCandleMessage<PnFArg>, IPnFCandleMessage
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="PnFCandleMessage"/>.
+	/// </summary>
+	public PnFCandleMessage()
+		: base(MessageTypes.CandlePnF, new())
+	{
+	}
+
+	/// <summary>
+	/// Create a copy of <see cref="PnFCandleMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone() => CopyTo(new PnFCandleMessage());
+}
+
+/// <summary>
+/// The message contains information about the renko candle.
+/// </summary>
+[DataContract]
+[Serializable]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.RenkoKey,
+	Description = LocalizedStrings.RenkoCandleKey
+)]
+public class RenkoCandleMessage : TypedCandleMessage<Unit>, IRenkoCandleMessage
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="RenkoCandleMessage"/>.
+	/// </summary>
+	public RenkoCandleMessage()
+		: base(MessageTypes.CandleRenko, new())
+	{
+	}
+
+	/// <summary>
+	/// Create a copy of <see cref="RenkoCandleMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone() => CopyTo(new RenkoCandleMessage());
+}
+
+/// <summary>
+/// The message contains information about the Heikin-Ashi candle.
+/// </summary>
+[DataContract]
+[Serializable]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.HeikinAshiKey,
+	Description = LocalizedStrings.HeikinAshiKey
+)]
+public class HeikinAshiCandleMessage : TimeFrameCandleMessage, IHeikinAshiCandleMessage
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="HeikinAshiCandleMessage"/>.
+	/// </summary>
+	public HeikinAshiCandleMessage()
+		: base(MessageTypes.CandleHeikinAshi)
+	{
+	}
+
+	/// <summary>
+	/// Create a copy of <see cref="HeikinAshiCandleMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone() => CopyTo(new HeikinAshiCandleMessage());
 }

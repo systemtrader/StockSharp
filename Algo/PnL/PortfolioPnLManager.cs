@@ -1,131 +1,214 @@
-﻿namespace StockSharp.Algo.PnL
+namespace StockSharp.Algo.PnL;
+
+/// <summary>
+/// The profit-loss manager, related for specified <see cref="PortfolioName"/>.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="PortfolioPnLManager"/>.
+/// </remarks>
+/// <param name="portfolioName">Portfolio name.</param>
+/// <param name="getSecDefinition">Get security definition function.</param>
+public class PortfolioPnLManager(string portfolioName, Func<SecurityId, Level1ChangeMessage> getSecDefinition) : IPnLManager
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Linq;
+	private readonly Dictionary<SecurityId, Dictionary<string, PnLInfo>> _tradeByStringIdInfos = [];
+	private readonly Dictionary<SecurityId, Dictionary<long, PnLInfo>> _tradeByIdInfos = [];
+	private readonly CachedSynchronizedDictionary<SecurityId, PnLQueue> _securityPnLs = [];
+	private readonly Func<SecurityId, Level1ChangeMessage> _getSecDefinition = getSecDefinition ?? throw new ArgumentNullException(nameof(getSecDefinition));
 
-	using Ecng.Collections;
+	/// <summary>
+	/// Portfolio name.
+	/// </summary>
+	public string PortfolioName { get; } = portfolioName.ThrowIfEmpty(nameof(portfolioName));
 
-	using StockSharp.Messages;
+	/// <inheritdoc />
+	public decimal RealizedPnL { get; private set; }
 
-	class PortfolioPnLManager
+	/// <inheritdoc />
+	public decimal UnrealizedPnL => _securityPnLs.CachedValues.Sum(q => q.UnrealizedPnL);
+
+	/// <inheritdoc />
+	public void Reset()
 	{
-		private readonly Dictionary<long, PnLInfo> _tradeInfos = new Dictionary<long, PnLInfo>();
-		private readonly CachedSynchronizedDictionary<SecurityId, PnLQueue> _securityPnLs = new CachedSynchronizedDictionary<SecurityId, PnLQueue>();
+		using var _ = _securityPnLs.EnterScope();
 
-		public PortfolioPnLManager(string portfolioName)
+		RealizedPnL = default;
+
+		_securityPnLs.Clear();
+
+		_tradeByStringIdInfos.Clear();
+		_tradeByIdInfos.Clear();
+	}
+
+	/// <inheritdoc />
+	public void UpdateSecurity(Level1ChangeMessage l1Msg)
+	{
+		if (TryGetQueue(l1Msg, out var queue))
+			queue.UpdateSecurity(l1Msg);
+	}
+
+	PnLInfo IPnLManager.ProcessMessage(Message message, ICollection<PortfolioPnLManager> changedPortfolios)
+		=> throw new NotSupportedException();
+
+	private PnLQueue CreateQueue(SecurityId securityId)
+	{
+		var queue = new PnLQueue(securityId);
+
+		var l1Msg = _getSecDefinition(securityId);
+
+		if (l1Msg != null)
+			queue.UpdateSecurity(l1Msg);
+
+		return queue;
+	}
+
+	/// <summary>
+	/// To calculate trade profitability. If the trade was already processed earlier, previous information returns.
+	/// </summary>
+	/// <param name="trade">Trade.</param>
+	/// <param name="info">Information on new trade.</param>
+	/// <returns><see langword="true" />, if new trade received, otherwise, <see langword="false" />.</returns>
+	public bool ProcessMyTrade(ExecutionMessage trade, out PnLInfo info)
+	{
+		if (trade == null)
+			throw new ArgumentNullException(nameof(trade));
+
+		var tradeId = trade.TradeId;
+		var tradeStringId = trade.TradeStringId;
+
+		using var _ = _securityPnLs.EnterScope();
+
+		Dictionary<long, PnLInfo> byId = null;
+		Dictionary<string, PnLInfo> byStringId = null;
+		PnLInfo idInfo = null;
+		PnLInfo stringIdInfo = null;
+
+		var foundById = tradeId is not null
+			&& (byId = _tradeByIdInfos.SafeAdd(trade.SecurityId, key => [])).TryGetValue(tradeId.Value, out idInfo);
+
+		var foundByStringId = !tradeStringId.IsEmpty()
+			&& (byStringId = _tradeByStringIdInfos.SafeAdd(trade.SecurityId, key => new(StringComparer.InvariantCultureIgnoreCase))).TryGetValue(tradeStringId, out stringIdInfo);
+
+		if (foundById && foundByStringId && !ReferenceEquals(idInfo, stringIdInfo))
+			throw new InvalidOperationException("The numeric and string trade identifiers refer to different trades.");
+
+		if (foundById || foundByStringId)
 		{
-			if (portfolioName.IsEmpty())
-				throw new ArgumentNullException("portfolioName");
+			info = foundById ? idInfo : stringIdInfo;
 
-			PortfolioName = portfolioName;
+			if (tradeId is not null)
+				byId.TryAdd(tradeId.Value, info);
+
+			if (!tradeStringId.IsEmpty())
+				byStringId.TryAdd(tradeStringId, info);
+
+			return false;
 		}
 
-		public string PortfolioName { get; private set; }
+		var queue = _securityPnLs.SafeAdd(trade.SecurityId, CreateQueue);
 
-		/// <summary>
-		/// Суммарное значение прибыли-убытка.
-		/// </summary>
-		public decimal PnL
+		info = queue.Process(trade);
+
+		if (tradeId is not null)
+			byId.Add(tradeId.Value, info);
+
+		if (!tradeStringId.IsEmpty())
+			byStringId.Add(tradeStringId, info);
+
+		RealizedPnL += info.PnL;
+		return true;
+	}
+
+	private bool TryGetQueue<TMsg>(TMsg msg, out PnLQueue queue)
+		where TMsg : ISecurityIdMessage
+		=> _securityPnLs.TryGetValue(msg.SecurityId, out queue);
+
+	/// <summary>
+	/// To process the message, containing market data.
+	/// </summary>
+	/// <param name="message">The message, containing market data.</param>
+	/// <returns><see cref="PnL"/> was changed.</returns>
+	public bool ProcessMessage(Message message)
+	{
+		switch (message.Type)
 		{
-			get { return RealizedPnL + UnrealizedPnL; }
-		}
-
-		private decimal _realizedPnL;
-
-		/// <summary>
-		/// Относительное значение прибыли-убытка без учета открытой позиции.
-		/// </summary>
-		public virtual decimal RealizedPnL
-		{
-			get { return _realizedPnL; }
-		}
-
-		/// <summary>
-		/// Обнулить <see cref="PnL"/>.
-		/// </summary>
-		public void Reset()
-		{
-			_realizedPnL = 0;
-			_securityPnLs.Clear();
-		}
-
-		public decimal UnrealizedPnL
-		{
-			get { return _securityPnLs.CachedValues.Sum(q => q.UnrealizedPnL); }
-		}
-
-		/// <summary>
-		/// Рассчитать прибыльность сделки. Если сделка уже ранее была обработана, то возвращается предыдущая информация.
-		/// </summary>
-		/// <param name="trade">Сделка.</param>
-		/// <param name="info">Информация о новой сделке.</param>
-		/// <returns><see langword="true"/>, если получена новая сделка, иначе, <see langword="false"/>.</returns>
-		public bool ProcessMyTrade(ExecutionMessage trade, out PnLInfo info)
-		{
-			if (trade == null)
-				throw new ArgumentNullException("trade");
-
-			var tradeId = trade.GetTradeId();
-
-			if (_tradeInfos.TryGetValue(tradeId, out info))
-				return false;
-
-			var queue = _securityPnLs.SafeAdd(trade.SecurityId, security => new PnLQueue(security));
-
-			info = queue.Process(trade);
-
-			_tradeInfos.Add(tradeId, info);
-			_realizedPnL += info.PnL;
-
-			return true;
-		}
-
-		/// <summary>
-		/// Обработать сообщение, содержащее рыночные данные.
-		/// </summary>
-		/// <param name="message">Сообщение, содержащее рыночные данные.</param>
-		public void ProcessMessage(Message message)
-		{
-			switch (message.Type)
+			case MessageTypes.Execution:
 			{
-				case MessageTypes.Execution:
-				{
-					var execMsg = (ExecutionMessage)message;
+				var execMsg = (ExecutionMessage)message;
 
-					if (execMsg.ExecutionType != ExecutionTypes.Tick)
-						break;
-
-					var queue = _securityPnLs.TryGetValue(execMsg.SecurityId);
-
-					if (queue != null)
-						queue.ProcessExecution(execMsg);
-
+				if (execMsg.DataType != DataType.Ticks && execMsg.DataType != DataType.OrderLog)
 					break;
+
+				if (!TryGetQueue(execMsg, out var queue))
+					break;
+
+				queue.ProcessExecution(execMsg);
+				return true;
+			}
+
+			case MessageTypes.Level1Change:
+			{
+				var levelMsg = (Level1ChangeMessage)message;
+
+				if (!TryGetQueue(levelMsg, out var queue))
+					break;
+
+				queue.ProcessLevel1(levelMsg);
+				return true;
+			}
+
+			case MessageTypes.QuoteChange:
+			{
+				var quoteMsg = (QuoteChangeMessage)message;
+
+				if (quoteMsg.State != null)
+					break;
+
+				if (!TryGetQueue(quoteMsg, out var queue))
+					break;
+
+				queue.ProcessQuotes(quoteMsg);
+				return true;
+			}
+
+			case MessageTypes.PositionChange:
+			{
+				var posMsg = (PositionChangeMessage)message;
+
+				var leverage = posMsg.TryGetDecimal(PositionChangeTypes.Leverage);
+				if (leverage != null)
+				{
+					if (posMsg.IsMoney())
+						_securityPnLs.CachedValues.ForEach(q => q.Leverage = leverage.Value);
+					else
+						_securityPnLs.SafeAdd(posMsg.SecurityId, CreateQueue).Leverage = leverage.Value;
 				}
 
-				case MessageTypes.Level1Change:
-				{
-					var levelMsg = (Level1ChangeMessage)message;
-					var queue = _securityPnLs.TryGetValue(levelMsg.SecurityId);
+				break;
+			}
 
-					if (queue != null)
-						queue.ProcessLevel1(levelMsg);
-
+			default:
+			{
+				if (message is not CandleMessage candleMsg)
 					break;
-				}
 
-				case MessageTypes.QuoteChange:
-				{
-					var quoteMsg = (QuoteChangeMessage)message;
-					var queue = _securityPnLs.TryGetValue(quoteMsg.SecurityId);
-
-					if (queue != null)
-						queue.ProcessQuotes(quoteMsg);
-
+				if (!TryGetQueue(candleMsg, out var queue))
 					break;
-				}
+
+				queue.ProcessCandle(candleMsg);
+				return true;
 			}
 		}
+
+		return false;
 	}
+
+	Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		=> Task.CompletedTask;
+
+	Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		=> Task.CompletedTask;
+
+	/// <inheritdoc />
+	public ValueTask<IPnLManager> CloneAsync(CancellationToken cancellationToken)
+		=> new(new PortfolioPnLManager(PortfolioName, _getSecDefinition));
 }

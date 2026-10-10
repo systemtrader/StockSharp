@@ -1,179 +1,204 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// The message containing the information for the order registration.
+/// </summary>
+[DataContract]
+[Serializable]
+public class OrderRegisterMessage : OrderMessage
 {
-	using System;
-	using System.Runtime.Serialization;
-
-	using Ecng.Common;
-	using Ecng.Serialization;
-
-	using StockSharp.Localization;
+	/// <summary>
+	/// Order price.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PriceKey,
+		Description = LocalizedStrings.OrderPriceKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public decimal Price { get; set; }
 
 	/// <summary>
-	/// Сообщение, содержащее информацию для регистрации заявки.
+	/// Number of contracts in the order.
 	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public class OrderRegisterMessage : OrderMessage
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.VolumeKey,
+		Description = LocalizedStrings.OrderVolumeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public decimal Volume { get; set; }
+
+	/// <summary>
+	/// Visible quantity of contracts in order.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.VisibleVolumeKey,
+		Description = LocalizedStrings.VisibleVolumeDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public decimal? VisibleVolume { get; set; }
+
+	/// <summary>
+	/// Order side (buy or sell).
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.DirectionKey,
+		Description = LocalizedStrings.OrderSideDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public Sides Side { get; set; }
+
+	/// <summary>
+	/// Order expiry time. The default is <see langword="null" />, which mean (GTC).
+	/// </summary>
+	/// <remarks>
+	/// If the value is equal <see langword="null" />, order will be GTC (good til cancel). Or uses exact date.
+	/// </remarks>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ExpirationKey,
+		Description = LocalizedStrings.OrderExpirationTimeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public DateTime? TillDate { get; set; }
+
+	/// <summary>
+	/// Limit order time in force.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TimeInForceKey,
+		Description = LocalizedStrings.LimitOrderTifKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public TimeInForce? TimeInForce { get; set; }
+
+	/// <summary>
+	/// Is the order of market-maker.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.MarketMakerKey,
+		Description = LocalizedStrings.MarketMakerOrderKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public bool? IsMarketMaker { get; set; }
+
+	/// <summary>
+	/// Slippage in trade price.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SlippageKey,
+		Description = LocalizedStrings.SlippageTradeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public decimal? Slippage { get; set; }
+
+	/// <summary>
+	/// Is order manual.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ManualKey,
+		Description = LocalizedStrings.IsOrderManualKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public bool? IsManual { get; set; }
+
+	/// <summary>
+	/// Minimum quantity of an order to be executed.
+	/// </summary>
+	[DataMember]
+	public decimal? MinOrderVolume { get; set; }
+
+	/// <summary>
+	/// Position effect.
+	/// </summary>
+	[DataMember]
+	public OrderPositionEffects? PositionEffect { get; set; }
+
+	/// <summary>
+	/// Post-only order.
+	/// </summary>
+	[DataMember]
+	public bool? PostOnly { get; set; }
+
+	/// <summary>
+	/// Margin leverage.
+	/// </summary>
+	[DataMember]
+	public int? Leverage { get; set; }
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="OrderRegisterMessage"/>.
+	/// </summary>
+	public OrderRegisterMessage()
+		: base(MessageTypes.OrderRegister)
 	{
-		/// <summary>
-		/// Идентификатор транзакции.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.TransactionKey)]
-		[DescriptionLoc(LocalizedStrings.TransactionIdKey, true)]
-		[MainCategory]
-		public long TransactionId { get; set; }
+	}
 
-		/// <summary>
-		/// Цена заявки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.PriceKey)]
-		[DescriptionLoc(LocalizedStrings.OrderPriceKey)]
-		[MainCategory]
-		public decimal Price { get; set; }
+	/// <summary>
+	/// Initialize <see cref="OrderRegisterMessage"/>.
+	/// </summary>
+	/// <param name="type">Message type.</param>
+	protected OrderRegisterMessage(MessageTypes type)
+		: base(type)
+	{
+	}
 
-		/// <summary>
-		/// Количество контрактов в заявке.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.VolumeKey)]
-		[DescriptionLoc(LocalizedStrings.OrderVolumeKey)]
-		[MainCategory]
-		public decimal Volume { get; set; }
+	/// <summary>
+	/// Create a copy of <see cref="OrderRegisterMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone()
+	{
+		var clone = new OrderRegisterMessage(Type);
+		CopyTo(clone);
+		return clone;
+	}
 
-		/// <summary>
-		/// Видимое количество контрактов в заявке.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.VisibleVolumeKey)]
-		[DescriptionLoc(LocalizedStrings.Str127Key)]
-		[MainCategory]
-		[Nullable]
-		public decimal? VisibleVolume { get; set; }
+	/// <summary>
+	/// Copy the message into the <paramref name="destination" />.
+	/// </summary>
+	/// <param name="destination">The object, to which copied information.</param>
+	public void CopyTo(OrderRegisterMessage destination)
+	{
+		base.CopyTo(destination);
 
-		/// <summary>
-		/// Направление заявки (покупка или продажа).
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str128Key)]
-		[DescriptionLoc(LocalizedStrings.Str129Key)]
-		[MainCategory]
-		public Sides Side { get; set; }
+		destination.Price = Price;
+		destination.Volume = Volume;
+		destination.VisibleVolume = VisibleVolume;
+		destination.Side = Side;
+		destination.TillDate = TillDate;
+		destination.TimeInForce = TimeInForce;
+		destination.IsMarketMaker = IsMarketMaker;
+		destination.Slippage = Slippage;
+		destination.IsManual = IsManual;
+		destination.MinOrderVolume = MinOrderVolume;
+		destination.PositionEffect = PositionEffect;
+		destination.PostOnly = PostOnly;
+		destination.Leverage = Leverage;
+	}
 
-		/// <summary>
-		/// Комментарий к выставляемой заявке.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str135Key)]
-		[DescriptionLoc(LocalizedStrings.Str136Key)]
-		[MainCategory]
-		public string Comment { get; set; }
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		var str = base.ToString() + $",Price={Price},Side={Side},Vol={Volume}/{VisibleVolume}/{MinOrderVolume},Till={TillDate},TIF={TimeInForce},MM={IsMarketMaker},SLP={Slippage},MN={IsManual}";
 
-		/// <summary>
-		/// Время экспирации заявки. По-умолчанию равно <see langword="null"/>, что означает действие заявки до отмены (GTC).
-		/// </summary>
-		/// <remarks>
-		/// Если значение равно <see langword="null"/> или <see cref="DateTimeOffset.MaxValue"/>, то заявка выставляется до отмены (GTC).
-		/// Иначе, указывается конкретный срок.
-		/// </remarks>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str141Key)]
-		[DescriptionLoc(LocalizedStrings.Str142Key)]
-		[MainCategory]
-		public DateTimeOffset? TillDate { get; set; }
+		if (PositionEffect != null)
+			str += $",PosEffect={PositionEffect.Value}";
 
-		/// <summary>
-		/// Условие заявки (например, параметры стоп- или алго- заявков).
-		/// </summary>
-		[DisplayNameLoc(LocalizedStrings.Str154Key)]
-		[DescriptionLoc(LocalizedStrings.Str155Key)]
-		[CategoryLoc(LocalizedStrings.Str156Key)]
-		public OrderCondition Condition { get; set; }
+		if (PostOnly != null)
+			str += $",PostOnly={PostOnly.Value}";
 
-		/// <summary>
-		/// Время жизни лимитной заявки.
-		/// </summary>
-		[DisplayNameLoc(LocalizedStrings.Str231Key)]
-		[DescriptionLoc(LocalizedStrings.Str232Key)]
-		[MainCategory]
-		[Nullable]
-		public TimeInForce? TimeInForce { get; set; }
+		if (Leverage != null)
+			str += $",Leverage={Leverage.Value}";
 
-		/// <summary>
-		/// Информация для РЕПО\РЕПО-М заявок.
-		/// </summary>
-		[DisplayNameLoc(LocalizedStrings.Str233Key)]
-		[DescriptionLoc(LocalizedStrings.Str234Key)]
-		[MainCategory]
-		public RepoOrderInfo RepoInfo { get; set; }
-
-		/// <summary>
-		/// Информация для РПС заявок.
-		/// </summary>
-		[DisplayNameLoc(LocalizedStrings.Str235Key)]
-		[DescriptionLoc(LocalizedStrings.Str236Key)]
-		[MainCategory]
-		public RpsOrderInfo RpsInfo { get; set; }
-
-		/// <summary>
-		/// Создать <see cref="OrderRegisterMessage"/>.
-		/// </summary>
-		public OrderRegisterMessage()
-			: base(MessageTypes.OrderRegister)
-		{
-		}
-
-		/// <summary>
-		/// Инициализировать <see cref="OrderRegisterMessage"/>.
-		/// </summary>
-		/// <param name="type">Тип сообщения.</param>
-		protected OrderRegisterMessage(MessageTypes type)
-			: base(type)
-		{
-		}
-
-		/// <summary>
-		/// Создать копию объекта <see cref="OrderRegisterMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			var clone = new OrderRegisterMessage(Type)
-			{
-				Comment = Comment,
-				Condition = Condition,
-				TillDate = TillDate,
-				OrderType = OrderType,
-				PortfolioName = PortfolioName,
-				Price = Price,
-				RepoInfo = RepoInfo.CloneNullable(),
-				RpsInfo = RpsInfo.CloneNullable(),
-				SecurityId = SecurityId,
-				//SecurityType = SecurityType,
-				Side = Side,
-				TimeInForce = TimeInForce,
-				TransactionId = TransactionId,
-				VisibleVolume = VisibleVolume,
-				Volume = Volume,
-				Currency = Currency,
-				UserOrderId = UserOrderId,
-				ClientCode = ClientCode,
-				BrokerCode = BrokerCode,
-			};
-
-			CopyTo(clone);
-
-			return clone;
-		}
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",TransId={0},Price={1},Side={2},OrdType={3},Vol={4},Sec={5}".Put(TransactionId, Price, Side, OrderType, Volume, SecurityId);
-		}
+		return str;
 	}
 }

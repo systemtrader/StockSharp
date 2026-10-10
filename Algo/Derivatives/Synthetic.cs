@@ -1,147 +1,126 @@
-namespace StockSharp.Algo.Derivatives
-{
-	using System;
-	using System.Collections.Generic;
+namespace StockSharp.Algo.Derivatives;
 
-	using StockSharp.BusinessEntities;
-	using StockSharp.Messages;
-	using StockSharp.Localization;
+/// <summary>
+/// The synthetic positions builder.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="Synthetic"/>.
+/// </remarks>
+/// <param name="security">The instrument (the option or the underlying asset).</param>
+/// <param name="provider">The provider of information about instruments.</param>
+public class Synthetic(Security security, ISecurityProvider provider)
+{
+	private readonly Security _security = security ?? throw new ArgumentNullException(nameof(security));
+	private readonly ISecurityProvider _provider = provider ?? throw new ArgumentNullException(nameof(provider));
+
+	private Security Option
+	{
+		get
+		{
+			_security.CheckOption();
+			return _security;
+		}
+	}
 
 	/// <summary>
-	/// Построитель синтетических позиций.
+	/// To get the synthetic position to buy the option.
 	/// </summary>
-	public class Synthetic
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The synthetic position.</returns>
+	public ValueTask<(Security security, Sides side)[]> BuyAsync(CancellationToken cancellationToken)
+		=> PositionAsync(Sides.Buy, cancellationToken);
+
+	/// <summary>
+	/// To get the synthetic position to sale the option.
+	/// </summary>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The synthetic position.</returns>
+	public ValueTask<(Security security, Sides side)[]> SellAsync(CancellationToken cancellationToken)
+		=> PositionAsync(Sides.Sell, cancellationToken);
+
+	/// <summary>
+	/// To get the synthetic position for the option.
+	/// </summary>
+	/// <param name="side">The main position direction.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The synthetic position.</returns>
+	public async ValueTask<(Security security, Sides side)[]> PositionAsync(Sides side, CancellationToken cancellationToken)
 	{
-		private readonly Security _security;
-		private readonly ISecurityProvider _provider;
+		var option = Option;
 
-		/// <summary>
-		/// Создать <see cref="Synthetic"/>.
-		/// </summary>
-		/// <param name="security">Инструмент (опцион или базовый актив).</param>
-		/// <param name="provider">Поставщик информации об инструментах.</param>
-		public Synthetic(Security security, ISecurityProvider provider)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
+		var asset = await option.GetUnderlyingAssetAsync(_provider, cancellationToken);
+		var opposite = await option.GetOppositeOptionAsync(_provider, cancellationToken);
 
-			if (provider == null)
-				throw new ArgumentNullException("provider");
+		return
+		[
+			new(asset, option.OptionType == OptionTypes.Call ? side : side.Invert()),
+			new(opposite, side)
+		];
+	}
 
-			_security = security;
-			_provider = provider;
-		}
+	/// <summary>
+	/// To get the option position for the underlying asset synthetic buy.
+	/// </summary>
+	/// <param name="strike">Strike.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The option position.</returns>
+	public ValueTask<(Security security, Sides side)[]> BuyAsync(decimal strike, CancellationToken cancellationToken)
+		=> BuyAsync(strike, GetExpiryDate(), cancellationToken);
 
-		private Security Option
-		{
-			get
-			{
-				_security.CheckOption();
-				return _security;
-			}
-		}
+	/// <summary>
+	/// To get the option position for the underlying asset synthetic buy.
+	/// </summary>
+	/// <param name="strike">Strike.</param>
+	/// <param name="expiryDate">The date of the option expiration.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The option position.</returns>
+	public ValueTask<(Security security, Sides side)[]> BuyAsync(decimal strike, DateTime expiryDate, CancellationToken cancellationToken)
+		=> PositionAsync(strike, expiryDate, Sides.Buy, cancellationToken);
 
-		/// <summary>
-		/// Получить синтетическую позицию для покупки опциона.
-		/// </summary>
-		/// <returns>Синтетическая позиция.</returns>
-		public KeyValuePair<Security, Sides>[] Buy()
-		{
-			return Position(Sides.Buy);
-		}
+	/// <summary>
+	/// To get the option position for synthetic sale of the base asset.
+	/// </summary>
+	/// <param name="strike">Strike.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The option position.</returns>
+	public ValueTask<(Security security, Sides side)[]> SellAsync(decimal strike, CancellationToken cancellationToken)
+		=> SellAsync(strike, GetExpiryDate(), cancellationToken);
 
-		/// <summary>
-		/// Получить синтетическую позицию для продажи опциона.
-		/// </summary>
-		/// <returns>Синтетическая позиция.</returns>
-		public KeyValuePair<Security, Sides>[] Sell()
-		{
-			return Position(Sides.Sell);
-		}
+	/// <summary>
+	/// To get the option position for synthetic sale of the base asset.
+	/// </summary>
+	/// <param name="strike">Strike.</param>
+	/// <param name="expiryDate">The date of the option expiration.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The option position.</returns>
+	public ValueTask<(Security security, Sides side)[]> SellAsync(decimal strike, DateTime expiryDate, CancellationToken cancellationToken)
+		=> PositionAsync(strike, expiryDate, Sides.Sell, cancellationToken);
 
-		/// <summary>
-		/// Получить синтетическую позицию для опциона.
-		/// </summary>
-		/// <param name="side">Направление основной позиции.</param>
-		/// <returns>Синтетическая позиция.</returns>
-		public KeyValuePair<Security, Sides>[] Position(Sides side)
-		{
-			var asset = Option.GetUnderlyingAsset(_provider);
+	/// <summary>
+	/// To get the option position for the synthetic base asset.
+	/// </summary>
+	/// <param name="strike">Strike.</param>
+	/// <param name="expiryDate">The date of the option expiration.</param>
+	/// <param name="side">The main position direction.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The option position.</returns>
+	public async ValueTask<(Security security, Sides side)[]> PositionAsync(decimal strike, DateTime expiryDate, Sides side, CancellationToken cancellationToken)
+	{
+		var call = await _security.GetCallAsync(_provider, strike, expiryDate, cancellationToken);
+		var put = await _security.GetPutAsync(_provider, strike, expiryDate, cancellationToken);
 
-			return new[]
-			{
-				new KeyValuePair<Security, Sides>(asset, Option.OptionType == OptionTypes.Call ? side : side.Invert()),
-				new KeyValuePair<Security, Sides>(Option.GetOppositeOption(_provider), side)
-			};
-		}
+		return
+		[
+			new (call, side),
+			new (put, side.Invert())
+		];
+	}
 
-		/// <summary>
-		/// Получить опционную позицию для синтетической покупки базового актива.
-		/// </summary>
-		/// <param name="strike">Страйк.</param>
-		/// <returns>Опционная позиция.</returns>
-		public KeyValuePair<Security, Sides>[] Buy(decimal strike)
-		{
-			return Buy(strike, GetExpiryDate());
-		}
+	private DateTime GetExpiryDate()
+	{
+		if (_security.ExpiryDate == null)
+			throw new InvalidOperationException(LocalizedStrings.NoExpirationDate.Put(_security.Id));
 
-		/// <summary>
-		/// Получить опционную позицию для синтетической покупки базового актива.
-		/// </summary>
-		/// <param name="strike">Страйк.</param>
-		/// <param name="expiryDate">Дата экспирации опциона.</param>
-		/// <returns>Опционная позиция.</returns>
-		public KeyValuePair<Security, Sides>[] Buy(decimal strike, DateTimeOffset expiryDate)
-		{
-			return Position(strike, expiryDate, Sides.Buy);
-		}
-
-		/// <summary>
-		/// Получить опционную позицию для синтетической продажи базового актива.
-		/// </summary>
-		/// <param name="strike">Страйк.</param>
-		/// <returns>Опционная позиция.</returns>
-		public KeyValuePair<Security, Sides>[] Sell(decimal strike)
-		{
-			return Sell(strike, GetExpiryDate());
-		}
-
-		/// <summary>
-		/// Получить опционную позицию для синтетической продажи базового актива.
-		/// </summary>
-		/// <param name="strike">Страйк.</param>
-		/// <param name="expiryDate">Дата экспирации опциона.</param>
-		/// <returns>Опционная позиция.</returns>
-		public KeyValuePair<Security, Sides>[] Sell(decimal strike, DateTimeOffset expiryDate)
-		{
-			return Position(strike, expiryDate, Sides.Sell);
-		}
-
-		/// <summary>
-		/// Получить опционную позицию для синтетического базового актива.
-		/// </summary>
-		/// <param name="strike">Страйк.</param>
-		/// <param name="expiryDate">Дата экспирации опциона.</param>
-		/// <param name="side">Направление основной позиции.</param>
-		/// <returns>Опционная позиция.</returns>
-		public KeyValuePair<Security, Sides>[] Position(decimal strike, DateTimeOffset expiryDate, Sides side)
-		{
-			var call = _security.GetCall(_provider, strike, expiryDate);
-			var put = _security.GetPut(_provider, strike, expiryDate);
-
-			return new[]
-			{
-				new KeyValuePair<Security, Sides>(call, side),
-				new KeyValuePair<Security, Sides>(put, side.Invert())
-			};
-		}
-
-		private DateTimeOffset GetExpiryDate()
-		{
-			if (_security.ExpiryDate == null)
-				throw new InvalidOperationException(LocalizedStrings.Str712);
-
-			return _security.ExpiryDate.Value;
-		}
+		return _security.ExpiryDate.Value;
 	}
 }

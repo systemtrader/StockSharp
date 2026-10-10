@@ -1,122 +1,113 @@
-﻿namespace StockSharp.Algo.Storages
+namespace StockSharp.Algo.Storages;
+
+/// <summary>
+/// The interface, describing the storage of market data (ticks, order books etc.).
+/// </summary>
+public interface IMarketDataStorage
 {
-	using System;
-	using System.Collections;
-	using System.Collections.Generic;
-
-	using Ecng.Collections;
-
-	using StockSharp.Algo.Candles;
-	using StockSharp.BusinessEntities;
+	/// <summary>
+	/// To get all the dates for which market data are recorded.
+	/// </summary>
+	/// <returns>Available dates.</returns>
+	IAsyncEnumerable<DateTime> GetDatesAsync();
 
 	/// <summary>
-	/// Интерфейс, описывающий хранилище маркет-данных (тики, стаканы и т.д.).
+	/// The type of market-data, operated by given storage.
 	/// </summary>
-	public interface IMarketDataStorage
-	{
-		/// <summary>
-		/// Все даты, для которых записаны маркет-данные.
-		/// </summary>
-		IEnumerable<DateTime> Dates { get; }
-
-		/// <summary>
-		/// Тип маркет-данных, с которыми работает данное хранилище.
-		/// </summary>
-		Type DataType { get; }
-
-		/// <summary>
-		/// Инструмент, с которым работает внешнее хранилище.
-		/// </summary>
-		Security Security { get; }
-
-		/// <summary>
-		/// Дополнительный аргумент, ассоциированный с данными. Например, <see cref="Candle.Arg"/>.
-		/// </summary>
-		object Arg { get; }
-
-		/// <summary>
-		/// Хранилище (база данных, файл и т.д.).
-		/// </summary>
-		IMarketDataStorageDrive Drive { get; }
-
-		/// <summary>
-		/// Добавлять ли только новые данные или пытаться записать все данные без фильтра.
-		/// </summary>
-		bool AppendOnlyNew { get; set; }
-
-		/// <summary>
-		/// Сохранить маркет-данные в хранилище.
-		/// </summary>
-		/// <param name="data">Маркет-данные.</param>
-		void Save(IEnumerable data);
-
-		/// <summary>
-		/// Удалить маркет-данные из хранилища.
-		/// </summary>
-		/// <param name="data">Маркет-данные, которые необходимо удалить.</param>
-		void Delete(IEnumerable data);
-
-		/// <summary>
-		/// Удалить маркет-данные из хранилища за указанную дату.
-		/// </summary>
-		/// <param name="date">Дата, для которой необходимо удалить все данные.</param>
-		void Delete(DateTime date);
-
-		/// <summary>
-		/// Загрузить данные.
-		/// </summary>
-		/// <param name="date">Дата, для которой необходимо загрузить данные.</param>
-		/// <returns>Данные. Если данных не существует, то будет возвращено пустое множество.</returns>
-		IEnumerable Load(DateTime date);
-
-		/// <summary>
-		/// Получить мета-информация о данных.
-		/// </summary>
-		/// <param name="date">Дата, для которой необходимо получить мета-информация о данных.</param>
-		/// <returns>Мета-информация о данных. Если дня в истории не существует, то будет возвращено <see langword="null"/>.</returns>
-		IMarketDataMetaInfo GetMetaInfo(DateTime date);
-
-		/// <summary>
-		/// Сериализатор.
-		/// </summary>
-		IMarketDataSerializer Serializer { get; }
-	}
+	DataType DataType { get; }
 
 	/// <summary>
-	/// Интерфейс, описывающий хранилище маркет-данных (тики, стаканы и т.д.).
+	/// The instrument, operated by the external storage.
 	/// </summary>
-	/// <typeparam name="TData">Тип маркет-данных.</typeparam>
-	public interface IMarketDataStorage<TData> : IMarketDataStorage
-	{
-		/// <summary>
-		/// Сохранить маркет-данные в хранилище.
-		/// </summary>
-		/// <param name="data">Маркет-данные.</param>
-		void Save(IEnumerable<TData> data);
+	SecurityId SecurityId { get; }
 
-		/// <summary>
-		/// Удалить маркет-данные из хранилища.
-		/// </summary>
-		/// <param name="data">Маркет-данные, которые необходимо удалить.</param>
-		void Delete(IEnumerable<TData> data);
+	/// <summary>
+	/// The storage (database, file etc.).
+	/// </summary>
+	IMarketDataStorageDrive Drive { get; }
 
-		/// <summary>
-		/// Загрузить данные.
-		/// </summary>
-		/// <param name="date">Дата, для которой необходимо загрузить данные.</param>
-		/// <returns>Данные. Если данных не существует, то будет возвращено пустое множество.</returns>
-		new IEnumerableEx<TData> Load(DateTime date);
+	/// <summary>
+	/// Whether to add new data or attempt to record all data without filter.
+	/// </summary>
+	bool AppendOnlyNew { get; set; }
 
-		/// <summary>
-		/// Получить считыватель данных за указанную дату.
-		/// </summary>
-		/// <param name="date">Дата, для которой необходимо загрузить данные.</param>
-		/// <returns>Считыватель данных.</returns>
-		IDataStorageReader<TData> GetReader(DateTime date);
+	/// <summary>
+	/// To save market data in storage.
+	/// </summary>
+	/// <param name="data">Market data.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Count of saved data.</returns>
+	ValueTask<int> SaveAsync(IEnumerable<Message> data, CancellationToken cancellationToken);
 
-		/// <summary>
-		/// Сериализатор.
-		/// </summary>
-		new IMarketDataSerializer<TData> Serializer { get; }
-	}
+	/// <summary>
+	/// To delete market data from storage.
+	/// </summary>
+	/// <param name="data">Market data to be deleted.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="ValueTask"/></returns>
+	ValueTask DeleteAsync(IEnumerable<Message> data, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// To remove market data on specified date from the storage.
+	/// </summary>
+	/// <param name="date">Date, for which all data shall be deleted.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="ValueTask"/></returns>
+	ValueTask DeleteAsync(DateTime date, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// To load data.
+	/// </summary>
+	/// <param name="date">Date, for which data shall be loaded.</param>
+	/// <returns>Data. If there is no data, the empty set will be returned.</returns>
+	IAsyncEnumerable<Message> LoadAsync(DateTime date);
+
+	/// <summary>
+	/// To get meta-information on data.
+	/// </summary>
+	/// <param name="date">Date, for which meta-information on data shall be received.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Meta-information on data. If there is no such date in history, <see langword="null" /> will be returned.</returns>
+	ValueTask<IMarketDataMetaInfo> GetMetaInfoAsync(DateTime date, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// The serializer.
+	/// </summary>
+	IMarketDataSerializer Serializer { get; }
+}
+
+/// <summary>
+/// The interface, describing the storage of market data (ticks, order books etc.).
+/// </summary>
+/// <typeparam name="TMessage">Market data type.</typeparam>
+public interface IMarketDataStorage<TMessage> : IMarketDataStorage
+	where TMessage : Message
+{
+	/// <summary>
+	/// To save market data in storage.
+	/// </summary>
+	/// <param name="data">Market data.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Count of saved data.</returns>
+	ValueTask<int> SaveAsync(IEnumerable<TMessage> data, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// To delete market data from storage.
+	/// </summary>
+	/// <param name="data">Market data to be deleted.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="ValueTask"/></returns>
+	ValueTask DeleteAsync(IEnumerable<TMessage> data, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// To load data.
+	/// </summary>
+	/// <param name="date">Date, for which data shall be loaded.</param>
+	/// <returns>Data. If there is no data, the empty set will be returned.</returns>
+	new IAsyncEnumerable<TMessage> LoadAsync(DateTime date);
+
+	/// <summary>
+	/// The serializer.
+	/// </summary>
+	new IMarketDataSerializer<TMessage> Serializer { get; }
 }

@@ -1,946 +1,849 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+using System.Runtime.CompilerServices;
+
+/// <summary>
+/// The base adapter converts messages <see cref="Message"/> to the command of the trading system and back.
+/// </summary>
+public abstract partial class MessageAdapter : BaseLogReceiver, IMessageAdapter, INotifyPropertyChanged
 {
-	using System;
-	using System.Collections.Generic;
-	using System.ComponentModel;
-	using System.Linq;
+	/// <summary>
+	/// Initialize <see cref="MessageAdapter"/>.
+	/// </summary>
+	/// <param name="transactionIdGenerator">Transaction id generator.</param>
+	protected MessageAdapter(IdGenerator transactionIdGenerator)
+	{
+		TransactionIdGenerator = transactionIdGenerator ?? throw new ArgumentNullException(nameof(transactionIdGenerator));
 
-	using Ecng.Collections;
-	using Ecng.Common;
-	using Ecng.Interop;
-	using Ecng.Serialization;
+		StorageName = GetType().Namespace.Remove(nameof(StockSharp)).Remove(".");
 
-	using MoreLinq;
+		Platform = GetType().GetPlatform();
 
-	using StockSharp.Logging;
-	using StockSharp.Localization;
+		var attr = GetType().GetAttribute<MessageAdapterCategoryAttribute>();
+		if (attr != null)
+			Categories = attr.Categories;
+	}
 
-	using Xceed.Wpf.Toolkit.PropertyGrid.Attributes;
+	private IEnumerable<MessageTypes> CheckDuplicate(IEnumerable<MessageTypes> value, string propName)
+	{
+		if (value == null)
+			throw new ArgumentNullException(nameof(value));
+
+		var arr = value.ToArray();
+
+		var duplicate = arr.GroupBy(m => m).FirstOrDefault(g => g.Count() > 1);
+		if (duplicate != null)
+			throw new ArgumentException(LocalizedStrings.HasDuplicates.Put(duplicate.Key), nameof(value));
+
+		OnPropertyChanged(propName);
+
+		return arr;
+	}
+
+	private IEnumerable<MessageTypes> _supportedInMessages = [];
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual IEnumerable<MessageTypes> SupportedInMessages
+	{
+		get => _supportedInMessages;
+		set => _supportedInMessages = CheckDuplicate(value, nameof(SupportedInMessages));
+	}
+
+	private IEnumerable<MessageTypes> _notSupportedResultMessages = [];
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual IEnumerable<MessageTypes> NotSupportedResultMessages
+	{
+		get => _notSupportedResultMessages;
+		set => _notSupportedResultMessages = CheckDuplicate(value, nameof(NotSupportedResultMessages));
+	}
+
+	private readonly CachedSynchronizedSet<MessageTypeInfo> _possibleSupportedMessages = [];
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual IEnumerable<MessageTypeInfo> PossibleSupportedMessages
+	{
+		get => _possibleSupportedMessages.Cache;
+		set
+		{
+			if (value == null)
+				throw new ArgumentNullException(nameof(value));
+
+			var duplicate = value.GroupBy(m => m.Type).FirstOrDefault(g => g.Count() > 1);
+			if (duplicate != null)
+				throw new ArgumentException(LocalizedStrings.HasDuplicates.Put(duplicate.Key), nameof(value));
+
+			_possibleSupportedMessages.Clear();
+			_possibleSupportedMessages.AddRange(value);
+
+			OnPropertyChanged();
+
+			SupportedInMessages = [.. value.Select(t => t.Type)];
+		}
+	}
+
+	private readonly CachedSynchronizedSet<DataType> _supportedMarketDataTypes = [];
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	internal IEnumerable<DataType> SupportedMarketDataTypes
+	{
+		get => _supportedMarketDataTypes.Cache;
+		set
+		{
+			if (value == null)
+				throw new ArgumentNullException(nameof(value));
+
+			var duplicate = value.GroupBy(m => m).FirstOrDefault(g => g.Count() > 1);
+			if (duplicate != null)
+				throw new ArgumentException(LocalizedStrings.HasDuplicates.Put(duplicate.Key), nameof(value));
+
+			_supportedMarketDataTypes.Clear();
+			_supportedMarketDataTypes.AddRange(value);
+
+			OnPropertyChanged();
+		}
+	}
+
+	/// <inheritdoc />
+	public virtual IAsyncEnumerable<DataType> GetSupportedMarketDataTypesAsync(SecurityId securityId, DateTime? from, DateTime? to)
+		=> SupportedMarketDataTypes.ToAsyncEnumerable();
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual IEnumerable<Level1Fields> CandlesBuildFrom => [];
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool CheckTimeFrameByRequest => false;
+
+	private TimeSpan _heartbeatInterval = TimeSpan.Zero;
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.HeartBeatKey,
+		Description = LocalizedStrings.HeartBeatDescKey,
+		GroupName = LocalizedStrings.AdaptersKey,
+		Order = 300)]
+	public TimeSpan HeartbeatInterval
+	{
+		get => _heartbeatInterval;
+		set
+		{
+			if (value < TimeSpan.Zero)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
+
+			_heartbeatInterval = value;
+		}
+	}
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool IsNativeIdentifiersPersistable => true;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool IsNativeIdentifiers => false;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool IsFullCandlesOnly => true;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool IsSupportSubscriptions => true;
+
+	/// <inheritdoc />
+	public virtual bool IsSupportCandlesUpdates(MarketDataMessage subscription) => false;
+
+	/// <inheritdoc />
+	public virtual bool IsSupportCandlesPriceLevels(MarketDataMessage subscription) => false;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual MessageAdapterCategories Categories { get; }
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual string StorageName { get; }
 
 	/// <summary>
-	/// Базовый адаптер, конвертирующий сообщения <see cref="Message"/> в команды торговой системы и обратно.
+	/// Bit process, which can run the adapter.
 	/// </summary>
-	public abstract class MessageAdapter : BaseLogReceiver, IMessageAdapter
+	[Browsable(false)]
+	public Platforms Platform { get; protected set; }
+
+	/// <summary>
+	/// Feature name.
+	/// </summary>
+	[Browsable(false)]
+	public virtual string FeatureName => string.Empty;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual IEnumerable<int> SupportedOrderBookDepths => [];
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool IsSupportOrderBookIncrements => false;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool IsSupportExecutionsPnL => false;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool IsSecurityNewsOnly => false;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual Type OrderConditionType => GetType()
+		.GetAttribute<OrderConditionAttribute>()?
+		.ConditionType;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool HeartbeatBeforeConnect => false;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual Uri Icon => GetType().TryGetIconUrl();
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool IsAutoReplyOnTransactonalUnsubscription => false;
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.EnqueueSubscriptionsKey,
+		Description = LocalizedStrings.EnqueueSubscriptionsDescKey,
+		GroupName = LocalizedStrings.AdaptersKey,
+		Order = 301)]
+	public virtual bool EnqueueSubscriptions { get; set; }
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool IsSupportTransactionLog => false;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool IsReplaceCommandEditCurrent => false;
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ReConnectionSettingsKey,
+		Description = LocalizedStrings.ReConnectionDescKey,
+		GroupName = LocalizedStrings.ConnectionKey)]
+	public ReConnectionSettings ReConnectionSettings { get; } = new ReConnectionSettings();
+
+	private IdGenerator _transactionIdGenerator;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public IdGenerator TransactionIdGenerator
 	{
-		/// <summary>
-		/// Ожидание выполнения некоего действия, связанного с ключом.
-		/// </summary>
-		private class CodeTimeOut<T>
-			//where T : class
+		get => _transactionIdGenerator;
+		set => _transactionIdGenerator = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool ExtraSetup => false;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool UseInChannel => true;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool UseOutChannel => true;
+
+	private Func<Message, CancellationToken, ValueTask> _newOutMessageAsync;
+
+	/// <inheritdoc />
+	public event Func<Message, CancellationToken, ValueTask> NewOutMessageAsync
+	{
+		add => _newOutMessageAsync += value;
+		remove => _newOutMessageAsync -= value;
+	}
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual string[] AssociatedBoards => [];
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual TimeSpan DisconnectTimeout { get; } = TimeSpan.FromSeconds(5);
+
+	private int _maxParallelMessages = 5;
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ParallelKey,
+		Description = LocalizedStrings.ParallelDescKey,
+		GroupName = LocalizedStrings.AdaptersKey,
+		Order = 310)]
+	public int MaxParallelMessages
+	{
+		get => _maxParallelMessages;
+		set
 		{
-			private readonly CachedSynchronizedDictionary<T, TimeSpan> _registeredKeys = new CachedSynchronizedDictionary<T, TimeSpan>();
+			if (value < 1)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
 
-			private TimeSpan _timeOut = TimeSpan.FromSeconds(10);
+			_maxParallelMessages = value;
+		}
+	}
 
-			/// <summary>
-			/// Ограничение по времени, в течении которого должен отработать действие.
-			/// </summary>
-			/// <remarks>
-			/// Значение по умолчанию равно 10 секундам.
-			/// </remarks>
-			public TimeSpan TimeOut
+	private TimeSpan _faultDelay = TimeSpan.FromSeconds(2);
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.FaultDelayKey,
+		Description = LocalizedStrings.FaultDelayDescKey,
+		GroupName = LocalizedStrings.AdaptersKey,
+		Order = 310)]
+	public TimeSpan FaultDelay
+	{
+		get => _faultDelay;
+		set
+		{
+			if (value < TimeSpan.Zero)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
+
+			_faultDelay = value;
+		}
+	}
+
+	private IFileSystem _fileSystem = Extensions.DefaultFileSystem;
+
+	/// <summary>
+	/// <see cref="IFileSystem"/>
+	/// </summary>
+	[Browsable(false)]
+	public IFileSystem FileSystem
+	{
+		get => _fileSystem;
+		set => _fileSystem = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	/// <summary>
+	/// Validate the specified security id is supported by the adapter and subscription can be done.
+	/// </summary>
+	/// <param name="secId"><see cref="SecurityId"/>.</param>
+	/// <returns>Check result.</returns>
+	protected virtual bool ValidateSecurityId(SecurityId secId)
+	{
+		if (secId == SecurityId.News)
+			return SupportedMarketDataTypes.Contains(DataType.News);
+
+		var boards = AssociatedBoards;
+
+		if (boards.Length > 0)
+			return boards.Any(b => secId.IsAssociated(b));
+
+		return false;
+	}
+
+	/// <inheritdoc />
+	public virtual async ValueTask SendInMessageAsync(Message message, CancellationToken cancellationToken)
+	{
+		if (message.Type == MessageTypes.Connect && !Platform.IsCompatible())
+		{
+			await SendOutMessageAsync(new ConnectMessage
 			{
-				get { return _timeOut; }
-				set
+				Error = new InvalidOperationException(LocalizedStrings.BitSystemIncompatible.Put(GetType().Name, Platform))
+			}, cancellationToken);
+
+			return;
+		}
+
+		InitMessageLocalTime(message);
+
+		try
+		{
+			if (message.Type == MessageTypes.MarketData && AssociatedBoards.Length > 0)
+			{
+				var mdMsg = (MarketDataMessage)message;
+				var secId = mdMsg.SecurityId;
+
+				if (!ValidateSecurityId(secId))
 				{
-					if (value <= TimeSpan.Zero)
-						throw new ArgumentOutOfRangeException("value", value, LocalizedStrings.IntervalMustBePositive);
-
-					_timeOut = value;
-				}
-			}
-
-			/// <summary>
-			/// Запустить ожидание для ключа.
-			/// </summary>
-			/// <param name="key">Ключ.</param>
-			public void StartTimeOut(T key)
-			{
-				if (key.IsNull(true))
-					throw new ArgumentNullException("key");
-
-				_registeredKeys.SafeAdd(key, s => TimeOut);
-			}
-
-			/// <summary>
-			/// Обработать событие изменения рыночного времени и получить те ключи, ожидание для которых закончего.
-			/// </summary>
-			/// <param name="diff">Изменение рыночного времени.</param>
-			/// <returns>Ключи.</returns>
-			public IEnumerable<T> ProcessTime(TimeSpan diff)
-			{
-				if (_registeredKeys.Count == 0)
-					return Enumerable.Empty<T>();
-
-				return _registeredKeys.SyncGet(d =>
-				{
-					var timeOutCodes = new List<T>();
-
-					foreach (var pair in d.CachedPairs)
-					{
-						d[pair.Key] -= diff;
-
-						if (d[pair.Key] > TimeSpan.Zero)
-							continue;
-
-						timeOutCodes.Add(pair.Key);
-						d.Remove(pair.Key);
-					}
-
-					return timeOutCodes;
-				});
-			}
-		}
-
-		private sealed class QuoteChangeDepthBuilder
-		{
-			private readonly Dictionary<SecurityId, QuoteChangeMessage> _feeds = new Dictionary<SecurityId, QuoteChangeMessage>();
-
-			private readonly string _securityCode;
-			private readonly string _boardCode;
-
-			public QuoteChangeDepthBuilder(string securityCode, string boardCode)
-			{
-				_securityCode = securityCode;
-				_boardCode = boardCode;
-			}
-
-			public QuoteChangeMessage Process(QuoteChangeMessage message)
-			{
-				_feeds[message.SecurityId] = message;
-
-				var bids = _feeds.SelectMany(f => f.Value.Bids).ToArray();
-				var asks = _feeds.SelectMany(f => f.Value.Asks).ToArray();
-
-				return new QuoteChangeMessage
-				{
-					SecurityId = new SecurityId
-					{
-						SecurityCode = _securityCode,
-						BoardCode = _boardCode
-					},
-					ServerTime = message.ServerTime,
-					LocalTime = message.LocalTime,
-					Bids = bids,
-					Asks = asks
-				};
-			}
-		}
-
-		private sealed class Level1DepthBuilder
-		{
-			private readonly SecurityId _securityId;
-
-			private readonly QuoteChange _bid = new QuoteChange(Sides.Buy, 0, 0);
-			private readonly QuoteChange _ask = new QuoteChange(Sides.Sell, 0, 0);
-
-			private DateTime _localTime;
-			private DateTimeOffset _serverTime;
-
-			public bool HasDepth { get; set; }
-
-			public QuoteChangeMessage QuoteChange
-			{
-				get
-				{
-					var bids = _bid.Price == 0 || _bid.Volume == 0 ? Enumerable.Empty<QuoteChange>() : new[] { _bid.Clone() };
-					var asks = _ask.Price == 0 || _ask.Volume == 0 ? Enumerable.Empty<QuoteChange>() : new[] { _ask.Clone() };
-
-					return new QuoteChangeMessage
-					{
-						SecurityId = _securityId,
-						ServerTime = _serverTime,
-						LocalTime = _localTime,
-						Bids = bids,
-						Asks = asks
-					};
-				}
-			}
-
-			public Level1DepthBuilder(SecurityId securityId)
-			{
-				_securityId = securityId;
-
-				_localTime = DateTime.MinValue;
-				_serverTime = DateTimeOffset.MinValue;
-			}
-
-			public bool Process(Level1ChangeMessage message)
-			{
-				if (HasDepth)
-					return false;
-
-				var bidPrice = message.Changes.TryGetValue(Level1Fields.BestBidPrice);
-				var askPrice = message.Changes.TryGetValue(Level1Fields.BestAskPrice);
-
-				if (bidPrice == null && askPrice == null)
-					return false;
-
-				var bidVolume = message.Changes.TryGetValue(Level1Fields.BestBidVolume);
-				var askVolume = message.Changes.TryGetValue(Level1Fields.BestAskVolume);
-
-				_bid.Price = (decimal?)bidPrice ?? 0m;
-				_bid.Volume = (decimal?)bidVolume ?? 0m;
-
-				_ask.Price = (decimal?)askPrice ?? 0m;
-				_ask.Volume = (decimal?)askVolume ?? 0m;
-
-				_localTime = message.LocalTime;
-				_serverTime = message.ServerTime;
-
-				return true;
-			}
-		}
-
-		private readonly SynchronizedDictionary<string, QuoteChangeDepthBuilder> _quoteChangeDepthBuilders = new SynchronizedDictionary<string, QuoteChangeDepthBuilder>();
-		private readonly SynchronizedDictionary<SecurityId, Level1DepthBuilder> _level1DepthBuilders = new SynchronizedDictionary<SecurityId, Level1DepthBuilder>();
-
-		//private readonly bool _checkLicense;
-
-		private DateTime _prevTime;
-
-		private readonly CodeTimeOut<long> _secLookupTimeOut = new CodeTimeOut<long>();
-		private readonly CodeTimeOut<long> _pfLookupTimeOut = new CodeTimeOut<long>();
-
-		/// <summary>
-		/// Инициализировать <see cref="MessageAdapter"/>.
-		/// </summary>
-		/// <param name="transactionIdGenerator">Генератор идентификаторов транзакций.</param>
-		protected MessageAdapter(IdGenerator transactionIdGenerator/*, bool checkLicense = true*/)
-		{
-			if (transactionIdGenerator == null)
-				throw new ArgumentNullException("transactionIdGenerator");
-
-			Platform = Platforms.AnyCPU;
-			//_checkLicense = checkLicense;
-
-			TransactionIdGenerator = transactionIdGenerator;
-			SecurityClassInfo = new Dictionary<string, RefPair<SecurityTypes, string>>();
-
-			CreateDepthFromLevel1 = true;
-
-			//IsMarketDataEnabled = IsTransactionEnabled = true;
-		}
-
-		private MessageTypes[] _supportedMessages = ArrayHelper.Empty<MessageTypes>();
-
-		/// <summary>
-		/// Поддерживаемые типы сообщений, который может обработать адаптер.
-		/// </summary>
-		[Browsable(false)]
-		public virtual MessageTypes[] SupportedMessages
-		{
-			get { return _supportedMessages; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
-
-				_supportedMessages = value;
-			}
-		}
-
-		/// <summary>
-		/// Проверить введенные параметры на валидность.
-		/// </summary>
-		[Browsable(false)]
-		public virtual bool IsValid { get { return true; } }
-
-		/// <summary>
-		/// Описание классов инструментов, в зависимости от которых будут проставляться параметры в <see cref="SecurityMessage.SecurityType"/> и <see cref="SecurityId.BoardCode"/>.
-		/// </summary>
-		[Browsable(false)]
-		public IDictionary<string, RefPair<SecurityTypes, string>> SecurityClassInfo { get; private set; }
-
-		private TimeSpan _heartbeatInterval = TimeSpan.Zero;
-
-		/// <summary>
-		/// Интервал оповещения сервера о том, что подключение еще живое.
-		/// Значение <see cref="TimeSpan.Zero"/> означает выключенное оповещение.
-		/// </summary>
-		[CategoryLoc(LocalizedStrings.Str186Key)]
-		[DisplayNameLoc(LocalizedStrings.Str192Key)]
-		[DescriptionLoc(LocalizedStrings.Str193Key)]
-		public TimeSpan HeartbeatInterval
-		{
-			get { return _heartbeatInterval; }
-			set
-			{
-				if (value < TimeSpan.Zero)
-					throw new ArgumentOutOfRangeException();
-
-				_heartbeatInterval = value;
-			}
-		}
-
-		/// <summary>
-		/// Создавать объединенный инструмент для инструментов с разных торговых площадок.
-		/// </summary>
-		[CategoryLoc(LocalizedStrings.SecuritiesKey)]
-		[DisplayNameLoc(LocalizedStrings.Str197Key)]
-		[DescriptionLoc(LocalizedStrings.Str198Key)]
-		[PropertyOrder(1)]
-		public bool CreateAssociatedSecurity { get; set; }
-
-		private string _associatedBoardCode = "ALL";
-
-		/// <summary>
-		/// Код площадки для объединенного инструмента.
-		/// </summary>
-		[CategoryLoc(LocalizedStrings.SecuritiesKey)]
-		[DisplayNameLoc(LocalizedStrings.Str197Key)]
-		[DescriptionLoc(LocalizedStrings.Str199Key)]
-		[PropertyOrder(10)]
-		public string AssociatedBoardCode
-		{
-			get { return _associatedBoardCode; }
-			set { _associatedBoardCode = value; }
-		}
-
-		/// <summary>
-		/// Обновлять стакан для инструмента при появлении сообщения <see cref="Level1ChangeMessage"/>.
-		/// По умолчанию включено.
-		/// </summary>
-		[CategoryLoc(LocalizedStrings.SecuritiesKey)]
-		[DisplayNameLoc(LocalizedStrings.Str200Key)]
-		[DescriptionLoc(LocalizedStrings.Str201Key)]
-		[PropertyOrder(20)]
-		public bool CreateDepthFromLevel1 { get; set; }
-
-		/// <summary>
-		/// Требуется ли дополнительное сообщение <see cref="SecurityLookupMessage"/> для получения списка инструментов.
-		/// </summary>
-		[Browsable(false)]
-		public virtual bool SecurityLookupRequired
-		{
-			get { return SupportedMessages.Contains(MessageTypes.SecurityLookup); }
-		}
-
-		/// <summary>
-		/// Требуется ли дополнительное сообщение <see cref="PortfolioLookupMessage"/> для получения списка портфелей и позиций.
-		/// </summary>
-		[Browsable(false)]
-		public virtual bool PortfolioLookupRequired
-		{
-			get { return SupportedMessages.Contains(MessageTypes.PortfolioLookup); }
-		}
-
-		/// <summary>
-		/// Требуется ли дополнительное сообщение <see cref="OrderStatusMessage"/> для получения списка заявок и собственных сделок.
-		/// </summary>
-		[Browsable(false)]
-		public virtual bool OrderStatusRequired
-		{
-			get { return SupportedMessages.Contains(MessageTypes.OrderStatus); }
-		}
-
-		/// <summary>
-		/// Поддерживается ли торговой системой поиск инструментов.
-		/// </summary>
-		protected virtual bool IsSupportNativeSecurityLookup
-		{
-			get { return false; }
-		}
-
-		/// <summary>
-		/// Поддерживается ли торговой системой поиск портфелей.
-		/// </summary>
-		protected virtual bool IsSupportNativePortfolioLookup
-		{
-			get { return false; }
-		}
-
-		/// <summary>
-		/// Разрядность процесса, в котором может работать адаптер. По-умолчанию равно <see cref="Platforms.AnyCPU"/>.
-		/// </summary>
-		[Browsable(false)]
-		public Platforms Platform { get; protected set; }
-
-		/// <summary>
-		/// Создать для заявки типа <see cref="OrderTypes.Conditional"/> условие, которое поддерживается подключением.
-		/// </summary>
-		/// <returns>Условие для заявки. Если подключение не поддерживает заявки типа <see cref="OrderTypes.Conditional"/>, то будет возвращено null.</returns>
-		public virtual OrderCondition CreateOrderCondition()
-		{
-			return null;
-		}
-
-		private readonly ReConnectionSettings _reConnectionSettings = new ReConnectionSettings();
-
-		/// <summary>
-		/// Настройки механизма отслеживания соединений <see cref="IMessageAdapter"/> с торговом системой.
-		/// </summary>
-		public ReConnectionSettings ReConnectionSettings
-		{
-			get { return _reConnectionSettings; }
-		}
-
-		private void CreateAssociatedSecurityQuotes(QuoteChangeMessage quoteMsg)
-		{
-			if (!CreateAssociatedSecurity)
-				return;
-
-			if (quoteMsg.SecurityId.IsDefault())
-				return;
-
-			var builder = _quoteChangeDepthBuilders
-				.SafeAdd(quoteMsg.SecurityId.SecurityCode, c => new QuoteChangeDepthBuilder(c, AssociatedBoardCode));
-
-			NewOutMessage.SafeInvoke(builder.Process(quoteMsg));
-		}
-
-		private SecurityId CloneSecurityId(SecurityId securityId)
-		{
-			return new SecurityId
-			{
-				SecurityCode = securityId.SecurityCode,
-				BoardCode = AssociatedBoardCode,
-				SecurityType = securityId.SecurityType,
-				Bloomberg = securityId.Bloomberg,
-				Cusip = securityId.Cusip,
-				IQFeed = securityId.IQFeed,
-				InteractiveBrokers = securityId.InteractiveBrokers,
-				Isin = securityId.Isin,
-				Native = securityId.Native,
-				Plaza = securityId.Plaza,
-				Ric = securityId.Ric,
-				Sedol = securityId.Sedol,
-			};
-		}
-
-		private IdGenerator _transactionIdGenerator;
-
-		/// <summary>
-		/// Генератор идентификаторов транзакций.
-		/// </summary>
-		[Browsable(false)]
-		public IdGenerator TransactionIdGenerator
-		{
-			get { return _transactionIdGenerator; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
-
-				_transactionIdGenerator = value;
-			}
-		}
-
-		/// <summary>
-		/// Ограничение по времени, в течении которого должен отработать поиск инструментов или портфелей.
-		/// </summary>
-		/// <remarks>
-		/// Значение по умолчанию равно 10 секундам.
-		/// </remarks>
-		[Browsable(false)]
-		public TimeSpan LookupTimeOut
-		{
-			get { return _secLookupTimeOut.TimeOut; }
-			set
-			{
-				_secLookupTimeOut.TimeOut = value;
-				_pfLookupTimeOut.TimeOut = value;
-			}
-		}
-
-		/// <summary>
-		/// Событие получения исходящего сообщения.
-		/// </summary>
-		public event Action<Message> NewOutMessage;
-
-		bool IMessageChannel.IsOpened
-		{
-			get { return true; }
-		}
-
-		void IMessageChannel.Open()
-		{
-		}
-
-		void IMessageChannel.Close()
-		{
-		}
-
-		/// <summary>
-		/// Отправить входящее сообщение.
-		/// </summary>
-		/// <param name="message">Сообщение.</param>
-		public void SendInMessage(Message message)
-		{
-			//if (!CheckLicense(message))
-			//	return;
-
-			if (message.Type == MessageTypes.Connect)
-			{
-				if (!Platform.IsCompatible())
-				{
-					SendOutMessage(new ConnectMessage
-					{
-						Error = new InvalidOperationException(LocalizedStrings.Str169Params.Put(GetType().Name, Platform))
-					});
-
+					var boardCode = AssociatedBoards.First();
+					await SendOutMessageAsync(mdMsg.TransactionId.CreateSubscriptionResponse(new NotSupportedException(LocalizedStrings.WrongSecurityBoard.Put(secId, boardCode, $"{secId.SecurityCode}@{boardCode}"))), cancellationToken);
 					return;
 				}
 			}
 
-			InitMessageLocalTime(message);
+			await OnSendInMessageAsync(message, cancellationToken);
 
-			// при отключенном состоянии пропускаем только TimeMessage
-			// остальные типы сообщений могут использоваться (например, в эмуляторе)
-			//if ((_currState == ConnectionStates.Disconnecting || _currState == ConnectionStates.Disconnected) && message.Type == MessageTypes.Time)
-			//	return;
-
-			switch (message.Type)
+			if (IsAutoReplyOnTransactonalUnsubscription)
 			{
-				case MessageTypes.PortfolioLookup:
-				{
-					if (!IsSupportNativePortfolioLookup)
-						_pfLookupTimeOut.StartTimeOut(((PortfolioLookupMessage)message).TransactionId);
-
-					break;
-				}
-				case MessageTypes.SecurityLookup:
-				{
-					if (!IsSupportNativeSecurityLookup)
-						_secLookupTimeOut.StartTimeOut(((SecurityLookupMessage)message).TransactionId);
-
-					break;
-				}
-			}
-
-			try
-			{
-				OnSendInMessage(message);
-			}
-			catch (Exception ex)
-			{
-				this.AddErrorLog(ex);
-
 				switch (message.Type)
 				{
-					case MessageTypes.Connect:
-						SendOutMessage(new ConnectMessage { Error = ex });
-						return;
-
-					case MessageTypes.Disconnect:
-						SendOutMessage(new DisconnectMessage { Error = ex });
-						return;
-
-					case MessageTypes.OrderRegister:
-					{
-						var execMsg = ((OrderRegisterMessage)message).ToExecutionMessage();
-						execMsg.Error = ex;
-						execMsg.OrderState = OrderStates.Failed;
-						SendOutMessage(execMsg);
-
-						return;
-					}
-
-					case MessageTypes.OrderReplace:
-					{
-						var execMsg = ((OrderReplaceMessage)message).ToExecutionMessage();
-						execMsg.Error = ex;
-						execMsg.OrderState = OrderStates.Failed;
-						SendOutMessage(execMsg);
-
-						return;
-					}
-
-					case MessageTypes.OrderPairReplace:
-					{
-						var execMsg = ((OrderPairReplaceMessage)message).ToExecutionMessage();
-						execMsg.Error = ex;
-						execMsg.OrderState = OrderStates.Failed;
-						SendOutMessage(execMsg);
-
-						return;
-					}
-
-					case MessageTypes.OrderCancel:
-					{
-						var execMsg = ((OrderCancelMessage)message).ToExecutionMessage();
-						execMsg.Error = ex;
-						execMsg.OrderState = OrderStates.Failed;
-						SendOutMessage(execMsg);
-
-						return;
-					}
-
-					case MessageTypes.OrderGroupCancel:
-					{
-						var execMsg = ((OrderGroupCancelMessage)message).ToExecutionMessage();
-						execMsg.Error = ex;
-						execMsg.OrderState = OrderStates.Failed;
-						SendOutMessage(execMsg);
-
-						return;
-					}
-
-					case MessageTypes.MarketData:
-					{
-						var reply = (MarketDataMessage)message.Clone();
-						reply.OriginalTransactionId = reply.TransactionId;
-						reply.Error = ex;
-						SendOutMessage(reply);
-						return;
-					}
-
-					case MessageTypes.SecurityLookup:
-					{
-						var lookupMsg = (SecurityLookupMessage)message;
-						SendOutMessage(new SecurityLookupResultMessage
-						{
-							OriginalTransactionId = lookupMsg.TransactionId,
-							Error = ex
-						});
-						return;
-					}
-
 					case MessageTypes.PortfolioLookup:
+					case MessageTypes.OrderStatus:
 					{
-						var lookupMsg = (PortfolioLookupMessage)message;
-						SendOutMessage(new PortfolioLookupResultMessage
-						{
-							OriginalTransactionId = lookupMsg.TransactionId,
-							Error = ex
-						});
-						return;
-					}
+						var subscrMsg = (ISubscriptionMessage)message;
 
-					case MessageTypes.ChangePassword:
-					{
-						var pwdMsg = (ChangePasswordMessage)message;
-						SendOutMessage(new ChangePasswordMessage
-						{
-							OriginalTransactionId = pwdMsg.TransactionId,
-							Error = ex
-						});
-						return;
-					}
-				}
+						if (!subscrMsg.IsSubscribe)
+							await SendOutMessageAsync(new SubscriptionResponseMessage { OriginalTransactionId = subscrMsg.TransactionId }, cancellationToken);
 
-				SendOutError(ex);
-			}
-
-			if (message.IsBack)
-			{
-				message.IsBack = false;
-
-				// time msg should be return back
-				SendOutMessage(message);
-			}
-		}
-
-		//private bool CheckLicense(Message message)
-		//{
-		//	if (!_checkLicense)
-		//		return true;
-
-		//	switch (message.Type)
-		//	{
-		//		case MessageTypes.OrderRegister:
-		//		{
-		//			var regMsg = (OrderRegisterMessage)message;
-
-		//			var msg = LicenseHelper.ValidateLicense(GetType(), regMsg.PortfolioName);
-
-		//			if (msg != null)
-		//			{
-		//				SendOutMessage(new ExecutionMessage
-		//				{
-		//					OriginalTransactionId = regMsg.TransactionId,
-		//					OrderState = OrderStates.Failed,
-		//					ExecutionType = ExecutionTypes.Order,
-		//					Error = new InvalidOperationException(msg)
-		//				});
-
-		//				return false;
-		//			}
-					
-		//			break;
-		//		}
-		//		case MessageTypes.Connect:
-		//		{
-		//			if (_checkLicense)
-		//			{
-		//				var msg = GetType().ValidateLicense();
-
-		//				if (msg != null)
-		//				{
-		//					SendOutMessage(new ConnectMessage { Error = new InvalidOperationException(msg) });
-		//					return false;	
-		//				}
-		//			}
-
-		//			break;
-		//		}
-		//	}
-
-		//	return true;
-		//}
-
-		/// <summary>
-		/// Отправить сообщение.
-		/// </summary>
-		/// <param name="message">Сообщение.</param>
-		protected abstract void OnSendInMessage(Message message);
-
-		/// <summary>
-		/// Отправить исходящее сообщение, вызвав событие <see cref="NewOutMessage"/>.
-		/// </summary>
-		/// <param name="message">Сообщение.</param>
-		public virtual void SendOutMessage(Message message)
-		{
-			InitMessageLocalTime(message);
-
-			switch (message.Type)
-			{
-				case MessageTypes.Security:
-				{
-					NewOutMessage.SafeInvoke(message);
-
-					if (!CreateAssociatedSecurity)
 						break;
-
-					var clone = (SecurityMessage)message.Clone();
-					clone.SecurityId = CloneSecurityId(clone.SecurityId);
-					NewOutMessage.SafeInvoke(clone);
-
-					break;
-				}
-
-				case MessageTypes.Level1Change:
-				{
-					NewOutMessage.SafeInvoke(message);
-
-					var l1Msg = (Level1ChangeMessage)message;
-
-					if (l1Msg.SecurityId.IsDefault())
-						break;
-
-					if (CreateAssociatedSecurity)
-					{
-						// обновление BestXXX для ALL из конкретных тикеров
-						var clone = (Level1ChangeMessage)l1Msg.Clone();
-						clone.SecurityId = CloneSecurityId(clone.SecurityId);
-						NewOutMessage.SafeInvoke(clone);
 					}
-
-					if (CreateDepthFromLevel1)
-					{
-						// генерация стакана из Level1
-						var builder = _level1DepthBuilders.SafeAdd(l1Msg.SecurityId, c => new Level1DepthBuilder(c));
-
-						if (builder.Process(l1Msg))
-						{
-							var quoteMsg = builder.QuoteChange;
-
-							NewOutMessage.SafeInvoke(quoteMsg);
-							CreateAssociatedSecurityQuotes(quoteMsg);
-						}
-					}
-
-					break;
-				}
-
-				case MessageTypes.QuoteChange:
-				{
-					var quoteMsg = (QuoteChangeMessage)message;
-
-					NewOutMessage.SafeInvoke(quoteMsg);
-
-					if (CreateDepthFromLevel1)
-						_level1DepthBuilders.SafeAdd(quoteMsg.SecurityId, c => new Level1DepthBuilder(c)).HasDepth = true;
-
-					CreateAssociatedSecurityQuotes(quoteMsg);
-					break;
-				}
-
-				case MessageTypes.Execution:
-				{
-					NewOutMessage.SafeInvoke(message);
-
-					if (!CreateAssociatedSecurity)
-						break;
-
-					var execMsg = (ExecutionMessage)message;
-
-					if (execMsg.SecurityId.IsDefault())
-						break;
-
-					switch (execMsg.ExecutionType)
-					{
-						case ExecutionTypes.Tick:
-						case ExecutionTypes.OrderLog:
-						{
-							var clone = (ExecutionMessage)message.Clone();
-							clone.SecurityId = CloneSecurityId(clone.SecurityId);
-							NewOutMessage.SafeInvoke(clone);
-							break;
-						}
-					}
-
-					break;
-				}
-
-				default:
-				{
-					if (_prevTime != DateTime.MinValue)
-					{
-						var diff = message.LocalTime - _prevTime;
-
-						//if (message.Type != MessageTypes.Time && diff >= MarketTimeChangedInterval)
-						//{
-						//	SendOutMessage(new TimeMessage
-						//	{
-						//		LocalTime = message.LocalTime,
-						//		ServerTime = message.GetServerTime(),
-						//	});
-						//}
-
-						_secLookupTimeOut
-							.ProcessTime(diff)
-							.ForEach(id => SendOutMessage(new SecurityLookupResultMessage { OriginalTransactionId = id }));
-
-						_pfLookupTimeOut
-							.ProcessTime(diff)
-							.ForEach(id => SendOutMessage(new PortfolioLookupResultMessage { OriginalTransactionId = id }));
-
-						//ProcessReconnection(diff);
-					}
-
-					_prevTime = message.LocalTime;
-					NewOutMessage.SafeInvoke(message);
-					break;
 				}
 			}
 		}
-
-		/// <summary>
-		/// Инициализировать метку локального времени для <see cref="Message"/>.
-		/// </summary>
-		/// <param name="message">Сообщение.</param>
-		private void InitMessageLocalTime(Message message)
+		catch (Exception ex)
 		{
-			if (message.LocalTime.IsDefault())
-				message.LocalTime = CurrentTime.LocalDateTime;
-		}
-
-		/// <summary>
-		/// Создать сообщение <see cref="ErrorMessage"/> и передать его в метод <see cref="SendOutMessage"/>.
-		/// </summary>
-		/// <param name="description">Описание ошибки.</param>
-		protected void SendOutError(string description)
-		{
-			SendOutError(new InvalidOperationException(description));
-		}
-
-		/// <summary>
-		/// Создать сообщение <see cref="ErrorMessage"/> и передать его в метод <see cref="SendOutMessage"/>.
-		/// </summary>
-		/// <param name="error">Описание ошибки.</param>
-		protected void SendOutError(Exception error)
-		{
-			SendOutMessage(new ErrorMessage { Error = error });
-		}
-
-		/// <summary>
-		/// Создать сообщение <see cref="SecurityMessage"/> и передать его в метод <see cref="SendOutMessage"/>.
-		/// </summary>
-		/// <param name="securityId">Идентификатор инструмента.</param>
-		protected void SendOutSecurityMessage(SecurityId securityId)
-		{
-			SendOutMessage(new SecurityMessage { SecurityId = securityId });
-		}
-
-		/// <summary>
-		/// Создать сообщение <see cref="SecurityMessage"/> и передать его в метод <see cref="SendOutMessage"/>.
-		/// </summary>
-		/// <param name="originalTransactionId">Идентификатор первоначального сообщения, для которого данное сообщение является ответом..</param>
-		protected void SendOutMarketDataNotSupported(long originalTransactionId)
-		{
-			SendOutMessage(new MarketDataMessage { OriginalTransactionId = originalTransactionId, IsNotSupported = true });
-		}
-
-		/// <summary>
-		/// Проверить, установлено ли еще соединение. Проверяется только в том случае, если было успешно установлено подключение.
-		/// </summary>
-		/// <returns><see langword="true"/>, если соединение еще установлено, <see langword="false"/>, если торговая система разорвала подключение.</returns>
-		public virtual bool IsConnectionAlive()
-		{
-			return true;
-		}
-
-		/// <summary>
-		/// Загрузить настройки.
-		/// </summary>
-		/// <param name="storage">Хранилище настроек.</param>
-		public override void Load(SettingsStorage storage)
-		{
-			HeartbeatInterval = storage.GetValue<TimeSpan>("HeartbeatInterval");
-			SupportedMessages = storage.GetValue<int[]>("SupportedMessages").Select(i => (MessageTypes)i).ToArray();
-
-			CreateAssociatedSecurity = storage.GetValue("CreateAssociatedSecurity", CreateAssociatedSecurity);
-			AssociatedBoardCode = storage.GetValue("AssociatedBoardCode", AssociatedBoardCode);
-			CreateDepthFromLevel1 = storage.GetValue("CreateDepthFromLevel1", CreateDepthFromLevel1);
-
-			base.Load(storage);
-		}
-
-		/// <summary>
-		/// Сохранить настройки.
-		/// </summary>
-		/// <param name="storage">Хранилище настроек.</param>
-		public override void Save(SettingsStorage storage)
-		{
-			storage.SetValue("HeartbeatInterval", HeartbeatInterval);
-			storage.SetValue("SupportedMessages", SupportedMessages.Select(t => (int)t).ToArray());
-
-			storage.SetValue("CreateAssociatedSecurity", CreateAssociatedSecurity);
-			storage.SetValue("AssociatedBoardCode", AssociatedBoardCode);
-			storage.SetValue("CreateDepthFromLevel1", CreateDepthFromLevel1);
-
-			base.Save(storage);
+			await SendOutMessageAsync(message.CreateErrorResponse(ex, this), cancellationToken);
 		}
 	}
 
 	/// <summary>
-	/// Специальный адаптер, который передает сразу на выход все входящие сообщения.
+	/// Send in message handler.
 	/// </summary>
-	public class PassThroughMessageAdapter : MessageAdapter
+	/// <param name="message"><see cref="Message"/></param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="ValueTask"/></returns>
+	protected virtual ValueTask OnSendInMessageAsync(Message message, CancellationToken cancellationToken)
 	{
-		/// <summary>
-		/// Создать <see cref="PassThroughMessageAdapter"/>.
-		/// </summary>
-		/// <param name="transactionIdGenerator">Генератор идентификаторов транзакций.</param>
-		public PassThroughMessageAdapter(IdGenerator transactionIdGenerator)
-			: base(transactionIdGenerator)
+		return message.Type switch
 		{
+			MessageTypes.Connect => ConnectAsync((ConnectMessage)message, cancellationToken),
+			MessageTypes.Disconnect => DisconnectAsync((DisconnectMessage)message, cancellationToken),
+			MessageTypes.Reset => ResetAsync((ResetMessage)message, cancellationToken),
+			MessageTypes.ChangePassword => ChangePasswordAsync((ChangePasswordMessage)message, cancellationToken),
+			MessageTypes.SecurityLookup => SecurityLookupAsync((SecurityLookupMessage)message, cancellationToken),
+			MessageTypes.PortfolioLookup => PortfolioLookupAsync((PortfolioLookupMessage)message, cancellationToken),
+			MessageTypes.BoardLookup => BoardLookupAsync((BoardLookupMessage)message, cancellationToken),
+			MessageTypes.OrderStatus => OrderStatusAsync((OrderStatusMessage)message, cancellationToken),
+			MessageTypes.OrderRegister => RegisterOrderAsync((OrderRegisterMessage)message, cancellationToken),
+			MessageTypes.OrderReplace => ReplaceOrderAsync((OrderReplaceMessage)message, cancellationToken),
+			MessageTypes.OrderCancel => CancelOrderAsync((OrderCancelMessage)message, cancellationToken),
+			MessageTypes.OrderGroupCancel => CancelOrderGroupAsync((OrderGroupCancelMessage)message, cancellationToken),
+			MessageTypes.Time => TimeAsync((TimeMessage)message, cancellationToken),
+			MessageTypes.MarketData => MarketDataAsync((MarketDataMessage)message, cancellationToken),
+			_ => throw SubscriptionResponseMessage.NotSupported,
+		};
+	}
+
+	/// <inheritdoc />
+	protected virtual ValueTask ConnectAsync(ConnectMessage connectMsg, CancellationToken cancellationToken)
+	{
+		return SendOutMessageAsync(new ConnectMessage(), cancellationToken);
+	}
+
+	/// <inheritdoc />
+	protected virtual ValueTask DisconnectAsync(DisconnectMessage disconnectMsg, CancellationToken cancellationToken)
+	{
+		return SendOutMessageAsync(new DisconnectMessage(), cancellationToken);
+	}
+
+	/// <inheritdoc />
+	protected virtual ValueTask ResetAsync(ResetMessage resetMsg, CancellationToken cancellationToken)
+	{
+		return SendOutMessageAsync(new ResetMessage(), cancellationToken);
+	}
+
+	/// <inheritdoc />
+	protected virtual ValueTask ChangePasswordAsync(ChangePasswordMessage pwdMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <inheritdoc />
+	protected virtual ValueTask SecurityLookupAsync(SecurityLookupMessage lookupMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <inheritdoc />
+	protected virtual ValueTask PortfolioLookupAsync(PortfolioLookupMessage lookupMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <inheritdoc />
+	protected virtual ValueTask BoardLookupAsync(BoardLookupMessage lookupMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <inheritdoc />
+	protected virtual ValueTask OrderStatusAsync(OrderStatusMessage statusMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <inheritdoc />
+	protected virtual ValueTask RegisterOrderAsync(OrderRegisterMessage regMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <inheritdoc />
+	protected virtual ValueTask ReplaceOrderAsync(OrderReplaceMessage replaceMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <inheritdoc />
+	protected virtual ValueTask CancelOrderAsync(OrderCancelMessage cancelMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <inheritdoc />
+	protected virtual ValueTask CancelOrderGroupAsync(OrderGroupCancelMessage cancelMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <inheritdoc />
+	protected virtual ValueTask TimeAsync(TimeMessage timeMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <inheritdoc />
+	protected virtual async ValueTask MarketDataAsync(MarketDataMessage mdMsg, CancellationToken cancellationToken)
+	{
+		if (mdMsg.IsSubscribe)
+		{
+			var now = CurrentTime;
+
+			var from = mdMsg.From;
+			var to = mdMsg.To;
+
+			if ((from > now && mdMsg.IsHistoryOnly()) || from > to)
+			{
+				await SendSubscriptionResultAsync(mdMsg, cancellationToken);
+				return;
+			}
 		}
 
-		/// <summary>
-		/// Отправить сообщение.
-		/// </summary>
-		/// <param name="message">Сообщение.</param>
-		protected override void OnSendInMessage(Message message)
+		var dataType = mdMsg.DataType2;
+
+		var task =
+				dataType == DataType.News 		? OnNewsSubscriptionAsync(mdMsg, cancellationToken)
+			: dataType == DataType.Level1 		? OnLevel1SubscriptionAsync(mdMsg, cancellationToken)
+			: dataType == DataType.Ticks 		? OnTicksSubscriptionAsync(mdMsg, cancellationToken)
+			: dataType == DataType.MarketDepth 	? OnMarketDepthSubscriptionAsync(mdMsg, cancellationToken)
+			: dataType == DataType.OrderLog 	? OnOrderLogSubscriptionAsync(mdMsg, cancellationToken)
+			: dataType.IsTFCandles 				? OnTFCandlesSubscriptionAsync(mdMsg, cancellationToken)
+			: dataType.IsCandles 				? OnCandlesSubscriptionAsync(mdMsg, cancellationToken)
+			: throw SubscriptionResponseMessage.NotSupported;
+
+		await task;
+	}
+
+	/// <summary>
+	/// Handles subscription request for news data.
+	/// Override to provide implementation for news subscription processing.
+	/// The default implementation throws <see cref="SubscriptionResponseMessage.NotSupported"/>.
+	/// </summary>
+	/// <param name="mdMsg">Market data subscription message.</param>
+	/// <param name="cancellationToken">Cancellation token to cancel the operation.</param>
+	/// <returns>A <see cref="ValueTask"/> representing the asynchronous operation.</returns>
+	protected virtual ValueTask OnNewsSubscriptionAsync(MarketDataMessage mdMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <summary>
+	/// Handles subscription request for level1 data.
+	/// Override to provide implementation for level1 subscription processing.
+	/// The default implementation throws <see cref="SubscriptionResponseMessage.NotSupported"/>.
+	/// </summary>
+	/// <param name="mdMsg">Market data subscription message.</param>
+	/// <param name="cancellationToken">Cancellation token to cancel the operation.</param>
+	/// <returns>A <see cref="ValueTask"/> representing the asynchronous operation.</returns>
+	protected virtual ValueTask OnLevel1SubscriptionAsync(MarketDataMessage mdMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <summary>
+	/// Handles subscription request for ticks data.
+	/// Override to provide implementation for ticks subscription processing.
+	/// The default implementation throws <see cref="SubscriptionResponseMessage.NotSupported"/>.
+	/// </summary>
+	/// <param name="mdMsg">Market data subscription message.</param>
+	/// <param name="cancellationToken">Cancellation token to cancel the operation.</param>
+	/// <returns>A <see cref="ValueTask"/> representing the asynchronous operation.</returns>
+	protected virtual ValueTask OnTicksSubscriptionAsync(MarketDataMessage mdMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <summary>
+	/// Handles subscription request for market depth data.
+	/// Override to provide implementation for market depth subscription processing.
+	/// The default implementation throws <see cref="SubscriptionResponseMessage.NotSupported"/>.
+	/// </summary>
+	/// <param name="mdMsg">Market data subscription message.</param>
+	/// <param name="cancellationToken">Cancellation token to cancel the operation.</param>
+	/// <returns>A <see cref="ValueTask"/> representing the asynchronous operation.</returns>
+	protected virtual ValueTask OnMarketDepthSubscriptionAsync(MarketDataMessage mdMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <summary>
+	/// Handles subscription request for order log (trades/transactions) data.
+	/// Override to provide implementation for order log subscription processing.
+	/// The default implementation throws <see cref="SubscriptionResponseMessage.NotSupported"/>.
+	/// </summary>
+	/// <param name="mdMsg">Market data subscription message.</param>
+	/// <param name="cancellationToken">Cancellation token to cancel the operation.</param>
+	/// <returns>A <see cref="ValueTask"/> representing the asynchronous operation.</returns>
+	protected virtual ValueTask OnOrderLogSubscriptionAsync(MarketDataMessage mdMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <summary>
+	/// Handles subscription request for time-frame candles (TF candles) data.
+	/// Override to provide implementation for TF candles subscription processing.
+	/// The default implementation throws <see cref="SubscriptionResponseMessage.NotSupported"/>.
+	/// </summary>
+	/// <param name="mdMsg">Market data subscription message.</param>
+	/// <param name="cancellationToken">Cancellation token to cancel the operation.</param>
+	/// <returns>A <see cref="ValueTask"/> representing the asynchronous operation.</returns>
+	protected virtual ValueTask OnTFCandlesSubscriptionAsync(MarketDataMessage mdMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <summary>
+	/// Handles subscription request for candles data.
+	/// Override to provide implementation for candles subscription processing.
+	/// The default implementation throws <see cref="SubscriptionResponseMessage.NotSupported"/>.
+	/// </summary>
+	/// <param name="mdMsg">Market data subscription message.</param>
+	/// <param name="cancellationToken">Cancellation token to cancel the operation.</param>
+	/// <returns>A <see cref="ValueTask"/> representing the asynchronous operation.</returns>
+	protected virtual ValueTask OnCandlesSubscriptionAsync(MarketDataMessage mdMsg, CancellationToken cancellationToken)
+		=> throw SubscriptionResponseMessage.NotSupported;
+
+	/// <inheritdoc />
+	public virtual ValueTask SendOutMessageAsync(Message message, CancellationToken cancellationToken)
+	{
+		//// do not process empty change msgs
+		//if (!message.IsBack)
+		//{
+		//	if (message is Level1ChangeMessage l1Msg && !l1Msg.HasChanges())
+		//		return;
+		//	else if (message is BasePositionChangeMessage posMsg && !posMsg.HasChanges())
+		//		return;
+		//}
+
+		InitMessageLocalTime(message);
+
+		message.Adapter ??= this;
+
+		if (message is DataTypeInfoMessage dtim && dtim.FileDataType is DataType dt && dt.IsMarketData)
+			this.AddSupportedMarketDataType(dt);
+
+		return _newOutMessageAsync.InvokeAsync(message, cancellationToken);
+	}
+
+	/// <summary>
+	/// Initialize local timestamp <see cref="Message"/>.
+	/// </summary>
+	/// <param name="message">Message.</param>
+	private void InitMessageLocalTime(Message message)
+	{
+		message.TryInitLocalTime(this);
+
+		switch (message)
 		{
-			SendOutMessage(message);
-			//switch (message.Type)
-			//{
-			//	case MessageTypes.Connect:
-			//		SendOutMessage(new ConnectMessage());
-			//		break;
-
-			//	case MessageTypes.Disconnect:
-			//		SendOutMessage(new DisconnectMessage());
-			//		break;
-
-			//	case MessageTypes.Time: // обработка heartbeat
-			//		break;
-
-			//	default:
-			//		throw new NotSupportedException(LocalizedStrings.Str2143Params.Put(message.Type));
-			//}
+			case PositionChangeMessage posMsg when posMsg.ServerTime == default:
+				posMsg.ServerTime = CurrentTime;
+				break;
+			case ExecutionMessage execMsg when execMsg.DataType == DataType.Transactions && execMsg.ServerTime == default:
+				execMsg.ServerTime = CurrentTime;
+				break;
 		}
+	}
+
+	/// <summary>
+	/// Send to <see cref="SendOutMessageAsync"/> disconnect message.
+	/// </summary>
+	/// <param name="expected">Is disconnect expected.</param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	protected ValueTask SendOutDisconnectMessageAsync(bool expected, CancellationToken cancellationToken)
+		=> SendOutDisconnectMessageAsync(expected ? null : new InvalidOperationException(LocalizedStrings.UnexpectedDisconnection), cancellationToken);
+
+	/// <summary>
+	/// Send to <see cref="SendOutMessageAsync"/> disconnect message.
+	/// </summary>
+	/// <param name="error">Error info. Can be <see langword="null"/>.</param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	protected ValueTask SendOutDisconnectMessageAsync(Exception error, CancellationToken cancellationToken)
+	{
+		return SendOutMessageAsync(error == null ? new DisconnectMessage() : new ConnectMessage
+		{
+			Error = error
+		}, cancellationToken);
+	}
+
+	/// <summary>
+	/// Send to <see cref="SendOutMessageAsync"/> connection state message.
+	/// </summary>
+	/// <param name="state"><see cref="ConnectionStates"/></param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	protected ValueTask SendOutConnectionStateAsync(ConnectionStates state, CancellationToken cancellationToken)
+	{
+		if (state.ToMessage() is Message msg)
+			return SendOutMessageAsync(msg, cancellationToken);
+
+		return default;
+	}
+
+	/// <summary>
+	/// Initialize a new message <see cref="ErrorMessage"/> and pass it to the method <see cref="SendOutMessageAsync"/>.
+	/// </summary>
+	/// <param name="description">Error details.</param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	protected ValueTask SendOutErrorAsync(string description, CancellationToken cancellationToken)
+		=> SendOutErrorAsync(new InvalidOperationException(description), cancellationToken);
+
+	/// <summary>
+	/// Initialize a new message <see cref="ErrorMessage"/> and pass it to the method <see cref="SendOutMessageAsync"/>.
+	/// </summary>
+	/// <param name="error">Error details.</param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	protected ValueTask SendOutErrorAsync(Exception error, CancellationToken cancellationToken)
+		=> SendOutMessageAsync(error.ToErrorMessage(), cancellationToken);
+
+	/// <summary>
+	/// Initialize a new message <see cref="SubscriptionResponseMessage"/> and pass it to the method <see cref="SendOutMessageAsync"/>.
+	/// </summary>
+	/// <param name="originalTransactionId">ID of the original message for which this message is a response.</param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	/// <param name="error">Subscribe or unsubscribe error info. To be set if the answer.</param>
+	protected ValueTask SendSubscriptionReplyAsync(long originalTransactionId, CancellationToken cancellationToken, Exception error = null)
+		=> SendOutMessageAsync(originalTransactionId.CreateSubscriptionResponse(error), cancellationToken);
+
+	/// <summary>
+	/// Initialize a new message <see cref="SubscriptionResponseMessage"/> and pass it to the method <see cref="SendOutMessageAsync"/>.
+	/// </summary>
+	/// <param name="originalTransactionId">ID of the original message for which this message is a response.</param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	protected ValueTask SendSubscriptionNotSupportedAsync(long originalTransactionId, CancellationToken cancellationToken)
+		=> SendOutMessageAsync(originalTransactionId.CreateNotSupported(), cancellationToken);
+
+	/// <summary>
+	/// Initialize a new message <see cref="SubscriptionFinishedMessage"/> and pass it to the method <see cref="SendOutMessageAsync"/>.
+	/// </summary>
+	/// <param name="originalTransactionId">ID of the original message for which this message is a response.</param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	/// <param name="nextFrom"><see cref="SubscriptionFinishedMessage.NextFrom"/>.</param>
+	protected ValueTask SendSubscriptionFinishedAsync(long originalTransactionId, CancellationToken cancellationToken, DateTime? nextFrom = null)
+		=> SendOutMessageAsync(new SubscriptionFinishedMessage { OriginalTransactionId = originalTransactionId, NextFrom = nextFrom }, cancellationToken);
+
+	/// <summary>
+	/// Initialize a new message <see cref="SubscriptionOnlineMessage"/> and pass it to the method <see cref="SendOutMessageAsync"/>.
+	/// </summary>
+	/// <param name="originalTransactionId">ID of the original message for which this message is a response.</param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	protected ValueTask SendSubscriptionOnlineAsync(long originalTransactionId, CancellationToken cancellationToken)
+		=> SendOutMessageAsync(new SubscriptionOnlineMessage { OriginalTransactionId = originalTransactionId }, cancellationToken);
+
+	/// <summary>
+	/// Initialize a new message <see cref="SubscriptionOnlineMessage"/> or <see cref="SubscriptionFinishedMessage"/> and pass it to the method <see cref="SendOutMessageAsync"/>.
+	/// </summary>
+	/// <param name="message">Subscription.</param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	protected ValueTask SendSubscriptionResultAsync(ISubscriptionMessage message, CancellationToken cancellationToken)
+		=> SendOutMessageAsync(message.CreateResult(), cancellationToken);
+
+	/// <inheritdoc />
+	public virtual IOrderLogMarketDepthBuilder CreateOrderLogMarketDepthBuilder(SecurityId securityId)
+		=> new OrderLogMarketDepthBuilder(securityId);
+
+	/// <inheritdoc />
+	public virtual bool IsAllDownloadingSupported(DataType dataType) => false;
+
+	/// <inheritdoc />
+	public virtual bool IsSecurityRequired(DataType dataType) => dataType.IsSecurityRequired;
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.IterationsKey,
+		Description = LocalizedStrings.IterationIntervalKey,
+		GroupName = LocalizedStrings.AdaptersKey,
+		Order = 304)]
+	public virtual TimeSpan IterationInterval { get; set; } = TimeSpan.FromSeconds(2);
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual TimeSpan? LookupTimeout => null;
+
+	/// <inheritdoc />
+	[Browsable(false)]
+	public virtual bool? IsPositionsEmulationRequired => null;
+
+	/// <inheritdoc />
+	[ReadOnly(false)]
+	public override string Name
+	{
+		get => base.Name;
+		set => base.Name = value;
+	}
+
+	/// <inheritdoc />
+	public override async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		Id = storage.GetValue(nameof(Id), Id);
+		HeartbeatInterval = storage.GetValue<TimeSpan>(nameof(HeartbeatInterval));
+
+		if (storage.ContainsKey(nameof(SupportedInMessages)))
+		{
+			SupportedInMessages = Do.Invariant(() => storage.GetValue<string[]>(nameof(SupportedInMessages))
+				.Select(i =>
+				{
+					// TODO Remove few releases later 2024-07-20
+					i = i.Length > 1 && i[0] == 1564 ? i.Substring(1) : i;
+
+					return i.ToMessageType();
+				}).ToArray());
+		}
+
+		if (storage.ContainsKey(nameof(ReConnectionSettings)))
+			await ReConnectionSettings.LoadAsync(storage, nameof(ReConnectionSettings), cancellationToken);
+
+		EnqueueSubscriptions = storage.GetValue(nameof(EnqueueSubscriptions), EnqueueSubscriptions);
+		IterationInterval = storage.GetValue(nameof(IterationInterval), IterationInterval);
+
+		MaxParallelMessages = storage.GetValue(nameof(MaxParallelMessages), MaxParallelMessages);
+		FaultDelay = storage.GetValue(nameof(FaultDelay), FaultDelay);
+
+		await base.LoadAsync(storage, cancellationToken);
+	}
+
+	/// <inheritdoc />
+	public override async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		storage
+			.Set(nameof(Id), Id)
+			.Set(nameof(HeartbeatInterval), HeartbeatInterval)
+			.Set(nameof(SupportedInMessages), Do.Invariant(() => SupportedInMessages.Select(t => t.To<string>()).ToArray()))
+			.Set(nameof(ReConnectionSettings), await ReConnectionSettings.SaveAsync(cancellationToken))
+			.Set(nameof(EnqueueSubscriptions), EnqueueSubscriptions)
+			.Set(nameof(IterationInterval), IterationInterval)
+			.Set(nameof(MaxParallelMessages), MaxParallelMessages)
+			.Set(nameof(FaultDelay), FaultDelay)
+		;
+
+		await base.SaveAsync(storage, cancellationToken);
+	}
+
+	/// <summary>
+	/// Create a copy of <see cref="MessageAdapter"/>.
+	/// </summary>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Copy.</returns>
+	public virtual async ValueTask<IMessageAdapter> CloneAsync(CancellationToken cancellationToken)
+	{
+		var clone = GetType().CreateInstance<MessageAdapter>(TransactionIdGenerator);
+		await clone.LoadAsync(await this.SaveAsync(cancellationToken), cancellationToken);
+		return clone;
+	}
+
+	private PropertyChangedEventHandler _propertyChanged;
+
+	event PropertyChangedEventHandler INotifyPropertyChanged.PropertyChanged
+	{
+		add => _propertyChanged += value;
+		remove => _propertyChanged -= value;
+	}
+
+	/// <summary>
+	/// Raise <see cref="INotifyPropertyChanged.PropertyChanged"/> event.
+	/// </summary>
+	/// <param name="propertyName">The name of the property that changed.</param>
+	protected void OnPropertyChanged([CallerMemberName]string propertyName = null)
+	{
+		_propertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
 	}
 }

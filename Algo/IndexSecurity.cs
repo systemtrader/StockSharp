@@ -1,141 +1,93 @@
-namespace StockSharp.Algo
+namespace StockSharp.Algo;
+
+/// <summary>
+/// The index, built of instruments. For example, to specify spread at arbitrage or pair trading.
+/// </summary>
+public abstract class IndexSecurity : BasketSecurity
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Linq;
-
-	using Ecng.Collections;
-	using Ecng.Common;
-
-	using StockSharp.BusinessEntities;
-	using StockSharp.Messages;
+	/// <summary>
+	/// Ignore calculation errors (like arithmetic overflows).
+	/// </summary>
+	public bool IgnoreErrors { get; set; }
 
 	/// <summary>
-	/// Индекс, построенный из инструментов. Например, для задание спреда при арбитраже или парном трейдинге.
+	/// Calculate extended information.
 	/// </summary>
-	public abstract class IndexSecurity : BasketSecurity
-	{
-		/// <summary>
-		/// Инициализировать <see cref="IndexSecurity"/>.
-		/// </summary>
-		protected IndexSecurity()
-		{
-			Type = SecurityTypes.Index;
-		}
+	public bool CalculateExtended { get; set; }
 
-		/// <summary>
-		/// Вычислить значение корзины.
-		/// </summary>
-		/// <param name="prices">Цены составных инструментов корзины <see cref="BasketSecurity.InnerSecurities"/>.</param>
-		/// <returns>Значение корзины.</returns>
-		public abstract decimal? Calculate(IDictionary<Security, decimal> prices);
+	/// <summary>
+	/// Fill market-data gaps by zero values.
+	/// </summary>
+	public bool FillGapsByZeros { get; set; }
+
+	/// <summary>
+	/// Initialize <see cref="IndexSecurity"/>.
+	/// </summary>
+	protected IndexSecurity()
+	{
+		Type = SecurityTypes.Index;
+		//Board = ExchangeBoard.Associated;
+	}
+}
+
+/// <summary>
+/// The instruments basket, based on weigh-scales <see cref="Weights"/>.
+/// </summary>
+[BasketCode(BasketCodes.WeightedIndex)]
+public class WeightedIndexSecurity : IndexSecurity
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="WeightedIndexSecurity"/>.
+	/// </summary>
+	public WeightedIndexSecurity()
+	{
+		Weights = [];
 	}
 
 	/// <summary>
-	/// Корзина инструментов, основанная на весах <see cref="Weights"/>.
+	/// Instruments and their weighting coefficients in the basket.
 	/// </summary>
-	public class WeightedIndexSecurity : IndexSecurity
+	public CachedSynchronizedDictionary<SecurityId, decimal> Weights { get; }
+
+	/// <inheritdoc />
+	public override IEnumerable<SecurityId> InnerSecurityIds => Weights.CachedKeys;
+
+	/// <inheritdoc />
+	public override Security Clone()
 	{
-		private sealed class WeightsDictionary : CachedSynchronizedDictionary<Security, decimal>
+		var clone = new WeightedIndexSecurity();
+		clone.Weights.AddRange(Weights.CachedPairs);
+		CopyTo(clone);
+		return clone;
+	}
+
+	/// <inheritdoc />
+	protected override void FromSerializedString(string text)
+	{
+		using (Weights.EnterScope())
 		{
-			private readonly WeightedIndexSecurity _parent;
-
-			public WeightsDictionary(WeightedIndexSecurity parent)
+			Weights.Clear();
+			Weights.AddRange(text.SplitByComma().Select(p =>
 			{
-				if (parent == null)
-					throw new ArgumentNullException("parent");
+				var parts = p.SplitByEqual();
 
-				_parent = parent;
-			}
+				if (parts.Length < 2)
+					throw new InvalidOperationException($"Invalid format: {p}");
 
-			public override void Add(Security key, decimal value)
-			{
-				base.Add(key, value);
-				RefreshName();
-			}
-
-			public override bool Remove(Security key)
-			{
-				if (base.Remove(key))
-				{
-					RefreshName();
-					return true;
-				}
-
-				return false;
-			}
-
-			public override void Clear()
-			{
-				base.Clear();
-				RefreshName();
-			}
-
-			private void RefreshName()
-			{
-				_parent.Id = GetName(s => s.Id);
-				_parent.Code = GetName(s => s.Code);
-				_parent.Name = GetName(s => s.Name);
-			}
-
-			private string GetName(Func<Security, string> getSecurityName)
-			{
-				return this.Select(p => "{0} * {1}".Put(p.Value, getSecurityName(p.Key))).Join(", ");
-			}
+				return new KeyValuePair<SecurityId, decimal>(parts[0].ToSecurityId(), parts[1].To<decimal>());
+			}));
 		}
+	}
 
-		/// <summary>
-		/// Создать <see cref="WeightedIndexSecurity"/>.
-		/// </summary>
-		public WeightedIndexSecurity()
-		{
-			_weights = new WeightsDictionary(this);
-		}
+	/// <inheritdoc />
+	protected override string ToSerializedString()
+	{
+		return Weights.CachedPairs.Select(p => $"{p.Key.ToStringId()}={p.Value}").JoinComma();
+	}
 
-		private readonly WeightsDictionary _weights;
-
-		/// <summary>
-		/// Инструменты и их весовые коэффициенты в корзине.
-		/// </summary>
-		public SynchronizedDictionary<Security, decimal> Weights
-		{
-			get { return _weights; }
-		}
-
-		/// <summary>
-		/// Инструменты, из которых создана данная корзина.
-		/// </summary>
-		public override IEnumerable<Security> InnerSecurities
-		{
-			get { return _weights.CachedKeys; }
-		}
-
-		/// <summary>
-		/// Вычислить значение корзины.
-		/// </summary>
-		/// <param name="prices">Цены составных инструментов корзины <see cref="BasketSecurity.InnerSecurities"/>.</param>
-		/// <returns>Значение корзины.</returns>
-		public override decimal? Calculate(IDictionary<Security, decimal> prices)
-		{
-			if (prices == null)
-				throw new ArgumentNullException("prices");
-
-			if (prices.Count != _weights.Count || !InnerSecurities.All(prices.ContainsKey))
-				return null;
-
-			return prices.Sum(pair => _weights[pair.Key] * pair.Value);
-		}
-
-		/// <summary>
-		/// Создать копию объекта <see cref="Security"/>.
-		/// </summary>
-		/// <returns>Копия объекта.</returns>
-		public override Security Clone()
-		{
-			var clone = new WeightedIndexSecurity();
-			clone.Weights.AddRange(Weights.SyncGet(d => d.ToArray()));
-			CopyTo(clone);
-			return clone;
-		}
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		return Weights.CachedPairs.Select(p => $"{p.Value} * {p.Key.ToStringId()}").JoinCommaSpace();
 	}
 }

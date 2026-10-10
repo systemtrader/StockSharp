@@ -1,33 +1,48 @@
-namespace StockSharp.Localization
+﻿namespace StockSharp.Localization;
+
+using System;
+using System.Reflection;
+
+using Ecng.Common;
+
+/// <summary>
+/// Information for an assembly manifest.
+/// </summary>
+public static class ProjectDescriptions
 {
-	/// <summary>
-	/// Information for an assembly manifest.
-	/// </summary>
-	public class ProjectDescriptions
+	static ProjectDescriptions()
 	{
-		/// <summary>
-		/// Gets company information.
-		/// </summary>
-		public const string Company = "StockSharp LLC";
+		var asm = typeof(ProjectDescriptions).Assembly;
 
-		/// <summary>
-		/// Gets product information.
-		/// </summary>
-		public const string Product = "StockSharp";
-
-		/// <summary>
-		/// Gets copyright information.
-		/// </summary>
-		public const string Copyright = "Copyright @ StockSharp 2015";
-
-		/// <summary>
-		/// Gets trademark information.
-		/// </summary>
-		public const string Trademark = "StockSharp";
-
-		/// <summary>
-		/// Gets version information.
-		/// </summary>
-		public const string Version = "4.3.4.0";
+		Company = asm.GetAttribute<AssemblyCompanyAttribute>()?.Company;
+		Product = asm.GetAttribute<AssemblyProductAttribute>()?.Product;
+		Copyright = asm.GetAttribute<AssemblyCopyrightAttribute>()?.Copyright;
+		Trademark = asm.GetAttribute<AssemblyTrademarkAttribute>()?.Trademark;
+		Version = asm.GetName().Version;
 	}
+
+	/// <summary>
+	/// Gets company information.
+	/// </summary>
+	public static readonly string Company;
+
+	/// <summary>
+	/// Gets product information.
+	/// </summary>
+	public static readonly string Product;
+
+	/// <summary>
+	/// Gets copyright information.
+	/// </summary>
+	public static readonly string Copyright;
+
+	/// <summary>
+	/// Gets trademark information.
+	/// </summary>
+	public static readonly string Trademark;
+
+	/// <summary>
+	/// Gets version information.
+	/// </summary>
+	public static readonly Version Version;
 }

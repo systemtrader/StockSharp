@@ -1,53 +1,47 @@
-namespace StockSharp.Messages
-{
-	using System;
-	using System.Runtime.Serialization;
+namespace StockSharp.Messages;
 
-	using StockSharp.Localization;
+/// <summary>
+/// Order states.
+/// </summary>
+[DataContract]
+[Serializable]
+public enum OrderStates
+{
+	/// <summary>
+	/// Not sent to the trading system.
+	/// </summary>
+	/// <remarks>
+	/// The original state of the order, when the transaction is not sent to the trading system.
+	/// </remarks>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.NoneKey)]
+	None,
 
 	/// <summary>
-	/// Состояния заявки.
+	/// The order is accepted by the exchange and is active.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public enum OrderStates
-	{
-		/// <summary>
-		/// Не отправлена в торговую систему.
-		/// </summary>
-		/// <remarks>
-		/// Первоначальное значение заявки, когда еще программа не отправила транзакцию в торговую систему.
-		/// </remarks>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str237Key)]
-		None,
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.ActiveKey)]
+	Active,
 
-		/// <summary>
-		/// Заявка принята биржей и активна.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str238Key)]
-		Active,
+	/// <summary>
+	/// The order is no longer active on an exchange (it was fully matched or cancelled).
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.DoneKey)]
+	Done,
 
-		/// <summary>
-		/// Заявка больше не активна на бирже (была полностью удовлетворена или снята из программы).
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str239Key)]
-		Done,
+	/// <summary>
+	/// The order is not accepted by the trading system.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.ErrorKey)]
+	Failed,
 
-		/// <summary>
-		/// Заявка не принята торговой системой.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str152Key)]
-		Failed,
-
-		/// <summary>
-		/// Заявка ожидает от биржи подтверждение регистрации.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str238Key)]
-		Pending,
-	}
+	/// <summary>
+	/// Pending registration.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.PendingKey)]
+	Pending,
 }

@@ -1,255 +1,336 @@
-﻿namespace StockSharp.Algo.PnL
+namespace StockSharp.Algo.PnL;
+
+/// <summary>
+/// The queue of profit calculation by messages stream.
+/// </summary>
+public class PnLQueue
 {
-	using System;
-	using System.Linq;
+	private Sides _openedPosSide;
+	private readonly SynchronizedQueue<RefPair<decimal, decimal>> _openedTrades = [];
+	private decimal _multiplier;
 
-	using Ecng.Collections;
-	using Ecng.Common;
-
-	using StockSharp.Messages;
+	private decimal? _lastPrice;
+	private decimal? _bidPrice;
+	private decimal? _askPrice;
 
 	/// <summary>
-	/// Очередь расчета прибыли по потому сообщений.
+	/// Initializes a new instance of the <see cref="PnLQueue"/>.
 	/// </summary>
-	public class PnLQueue
+	/// <param name="securityId">Security ID.</param>
+	public PnLQueue(SecurityId securityId)
 	{
-		private Sides _openedPosSide;
-		private readonly SynchronizedStack<RefPair<decimal, decimal>> _openedTrades = new SynchronizedStack<RefPair<decimal, decimal>>();
-		private decimal _multiplier;
+		SecurityId = securityId;
+		UpdateMultiplier();
+	}
 
-		/// <summary>
-		/// Создать <see cref="PnLQueue"/>.
-		/// </summary>
-		/// <param name="securityId">Идентификатор инструмента.</param>
-		public PnLQueue(SecurityId securityId)
+	/// <summary>
+	/// Security ID.
+	/// </summary>
+	public SecurityId SecurityId { get; }
+
+	private decimal _priceStep = 1;
+
+	/// <summary>
+	/// Price step.
+	/// </summary>
+	public decimal PriceStep
+	{
+		get => _priceStep;
+		private set
 		{
-			SecurityId = securityId;
-			PriceStep = 1;
-			StepPrice = 1;
+			if (value <= 0)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
+
+			if (_priceStep == value)
+				return;
+
+			_priceStep = value;
+			UpdateMultiplier();
 		}
+	}
 
-		/// <summary>
-		/// Идентификатор инструмента.
-		/// </summary>
-		public SecurityId SecurityId { get; private set; }
+	private decimal? _stepPrice;
 
-		private decimal _priceStep;
-
-		/// <summary>
-		/// Шаг цены.
-		/// </summary>
-		public decimal PriceStep
+	/// <summary>
+	/// Step price.
+	/// </summary>
+	public decimal? StepPrice
+	{
+		get => _stepPrice;
+		private set
 		{
-			get { return _priceStep; }
-			private set
-			{
-				_priceStep = value;
-				UpdateMultiplier();
-			}
+			if (value <= 0)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
+
+			if (_stepPrice == value)
+				return;
+
+			_stepPrice = value;
+			UpdateMultiplier();
 		}
+	}
 
-		private decimal _stepPrice;
+	private decimal _leverage = 1;
 
-		/// <summary>
-		/// Стоимость шага цены.
-		/// </summary>
-		public decimal StepPrice
+	/// <summary>
+	/// Leverage.
+	/// </summary>
+	public decimal Leverage
+	{
+		get => _leverage;
+		set
 		{
-			get { return _stepPrice; }
-			private set
-			{
-				_stepPrice = value;
-				UpdateMultiplier();
-			}
+			if (value <= 0)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
+
+			if (value == _leverage)
+				return;
+
+			_leverage = value;
+			UpdateMultiplier();
 		}
+	}
 
-		/// <summary>
-		/// Последняя цена тиковой сделки.
-		/// </summary>
-		public decimal TradePrice { get; private set; }
+	private decimal _lotMultiplier = 1;
 
-		/// <summary>
-		/// Последняя цена спроса.
-		/// </summary>
-		public decimal BidPrice { get; private set; }
-
-		/// <summary>
-		/// Последняя цена предложения.
-		/// </summary>
-		public decimal AskPrice { get; private set; }
-
-		private decimal? _unrealizedPnL;
-
-		/// <summary>
-		/// Нереализованная прибыль.
-		/// </summary>
-		public decimal UnrealizedPnL
+	/// <summary>
+	/// Lot multiplier.
+	/// </summary>
+	public decimal LotMultiplier
+	{
+		get => _lotMultiplier;
+		set
 		{
-			get
-			{
-				var v = _unrealizedPnL;
+			if (value <= 0)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
 
-				if (v != null)
-					return v.Value;
+			if (value == _lotMultiplier)
+				return;
 
-				var sum = _openedTrades
-					.SyncGet(c => c.Sum(t =>
-					{
-						var price = _openedPosSide == Sides.Buy ? AskPrice : BidPrice;
-
-						if (price == 0)
-							price = TradePrice;
-
-						return TraderHelper.GetPnL(t.First, t.Second, _openedPosSide, price);
-					}));
-
-				v = _unrealizedPnL = sum * _multiplier;
-				return v.Value;
-			}
+			_lotMultiplier = value;
+			UpdateMultiplier();
 		}
+	}
 
-		/// <summary>
-		/// Реализованная прибыль.
-		/// </summary>
-		public decimal RealizedPnL { get; private set; }
+	private decimal? _unrealizedPnL;
 
-		/// <summary>
-		/// Рассчитать прибыльность сделки. Если сделка уже ранее была обработана, то возвращается предыдущая информация.
-		/// </summary>
-		/// <param name="trade">Сделка.</param>
-		/// <returns>Информация о новой сделке.</returns>
-		public PnLInfo Process(ExecutionMessage trade)
+	/// <summary>
+	/// Unrealized profit.
+	/// </summary>
+	public decimal UnrealizedPnL
+	{
+		get
 		{
-			if (trade == null)
-				throw new ArgumentNullException("trade");
+			if (_unrealizedPnL is decimal unrealPnL)
+				return unrealPnL;
 
-			var closedVolume = 0m;
-			var pnl = 0m;
-			var volume = trade.GetVolume();
-			var price = trade.GetTradePrice();
+			var price = (_openedPosSide == Sides.Buy ? _bidPrice : _askPrice) ?? _lastPrice;
 
-			_unrealizedPnL = null;
+			var sum = price == null
+				? 0
+				: _openedTrades.SyncGet(c => c.Sum(t => GetPnL(t.First, t.Second, _openedPosSide, price.Value)));
 
-			lock (_openedTrades.SyncRoot)
+			unrealPnL = sum * _multiplier;
+			_unrealizedPnL = unrealPnL;
+			return unrealPnL;
+		}
+	}
+
+	/// <summary>
+	/// Realized profit.
+	/// </summary>
+	public decimal RealizedPnL { get; private set; }
+
+	/// <summary>
+	/// To calculate trade profitability. If the trade was already processed earlier, previous information returns.
+	/// </summary>
+	/// <param name="trade">Trade.</param>
+	/// <returns>Information on new trade.</returns>
+	public PnLInfo Process(ExecutionMessage trade)
+	{
+		if (trade is null)
+			throw new ArgumentNullException(nameof(trade));
+
+		// The queue closes an open position against trades going the other way, so a trade whose
+		// direction is unknown cannot be told from one that closes it.
+		if (trade.Side is not Sides side)
+			throw new ArgumentException(LocalizedStrings.OrderSideNotSpecified, nameof(trade));
+
+		var closedVolume = 0m;
+		var pnl = 0m;
+		var volume = trade.SafeGetVolume();
+		var price = trade.GetTradePrice();
+
+		_unrealizedPnL = default;
+
+		decimal tradePnL;
+
+		using (_openedTrades.EnterScope())
+		{
+			if (_openedTrades.Count > 0)
 			{
-				if (_openedTrades.Count > 0)
+				var currTrade = _openedTrades.Peek();
+
+				if (_openedPosSide != side)
 				{
-					var currTrade = _openedTrades.Peek();
-
-					if (_openedPosSide != trade.Side)
+					while (volume > 0)
 					{
-						while (volume > 0)
-						{
-							if (currTrade == null)
-								currTrade = _openedTrades.Peek();
+						currTrade ??= _openedTrades.Peek();
 
-							var diff = currTrade.Second.Min(volume);
-							closedVolume += diff;
+						var diff = currTrade.Second.Min(volume);
+						closedVolume += diff;
 
-							pnl += TraderHelper.GetPnL(currTrade.First, diff, _openedPosSide, price);
+						pnl += GetPnL(currTrade.First, diff, _openedPosSide, price);
 
-							volume -= diff;
-							currTrade.Second -= diff;
+						volume -= diff;
+						currTrade.Second -= diff;
 
-							if (currTrade.Second != 0)
-								continue;
+						if (currTrade.Second != 0)
+							continue;
 
-							currTrade = null;
-							_openedTrades.Pop();
+						currTrade = null;
+						_openedTrades.Dequeue();
 
-							if (_openedTrades.Count == 0)
-								break;
-						}
+						if (_openedTrades.Count == 0)
+							break;
 					}
 				}
-
-				if (volume > 0)
-				{
-					_openedPosSide = trade.Side;
-					_openedTrades.Push(RefTuple.Create(price, volume));
-				}
-
-				RealizedPnL += _multiplier * pnl;
 			}
 
-			return new PnLInfo(trade, closedVolume, pnl);
+			if (volume > 0)
+			{
+				_openedPosSide = side;
+				_openedTrades.Enqueue(RefTuple.Create(price, volume));
+			}
+
+			tradePnL = _multiplier * pnl;
+			RealizedPnL += tradePnL;
 		}
 
-		/// <summary>
-		/// Обработать сообщение, содержащее рыночные данные.
-		/// </summary>
-		/// <param name="levelMsg">Сообщение, содержащее рыночные данные.</param>
-		public void ProcessLevel1(Level1ChangeMessage levelMsg)
+		return new(trade.ServerTime, closedVolume, tradePnL);
+	}
+
+	/// <summary>
+	/// To update the information on the instrument.
+	/// </summary>
+	/// <param name="levelMsg"><see cref="Level1ChangeMessage"/></param>
+	public void UpdateSecurity(Level1ChangeMessage levelMsg)
+	{
+		if (levelMsg is null)
+			throw new ArgumentNullException(nameof(levelMsg));
+
+		if (levelMsg.TryGetDecimal(Level1Fields.PriceStep) is decimal priceStep)
 		{
-			var priceStep = levelMsg.Changes.TryGetValue(Level1Fields.PriceStep);
-			if (priceStep != null)
-			{
-				PriceStep = (decimal)priceStep;
-				_unrealizedPnL = null;
-			}
-
-			var stepPrice = levelMsg.Changes.TryGetValue(Level1Fields.StepPrice);
-			if (stepPrice != null)
-			{
-				StepPrice = (decimal)stepPrice;
-				_unrealizedPnL = null;
-			}
-
-			var tradePrice = levelMsg.Changes.TryGetValue(Level1Fields.LastTradePrice);
-			if (tradePrice != null)
-			{
-				TradePrice = (decimal)tradePrice;
-				_unrealizedPnL = null;
-			}
-
-			var bidPrice = levelMsg.Changes.TryGetValue(Level1Fields.BestBidPrice);
-			if (bidPrice != null)
-			{
-				BidPrice = (decimal)bidPrice;
-				_unrealizedPnL = null;
-			}
-
-			var askPrice = levelMsg.Changes.TryGetValue(Level1Fields.BestAskPrice);
-			if (askPrice != null)
-			{
-				AskPrice = (decimal)askPrice;
-				_unrealizedPnL = null;
-			}
+			PriceStep = priceStep;
 		}
 
-		/// <summary>
-		/// Обработать сообщение, содержащее информацию о тиковой сделке.
-		/// </summary>
-		/// <param name="execMsg">Сообщение, содержащее информацию о тиковой сделке.</param>
-		public void ProcessExecution(ExecutionMessage execMsg)
+		if (levelMsg.TryGetDecimal(Level1Fields.StepPrice) is decimal stepPrice)
 		{
-			if (execMsg.TradePrice != null)
-			{
-				TradePrice = execMsg.TradePrice.Value;
-				_unrealizedPnL = null;
-			}
+			StepPrice = stepPrice;
 		}
 
-		/// <summary>
-		/// Обработать сообщение, содержащее данные о стакане.
-		/// </summary>
-		/// <param name="quoteMsg">Сообщение, содержащее данные о стакане.</param>
-		public void ProcessQuotes(QuoteChangeMessage quoteMsg)
+		if (levelMsg.TryGetDecimal(Level1Fields.Multiplier) is decimal lotMultiplier)
 		{
-			var ask = quoteMsg.GetBestAsk();
-			AskPrice = ask != null ? ask.Price : 0;
-
-			var bid = quoteMsg.GetBestBid();
-			BidPrice = bid != null ? bid.Price : 0;
-
-			_unrealizedPnL = null;
+			LotMultiplier = lotMultiplier;
 		}
+	}
 
-		private void UpdateMultiplier()
+	/// <summary>
+	/// To process the message, containing market data.
+	/// </summary>
+	/// <param name="levelMsg">The message, containing market data.</param>
+	public void ProcessLevel1(Level1ChangeMessage levelMsg)
+	{
+		if (levelMsg is null)
+			throw new ArgumentNullException(nameof(levelMsg));
+
+		if (levelMsg.TryGetDecimal(Level1Fields.LastTradePrice) is decimal lastPrice
+			&& _lastPrice != lastPrice)
 		{
-			_multiplier = StepPrice == 0 || PriceStep == 0 
-				? 1 
-				: StepPrice / PriceStep;
+			_lastPrice = lastPrice;
+			_bidPrice = default;
+			_askPrice = default;
+			_unrealizedPnL = default;
 		}
+
+		if (levelMsg.TryGetDecimal(Level1Fields.BestBidPrice) is decimal bidPrice
+			&& _bidPrice != bidPrice)
+		{
+			_bidPrice = bidPrice;
+			_lastPrice = default;
+			_unrealizedPnL = default;
+		}
+
+		if (levelMsg.TryGetDecimal(Level1Fields.BestAskPrice) is decimal askPrice
+			&& _askPrice != askPrice)
+		{
+			_askPrice = askPrice;
+			_lastPrice = default;
+			_unrealizedPnL = default;
+		}
+	}
+
+	/// <summary>
+	/// To process <see cref="CandleMessage"/> message.
+	/// </summary>
+	/// <param name="candleMsg"><see cref="CandleMessage"/>.</param>
+	public void ProcessCandle(CandleMessage candleMsg)
+	{
+		if (candleMsg is null)
+			throw new ArgumentNullException(nameof(candleMsg));
+
+		_lastPrice = candleMsg.ClosePrice;
+		_bidPrice = default;
+		_askPrice = default;
+
+		_unrealizedPnL = default;
+	}
+
+	/// <summary>
+	/// To process the message, containing information on tick trade.
+	/// </summary>
+	/// <param name="execMsg">The message, containing information on tick trade.</param>
+	public void ProcessExecution(ExecutionMessage execMsg)
+	{
+		if (execMsg is null)
+			throw new ArgumentNullException(nameof(execMsg));
+
+		if (execMsg.TradePrice is not decimal tradePrice)
+			return;
+
+		_lastPrice = tradePrice;
+		_bidPrice = default;
+		_askPrice = default;
+
+		_unrealizedPnL = default;
+	}
+
+	/// <summary>
+	/// To process the message, containing data on order book.
+	/// </summary>
+	/// <param name="quoteMsg">The message, containing data on order book.</param>
+	public void ProcessQuotes(QuoteChangeMessage quoteMsg)
+	{
+		if (quoteMsg is null)
+			throw new ArgumentNullException(nameof(quoteMsg));
+
+		_lastPrice = default;
+		_askPrice = quoteMsg.GetBestAsk()?.Price;
+		_bidPrice = quoteMsg.GetBestBid()?.Price;
+
+		_unrealizedPnL = default;
+	}
+
+	private void UpdateMultiplier()
+	{
+		var stepPrice = StepPrice;
+
+		_multiplier = (stepPrice == null ? 1 : stepPrice.Value / PriceStep) * Leverage * LotMultiplier;
+		_unrealizedPnL = default;
+	}
+
+	private static decimal GetPnL(decimal price, decimal volume, Sides side, decimal marketPrice)
+	{
+		return (price - marketPrice) * volume * (side == Sides.Sell ? 1 : -1);
 	}
 }

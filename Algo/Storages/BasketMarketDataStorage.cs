@@ -1,376 +1,444 @@
-﻿namespace StockSharp.Algo.Storages
+namespace StockSharp.Algo.Storages;
+
+using Ecng.Reflection;
+
+/// <summary>
+/// The aggregator-storage enumerator.
+/// </summary>
+/// <typeparam name="TMessage">Message type.</typeparam>
+public interface IBasketMarketDataStorageEnumerable<TMessage> : IAsyncEnumerable<TMessage>
 {
-	using System;
-	using System.Collections;
-	using System.Collections.Generic;
-	using System.Linq;
+	/// <summary>
+	/// Get available message types.
+	/// </summary>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Available message types.</returns>
+	ValueTask<IEnumerable<MessageTypes>> GetDataTypesAsync(CancellationToken cancellationToken);
+}
 
-	using Ecng.Collections;
-	using Ecng.Common;
-
-	using MoreLinq;
-
-	using StockSharp.BusinessEntities;
-	using StockSharp.Messages;
+/// <summary>
+/// The interface, describing a list of embedded storages of market data.
+/// </summary>
+public interface IBasketMarketDataStorageInnerList : ISynchronizedCollection<IMarketDataStorage>
+{
+	/// <summary>
+	/// Add inner storage with the specified request id.
+	/// </summary>
+	/// <param name="storage">Market-data storage.</param>
+	/// <param name="transactionId">The subscription identifier.</param>
+	void Add(IMarketDataStorage storage, long transactionId);
 
 	/// <summary>
-	/// Хранилище-агрегатор, позволяющее загружать данные одновременно из нескольких хранилищ маркет-данных.
+	/// Remove inner storage.
 	/// </summary>
-	/// <typeparam name="T">Тип сообщения.</typeparam>
-	public class BasketMarketDataStorage<T> : Disposable
-		where T : Message
+	/// <param name="originalTransactionId">The subscription identifier.</param>
+	void Remove(long originalTransactionId);
+}
+
+/// <summary>
+/// The aggregator-storage, allowing to load data simultaneously from several market data storages.
+/// </summary>
+/// <typeparam name="TMessage">Message type.</typeparam>
+public class BasketMarketDataStorage<TMessage> : Disposable, IMarketDataStorage<TMessage>
+	where TMessage : Message
+{
+	private class BasketMarketDataStorageEnumerator : IAsyncEnumerator<TMessage>
 	{
-		/// <summary>
-		/// Загрузчик сообщений хранилища-агрегатора.
-		/// </summary>
-		public class BasketMarketDataStorageEnumerator : IEnumerator<T>
+		private readonly BasketMarketDataStorage<TMessage> _storage;
+		private readonly DateTime _date;
+		private readonly CancellationToken _cancellationToken;
+		private readonly SynchronizedQueue<(ActionTypes action, IMarketDataStorage storage, long transId)> _actions = [];
+		private readonly Lock _enumsLock = new();
+		private readonly Ecng.Collections.PriorityQueue<long, (IAsyncEnumerator<Message> enu, IMarketDataStorage storage, long transId)> _enumerators = new((p1, p2) => (p1 - p2).Abs());
+
+		private bool _initialized;
+
+		public BasketMarketDataStorageEnumerator(BasketMarketDataStorage<TMessage> storage, DateTime date, CancellationToken cancellationToken)
 		{
-			private readonly BasketMarketDataStorage<T> _storage;
-			private readonly DateTime _date;
-			private readonly SynchronizedQueue<Tuple<ActionType, IMarketDataStorage>> _actions = new SynchronizedQueue<Tuple<ActionType, IMarketDataStorage>>();
-			private readonly OrderedPriorityQueue<DateTimeOffset, Tuple<IEnumerator, IMarketDataStorage>> _enumerators = new OrderedPriorityQueue<DateTimeOffset, Tuple<IEnumerator, IMarketDataStorage>>();
+			_storage = storage ?? throw new ArgumentNullException(nameof(storage));
+			_date = date;
+			_cancellationToken = cancellationToken;
 
-			internal BasketMarketDataStorageEnumerator(BasketMarketDataStorage<T> storage, DateTime date)
+			_storage._enumerators.Add(this);
+		}
+
+		private async ValueTask InitializeAsync()
+		{
+			if (_initialized)
+				return;
+
+			_initialized = true;
+
+			foreach (var s in _storage._innerStorages.Cache)
 			{
-				if (storage == null)
-					throw new ArgumentNullException("storage");
-
-				_storage = storage;
-				_date = date;
-
-				var dataTypes = new List<MessageTypes>();
-
-				foreach (var s in storage._innerStorages.Cache)
+				if (s.GetType().GetGenericType(typeof(InMemoryMarketDataStorage<>)) == null)
 				{
-					if (!s.Dates.Contains(date))
+					var dates = s.GetDatesAsync();
+					if (!await dates.ContainsAsync(_date, cancellationToken: _cancellationToken))
 						continue;
-
-					_actions.Add(Tuple.Create(ActionType.Add, s));
-
-					if (s.DataType == typeof(ExecutionMessage))
-						dataTypes.Add(MessageTypes.Execution);
-
-					if (s.DataType == typeof(QuoteChangeMessage))
-						dataTypes.Add(MessageTypes.QuoteChange);
-
-					if (s.DataType == typeof(Level1ChangeMessage))
-						dataTypes.Add(MessageTypes.Level1Change);
-
-					if (s.DataType == typeof(TimeMessage))
-						dataTypes.Add(MessageTypes.Time);
-
-					if (s.DataType == typeof(TimeFrameCandleMessage))
-						dataTypes.Add(MessageTypes.CandleTimeFrame);
-
-					if (s.DataType == typeof(PnFCandleMessage))
-						dataTypes.Add(MessageTypes.CandlePnF);
-
-					if (s.DataType == typeof(RangeCandleMessage))
-						dataTypes.Add(MessageTypes.CandleRange);
-
-					if (s.DataType == typeof(RenkoCandleMessage))
-						dataTypes.Add(MessageTypes.CandleRenko);
-
-					if (s.DataType == typeof(TickCandleMessage))
-						dataTypes.Add(MessageTypes.CandleTick);
-
-					if (s.DataType == typeof(VolumeCandleMessage))
-						dataTypes.Add(MessageTypes.CandleVolume);
 				}
 
-				DataTypes = dataTypes.ToArray();
-
-				_storage._enumerators.Add(this);
+				_actions.Add((ActionTypes.Add, s, _storage._innerStorages.TryGetTransactionId(s)));
 			}
+		}
 
-			/// <summary>
-			/// Текущее сообщение.
-			/// </summary>
-			public T Current { get; private set; }
+		public TMessage Current { get; private set; }
 
-			/// <summary>
-			/// Доступные типы данных.
-			/// </summary>
-			public IEnumerable<MessageTypes> DataTypes { get; private set; }
+		async ValueTask<bool> IAsyncEnumerator<TMessage>.MoveNextAsync()
+		{
+			await InitializeAsync();
 
-			bool IEnumerator.MoveNext()
+			while (true)
 			{
-				while (true)
+				_cancellationToken.ThrowIfCancellationRequested();
+
+				var action = _actions.TryDequeue2();
+
+				if (action is null)
+					break;
+
+				var type = action.Value.action;
+				var storage = action.Value.storage;
+
+				switch (type)
 				{
-					var action = _actions.TryDequeue();
-
-					if (action == null)
-						break;
-
-					var type = action.Item1;
-					var storage = action.Item2;
-
-					switch (type)
+					case ActionTypes.Add:
 					{
-						case ActionType.Add:
+						if (_storage.Cache is not null)
+							storage = new CacheableMarketDataStorage(storage, _storage.Cache);
+
+						var loaded = storage.LoadAsync(_date);
+
+						// built books slower for emulation, so this case is not real one
+						//if (!_storage.PassThroughOrderBookIncrement && loaded is IEnumerable<QuoteChangeMessage> quotes)
+						//{
+						//	loaded = quotes.BuildIfNeed();
+						//}
+
+						var enu = loaded.GetAsyncEnumerator(_cancellationToken);
+						var lastTime = Current?.GetServerTime() ?? DateTime.MinValue;
+
+						var hasValues = true;
+
+						// пропускаем данные, что меньше времени последнего сообщения (lastTime)
+						while (true)
 						{
-							var enu = storage.Load(_date).GetEnumerator();
-							var lastTime = Current == null ? DateTimeOffset.MinValue : Current.GetServerTime();
-
-							var hasValues = true;
-
-							// пропускаем данные, что меньше времени последнего сообщения (lastTime)
-							while (true)
+							if (!await enu.MoveNextAsync())
 							{
-								if (!enu.MoveNext())
-								{
-									hasValues = false;
-									break;
-								}
-
-								var msg = (Message)enu.Current;
-
-								if (msg.GetServerTime() >= lastTime)
-									break;
+								hasValues = false;
+								break;
 							}
 
-							// данных в хранилище нет больше последней даты
-							if (hasValues)
-								_enumerators.Enqueue(GetServerTime(enu), Tuple.Create(enu, storage));
-							else
-								enu.DoDispose();
+							var msg = enu.Current;
 
-							break;
+							if (msg.GetServerTime() >= lastTime)
+								break;
 						}
-						case ActionType.Remove:
+
+						// данных в хранилище нет больше последней даты
+						if (hasValues)
 						{
-							_enumerators.RemoveWhere(p => p.Value.Item2 == storage);
-							break;
+							using (_enumsLock.EnterScope())
+								_enumerators.Enqueue(enu.Current.GetServerTime().Ticks, (enu, storage, action.Value.transId));
 						}
-						case ActionType.Clear:
-						{
-							_enumerators.Clear();
-							break;
-						}
-						default:
-							throw new ArgumentOutOfRangeException();
+						else
+							await enu.DisposeAsync();
+
+						break;
 					}
-				}
+					case ActionTypes.Remove:
+					{
+						using (_enumsLock.EnterScope())
+							_enumerators.RemoveWhere(p => p.Item2.storage == storage);
 
+						break;
+					}
+					case ActionTypes.Clear:
+					{
+						using (_enumsLock.EnterScope())
+							_enumerators.Clear();
+
+						break;
+					}
+					default:
+						throw new InvalidOperationException(type.To<string>());
+				}
+			}
+
+			(long, (IAsyncEnumerator<Message> enu, IMarketDataStorage, long transId) element) item;
+
+			using (_enumsLock.EnterScope())
+			{
 				if (_enumerators.Count == 0)
 					return false;
 
-				var pair = _enumerators.Dequeue();
-
-				var enumerator = pair.Value.Item1;
-
-				Current = (T)enumerator.Current;
-
-				if (enumerator.MoveNext())
-					_enumerators.Enqueue(GetServerTime(enumerator), pair.Value);
-				else
-					enumerator.DoDispose();
-
-				return true;
+				item = _enumerators.Dequeue();
 			}
 
-			private DateTimeOffset GetServerTime(IEnumerator enumerator)
+			var element = item.element;
+
+			var enumerator = element.enu;
+
+			Current = TrySetTransactionId(enumerator.Current, element.transId);
+
+			if (await enumerator.MoveNextAsync())
 			{
-				var serverTime = ((Message)enumerator.Current).GetServerTime();
+				var serverTime = enumerator.Current.GetServerTime().Ticks;
 
-				if (serverTime == null)
-					throw new InvalidOperationException();
-
-				return serverTime.Value;
+				using (_enumsLock.EnterScope())
+					_enumerators.Enqueue(serverTime, element);
 			}
+			else
+				await enumerator.DisposeAsync();
 
-			object IEnumerator.Current
+			return true;
+		}
+
+		private static TMessage TrySetTransactionId(Message message, long transactionId)
+		{
+			if (transactionId > 0)
 			{
-				get { return Current; }
+				if (message is ISubscriptionIdMessage subscrMsg)
+					subscrMsg.SetSubscriptionIds(subscriptionId: transactionId);
 			}
 
-			void IEnumerator.Reset()
+			return (TMessage)message;
+		}
+
+		async ValueTask IAsyncDisposable.DisposeAsync()
+		{
+			foreach (var enumerator in _enumerators.CopyAndClear())
+				await enumerator.Item2.enu.DisposeAsync();
+
+			_actions.Clear();
+
+			_storage._enumerators.Remove(this);
+
+			GC.SuppressFinalize(this);
+		}
+
+		public void AddAction(ActionTypes type, IMarketDataStorage storage, long transactionId)
+		{
+			_actions.Add((type, storage, transactionId));
+		}
+	}
+
+	private sealed class BasketEnumerable(BasketMarketDataStorage<TMessage> storage, DateTime date) : IBasketMarketDataStorageEnumerable<TMessage>
+	{
+		private readonly BasketMarketDataStorage<TMessage> _storage = storage ?? throw new ArgumentNullException(nameof(storage));
+		private readonly DateTime _date = date;
+
+		private IEnumerable<MessageTypes> _dataTypesCache;
+
+		public async ValueTask<IEnumerable<MessageTypes>> GetDataTypesAsync(CancellationToken cancellationToken)
+		{
+			if (_dataTypesCache is not null)
+				return _dataTypesCache;
+
+			var dataTypes = new List<MessageTypes>();
+
+			foreach (var s in _storage._innerStorages.Cache)
 			{
-				foreach (var enumerator in _enumerators)
-					enumerator.Value.Item1.Reset();
+				if (s.GetType().GetGenericType(typeof(InMemoryMarketDataStorage<>)) == null)
+				{
+					var dates = s.GetDatesAsync();
+					if (!await dates.ContainsAsync(_date, cancellationToken: cancellationToken))
+						continue;
+				}
+
+				dataTypes.Add(s.DataType.ToMessageType2());
 			}
 
-			void IDisposable.Dispose()
-			{
-				foreach (var enumerator in _enumerators)
-					enumerator.Value.Item1.DoDispose();
-
-				_enumerators.Clear();
-
-				_actions.Clear();
-
-				_storage._enumerators.Remove(this);
-			}
-
-			internal void AddAction(ActionType type, IMarketDataStorage storage)
-			{
-				_actions.Add(Tuple.Create(type, storage));
-			}
+			_dataTypesCache = dataTypes;
+			return dataTypes;
 		}
 
-		internal enum ActionType
+		IAsyncEnumerator<TMessage> IAsyncEnumerable<TMessage>.GetAsyncEnumerator(CancellationToken cancellationToken)
+			=> new BasketMarketDataStorageEnumerator(_storage, _date, cancellationToken);
+	}
+
+	private enum ActionTypes
+	{
+		Add,
+		Remove,
+		Clear
+	}
+	
+	private class BasketMarketDataStorageInnerList : CachedSynchronizedList<IMarketDataStorage>, IBasketMarketDataStorageInnerList
+	{
+		private readonly PairSet<IMarketDataStorage, long> _transactionIds = [];
+
+		public long TryGetTransactionId(IMarketDataStorage storage) => _transactionIds.TryGetValue(storage);
+
+		public void Add(IMarketDataStorage storage, long transactionId)
 		{
-			Add,
-			Remove,
-			Clear
+			if (transactionId > 0)
+				_transactionIds[storage] = transactionId;
+
+			base.Add(storage);
 		}
 
-		private readonly CachedSynchronizedList<IMarketDataStorage> _innerStorages = new CachedSynchronizedList<IMarketDataStorage>();
-		private readonly CachedSynchronizedList<BasketMarketDataStorageEnumerator> _enumerators = new CachedSynchronizedList<BasketMarketDataStorageEnumerator>();
-
-		/// <summary>
-		/// Вложенные хранилища маркет-данных.
-		/// </summary>
-		public ISynchronizedCollection<IMarketDataStorage> InnerStorages
+		public void Remove(long originalTransactionId)
 		{
-			get { return _innerStorages; }
+			if (_transactionIds.TryGetKey(originalTransactionId, out var storage))
+				Remove(storage);
 		}
 
-		/// <summary>
-		/// Создать <see cref="BasketMarketDataStorage{T}"/>.
-		/// </summary>
-		public BasketMarketDataStorage()
+		protected override bool OnRemove(IMarketDataStorage item)
 		{
-			_innerStorages.Added += InnerStoragesOnAdded;
-			_innerStorages.Removed += InnerStoragesOnRemoved;
-			_innerStorages.Cleared += InnerStoragesOnCleared;
+			_transactionIds.Remove(item);
+			return base.OnRemove(item);
 		}
 
-		/// <summary>
-		/// Освободить занятые ресурсы.
-		/// </summary>
-		protected override void DisposeManaged()
+		protected override void OnCleared()
 		{
-			_innerStorages.Added -= InnerStoragesOnAdded;
-			_innerStorages.Removed -= InnerStoragesOnRemoved;
-			_innerStorages.Cleared -= InnerStoragesOnCleared;
-
-			_innerStorages.Clear();
-
-			base.DisposeManaged();
+			_transactionIds.Clear();
+			base.OnCleared();
 		}
+	}
 
-		private void InnerStoragesOnAdded(IMarketDataStorage storage)
-		{
-			AddAction(ActionType.Add, storage);
-		}
+	private class BasketMarketDataSerializer(BasketMarketDataStorage<TMessage> parent) : IMarketDataSerializer<TMessage>
+	{
+		private readonly BasketMarketDataStorage<TMessage> _parent = parent ?? throw new ArgumentNullException(nameof(parent));
 
-		private void InnerStoragesOnRemoved(IMarketDataStorage storage)
-		{
-			AddAction(ActionType.Remove, storage);
-		}
+		StorageFormats IMarketDataSerializer.Format => _parent.InnerStorages.First().Serializer.Format;
 
-		private void InnerStoragesOnCleared()
-		{
-			AddAction(ActionType.Clear, null);
-		}
+		TimeSpan IMarketDataSerializer.TimePrecision => _parent.InnerStorages.First().Serializer.TimePrecision;
 
-		private void AddAction(ActionType type, IMarketDataStorage storage)
-		{
-			_enumerators.Cache.ForEach(e => e.AddAction(type, storage));
-		}
+		IMarketDataMetaInfo IMarketDataSerializer.CreateMetaInfo(DateTime date)
+			=> throw new NotSupportedException();
 
-		/// <summary>
-		/// Загрузить сообщения из вложенных хранилищ за указанную дату.
-		/// </summary>
-		/// <param name="date">Дата.</param>
-		/// <returns>Загрузчик сообщений.</returns>
-		public BasketMarketDataStorageEnumerator Load(DateTime date)
-		{
-			return new BasketMarketDataStorageEnumerator(this, date);
-		}
+		ValueTask IMarketDataSerializer.SerializeAsync(Stream stream, IEnumerable data, IMarketDataMetaInfo metaInfo, CancellationToken cancellationToken)
+			=> throw new NotSupportedException();
+
+		IAsyncEnumerable<TMessage> IMarketDataSerializer<TMessage>.DeserializeAsync(Stream stream, IMarketDataMetaInfo metaInfo)
+			=> throw new NotSupportedException();
+
+		ValueTask IMarketDataSerializer<TMessage>.SerializeAsync(Stream stream, IEnumerable<TMessage> data, IMarketDataMetaInfo metaInfo, CancellationToken cancellationToken)
+			=> throw new NotSupportedException();
+	}
+
+	private readonly BasketMarketDataStorageInnerList _innerStorages = new();
+	private readonly CachedSynchronizedList<BasketMarketDataStorageEnumerator> _enumerators = [];
+
+	/// <summary>
+	/// Embedded storages of market data.
+	/// </summary>
+	public IBasketMarketDataStorageInnerList InnerStorages => _innerStorages;
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="BasketMarketDataStorage{T}"/>.
+	/// </summary>
+	public BasketMarketDataStorage()
+	{
+		_innerStorages.Added += InnerStoragesOnAdded;
+		_innerStorages.Removed += InnerStoragesOnRemoved;
+		_innerStorages.Cleared += InnerStoragesOnCleared;
+
+		_serializer = new BasketMarketDataSerializer(this);
 	}
 
 	/// <summary>
-	/// Хранилище, генерирующее данные в процессе работы.
+	/// Release resources.
 	/// </summary>
-	/// <typeparam name="T">Тип данных.</typeparam>
-	public sealed class InMemoryMarketDataStorage<T> : IMarketDataStorage<T>
+	protected override void DisposeManaged()
 	{
-		private readonly Func<DateTime, IEnumerable<T>> _getData;
+		_innerStorages.Added -= InnerStoragesOnAdded;
+		_innerStorages.Removed -= InnerStoragesOnRemoved;
+		_innerStorages.Cleared -= InnerStoragesOnCleared;
 
-		IEnumerable<DateTime> IMarketDataStorage.Dates { get { return Enumerable.Empty<DateTime>(); } }
+		_innerStorages.Clear();
 
-		Security IMarketDataStorage.Security { get { return null; } }
+		base.DisposeManaged();
+	}
 
-		object IMarketDataStorage.Arg { get { return null; } }
+	/// <summary>
+	/// <see cref="MarketDataStorageCache"/>.
+	/// </summary>
+	public MarketDataStorageCache Cache { get; set; }
 
-		IMarketDataStorageDrive IMarketDataStorage.Drive { get { return null; } }
+	private void InnerStoragesOnAdded(IMarketDataStorage storage)
+		=> AddAction(ActionTypes.Add, storage, _innerStorages.TryGetTransactionId(storage));
 
-		bool IMarketDataStorage.AppendOnlyNew { get; set; }
+	private void InnerStoragesOnRemoved(IMarketDataStorage storage)
+		=> AddAction(ActionTypes.Remove, storage, 0);
 
-		Type IMarketDataStorage.DataType { get { return typeof(T); } }
+	private void InnerStoragesOnCleared()
+		=> AddAction(ActionTypes.Clear, null, 0);
 
-		IMarketDataSerializer IMarketDataStorage.Serializer
+	private void AddAction(ActionTypes type, IMarketDataStorage storage, long transactionId)
+		=> _enumerators.Cache.ForEach(e => e.AddAction(type, storage, transactionId));
+
+	IAsyncEnumerable<DateTime> IMarketDataStorage.GetDatesAsync()
+	{
+		return Impl();
+
+		async IAsyncEnumerable<DateTime> Impl([EnumeratorCancellation]CancellationToken cancellationToken = default)
 		{
-			get { return ((IMarketDataStorage<T>)this).Serializer; }
-		}
+			var dates = new HashSet<DateTime>();
 
-		IMarketDataSerializer<T> IMarketDataStorage<T>.Serializer
-		{
-			get { throw new NotSupportedException(); }
-		}
+			foreach (var storage in _innerStorages.Cache)
+			{
+				var storageDates = storage.GetDatesAsync();
 
-		IDataStorageReader<T> IMarketDataStorage<T>.GetReader(DateTime date)
-		{
-			throw new NotImplementedException();
-		}
+				await foreach (var date in storageDates.WithEnforcedCancellation(cancellationToken))
+					dates.Add(date);
+			}
 
-		/// <summary>
-		/// Создать <see cref="InMemoryMarketDataStorage{T}"/>.
-		/// </summary>
-		/// <param name="getData">Метод генерации данных для указанной даты.</param>
-		public InMemoryMarketDataStorage(Func<DateTime, IEnumerable<T>> getData)
-		{
-			if (getData == null)
-				throw new ArgumentNullException("getData");
-
-			_getData = getData;
-		}
-
-		/// <summary>
-		/// Загрузить данные.
-		/// </summary>
-		/// <param name="date">Дата, для которой необходимо загрузить данные.</param>
-		/// <returns>Данные. Если данных не существует, то будет возвращено пустое множество.</returns>
-		public IEnumerableEx<T> Load(DateTime date)
-		{
-			return _getData(date).ToEx();
-		}
-
-		IEnumerable IMarketDataStorage.Load(DateTime date)
-		{
-			return Load(date);
-		}
-
-		IMarketDataMetaInfo IMarketDataStorage.GetMetaInfo(DateTime date)
-		{
-			return null;
-		}
-
-		void IMarketDataStorage.Save(IEnumerable data)
-		{
-			throw new NotSupportedException();
-		}
-
-		void IMarketDataStorage.Delete(IEnumerable data)
-		{
-			throw new NotSupportedException();
-		}
-
-		void IMarketDataStorage.Delete(DateTime date)
-		{
-			throw new NotSupportedException();
-		}
-
-		void IMarketDataStorage<T>.Save(IEnumerable<T> data)
-		{
-			throw new NotSupportedException();
-		}
-
-		void IMarketDataStorage<T>.Delete(IEnumerable<T> data)
-		{
-			throw new NotSupportedException();
+			foreach (var date in dates.OrderBy())
+				yield return date;
 		}
 	}
+
+	/// <inheritdoc />
+	public virtual DataType DataType => throw new NotSupportedException();
+
+	/// <inheritdoc />
+	public virtual SecurityId SecurityId => throw new NotSupportedException();
+
+	IMarketDataStorageDrive IMarketDataStorage.Drive => throw new NotSupportedException();
+
+	bool IMarketDataStorage.AppendOnlyNew
+	{
+		get => throw new NotSupportedException();
+		set => throw new NotSupportedException();
+	}
+
+	ValueTask<int> IMarketDataStorage.SaveAsync(IEnumerable<Message> data, CancellationToken cancellationToken) => throw new NotSupportedException();
+	ValueTask<int> IMarketDataStorage<TMessage>.SaveAsync(IEnumerable<TMessage> data, CancellationToken cancellationToken) => throw new NotSupportedException();
+	
+	ValueTask IMarketDataStorage.DeleteAsync(IEnumerable<Message> data, CancellationToken cancellationToken) => throw new NotSupportedException();
+	ValueTask IMarketDataStorage<TMessage>.DeleteAsync(IEnumerable<TMessage> data, CancellationToken cancellationToken) => throw new NotSupportedException();
+	
+	ValueTask IMarketDataStorage.DeleteAsync(DateTime date, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+	IAsyncEnumerable<Message> IMarketDataStorage.LoadAsync(DateTime date) => LoadAsync(date);
+	IAsyncEnumerable<TMessage> IMarketDataStorage<TMessage>.LoadAsync(DateTime date) => LoadAsync(date);
+
+	async ValueTask<IMarketDataMetaInfo> IMarketDataStorage.GetMetaInfoAsync(DateTime date, CancellationToken cancellationToken)
+	{
+		date = date.Date.UtcKind();
+
+		foreach (var inner in _innerStorages.Cache)
+		{
+			var dates = inner.GetDatesAsync();
+
+			if (await dates.ContainsAsync(date, cancellationToken: cancellationToken))
+				return await inner.GetMetaInfoAsync(date, cancellationToken);
+		}
+
+		return null;
+	}
+	
+	private readonly IMarketDataSerializer<TMessage> _serializer;
+	IMarketDataSerializer<TMessage> IMarketDataStorage<TMessage>.Serializer => _serializer;
+	IMarketDataSerializer IMarketDataStorage.Serializer => ((IMarketDataStorage<TMessage>)this).Serializer;
+
+	/// <summary>
+	/// To load messages from embedded storages for specified date.
+	/// </summary>
+	/// <param name="date">Date.</param>
+	/// <returns>The messages loader.</returns>
+	public IBasketMarketDataStorageEnumerable<TMessage> LoadAsync(DateTime date)
+		=> new BasketEnumerable(this, date);
 }

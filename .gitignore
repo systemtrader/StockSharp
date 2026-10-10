@@ -3,6 +3,7 @@
 
 ## S#
 *dates.bin
+*dates.txt
 StockSharp.chm
 
 # User-specific files
@@ -11,7 +12,7 @@ StockSharp.chm
 *.sln.docstates
 
 # licx files
-*.licx
+# *.licx
 
 # Build results
 [Dd]ebug/
@@ -191,3 +192,14 @@ FakesAssemblies/
 # include referenced libraries
 !References/*
 Help
+Help.7z
+Documentation.shfbproj_Ivan
+
+.vs/
+
+.claude
+/reviewResults
+nul
+
+# Python validation scripts
+__pycache__/

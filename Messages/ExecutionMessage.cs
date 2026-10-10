@@ -1,502 +1,769 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// The types of data that contain information in <see cref="ExecutionMessage"/>.
+/// </summary>
+[DataContract]
+[Serializable]
+[Obsolete("For internal use only.")]
+public enum ExecutionTypes
 {
-	using System;
-	using System.ComponentModel;
-	using System.Runtime.Serialization;
-
-	using Ecng.Common;
-	using Ecng.Serialization;
-
-	using StockSharp.Localization;
+	/// <summary>
+	/// Tick trade.
+	/// </summary>
+	[EnumMember]
+	Tick,
 
 	/// <summary>
-	/// Типы данных, информация о которых содержится <see cref="ExecutionMessage"/>.
+	/// Transaction.
 	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public enum ExecutionTypes
+	[EnumMember]
+	Transaction,
+
+	/// <summary>
+	/// Obsolete.
+	/// </summary>
+	[EnumMember]
+	[Obsolete]
+	Obsolete,
+
+	/// <summary>
+	/// Order log.
+	/// </summary>
+	[EnumMember]
+	OrderLog,
+}
+
+/// <summary>
+/// The message contains information about the execution.
+/// </summary>
+[Serializable]
+[DataContract]
+public class ExecutionMessage : BaseSubscriptionIdMessage<ExecutionMessage>,
+	ITransactionIdMessage, IServerTimeMessage, ISecurityIdMessage, ISeqNumMessage,
+	IPortfolioNameMessage, IClientCodeMessage, IBrokerCodeMessage, IErrorMessage, IStrategyIdMessage, IGeneratedMessage,
+	IOrderMessage, ITickTradeMessage, IOrderLogMessage, ISystemMessage, IOwnerMessage
+{
+	OrderStates? IOrderMessage.State => OrderState;
+	decimal? IOrderMessage.Balance => Balance;
+	decimal? IOrderMessage.Volume => OrderVolume;
+
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SecurityIdKey,
+		Description = LocalizedStrings.SecurityIdKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public SecurityId SecurityId { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PortfolioKey,
+		Description = LocalizedStrings.PortfolioNameKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string PortfolioName { get; set; }
+
+	/// <summary>
+	/// Client code assigned by the broker.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ClientCodeKey,
+		Description = LocalizedStrings.ClientCodeDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string ClientCode { get; set; }
+
+	/// <summary>
+	/// Broker firm code.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.BrokerKey,
+		Description = LocalizedStrings.BrokerCodeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string BrokerCode { get; set; }
+
+	/// <summary>
+	/// The depositary where the physical security.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.DepoKey,
+		Description = LocalizedStrings.DepoNameKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string DepoName { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ServerTimeKey,
+		Description = LocalizedStrings.ServerTimeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public DateTime ServerTime { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TransactionKey,
+		Description = LocalizedStrings.TransactionIdKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public long TransactionId { get; set; }
+
+	/// <summary>
+	/// Is the action an order cancellation.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CancelKey,
+		Description = LocalizedStrings.IsActionOrderCancellationKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public bool IsCancellation { get; set; }
+
+	/// <summary>
+	/// Order ID.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.OrderIdKey,
+		Description = LocalizedStrings.OrderIdKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public long? OrderId { get; set; }
+
+	/// <summary>
+	/// Order ID (as string, if electronic board does not use numeric order ID representation).
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.IdStringKey,
+		Description = LocalizedStrings.OrderIdStringDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string OrderStringId { get; set; }
+
+	/// <summary>
+	/// Board order id. Uses in case of <see cref="OrderId"/> and <see cref="OrderStringId"/> is a brokerage system ids.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.OrderBoardIdKey,
+		Description = LocalizedStrings.OrderBoardIdDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string OrderBoardId { get; set; }
+
+	/// <summary>
+	/// Is the message contains order info.
+	/// </summary>
+	public bool HasOrderInfo { get; set; }
+
+	/// <summary>
+	/// Is the message contains trade info.
+	/// </summary>
+	public bool HasTradeInfo => TradePrice is not null || TradeId is not null || TradeVolume is not null || !TradeStringId.IsEmptyOrWhiteSpace();
+
+	/// <summary>
+	/// Order price.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PriceKey,
+		Description = LocalizedStrings.OrderPriceKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public decimal OrderPrice { get; set; }
+
+	/// <summary>
+	/// Number of contracts in the order.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.VolumeOrderKey,
+		Description = LocalizedStrings.OrderVolumeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public decimal? OrderVolume { get; set; }
+
+	/// <summary>
+	/// Number of contracts in the trade.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.VolumeTradeKey,
+		Description = LocalizedStrings.TradeVolumeDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public decimal? TradeVolume { get; set; }
+
+	/// <summary>
+	/// Visible quantity of contracts in order.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.VisibleVolumeKey,
+		Description = LocalizedStrings.VisibleVolumeDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public decimal? VisibleVolume { get; set; }
+
+	/// <summary>
+	/// Order side (buy or sell).
+	/// </summary>
+	/// <remarks>
+	/// <see langword="null"/> means the message states no side - not <see cref="Sides.Buy"/>. A side
+	/// is required wherever the message is the only source of truth for an order: a registration, an
+	/// order log entry, or the first report of an order the receiver has not seen. It is absent from
+	/// reports that merely update an order the receiver already identifies by
+	/// <see cref="BaseSubscriptionIdMessage{TMessage}.OriginalTransactionId"/>. For the initiator of a trade see
+	/// <see cref="OriginSide"/>.
+	/// </remarks>
+	[DataMember]
+	//[Nullable]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.DirectionKey,
+		Description = LocalizedStrings.OrderSideDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public Sides? Side { get; set; }
+
+	/// <summary>
+	/// Order contracts balance.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.BalanceKey,
+		Description = LocalizedStrings.OrderBalanceKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public decimal? Balance { get; set; }
+
+	/// <summary>
+	/// Order type.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.OrderTypeKey,
+		Description = LocalizedStrings.OrderTypeDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public OrderTypes? OrderType { get; set; }
+
+	/// <summary>
+	/// System order status.
+	/// </summary>
+	[DataMember]
+	[Browsable(false)]
+	//[Nullable]
+	public long? OrderStatus { get; set; }
+
+	/// <summary>
+	/// Order state.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.StateKey,
+		Description = LocalizedStrings.OrderStateDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public OrderStates? OrderState { get; set; }
+
+	/// <summary>
+	/// Placed order comment.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CommentKey,
+		Description = LocalizedStrings.OrderCommentKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string Comment { get; set; }
+
+	/// <summary>
+	/// Message for order (created by the trading system when registered, changed or cancelled).
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SystemCommentKey,
+		Description = LocalizedStrings.SystemCommentDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string SystemComment { get; set; }
+
+	/// <summary>
+	/// Is a system trade.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SystemKey,
+		Description = LocalizedStrings.IsSystemTradeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public bool? IsSystem { get; set; }
+
+	/// <inheritdoc/>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ExpirationKey,
+		Description = LocalizedStrings.OrderExpirationTimeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public DateTime? ExpiryDate { get; set; }
+
+	/// <summary>
+	/// Limit order execution condition.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ExecutionConditionKey,
+		Description = LocalizedStrings.ExecutionConditionDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public TimeInForce? TimeInForce { get; set; }
+
+	/// <summary>
+	/// Trade ID.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TradeIdKey,
+		Description = LocalizedStrings.TradeIdKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public long? TradeId { get; set; }
+
+	/// <summary>
+	/// Trade ID (as string, if electronic board does not use numeric order ID representation).
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.IdStringKey,
+		Description = LocalizedStrings.TradeIdStringKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string TradeStringId { get; set; }
+
+	/// <summary>
+	/// Trade price.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PriceKey,
+		Description = LocalizedStrings.TradePriceDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public decimal? TradePrice { get; set; }
+
+	/// <summary>
+	/// System trade status.
+	/// </summary>
+	[DataMember]
+	[Browsable(false)]
+	//[Nullable]
+	public long? TradeStatus { get; set; }
+
+	/// <summary>
+	/// Deal initiator (seller or buyer).
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.InitiatorKey,
+		Description = LocalizedStrings.DirectionDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public Sides? OriginSide { get; set; }
+
+	/// <summary>
+	/// Number of open positions (open interest).
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.OpenInterestKey,
+		Description = LocalizedStrings.OpenInterestDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public decimal? OpenInterest { get; set; }
+
+	/// <inheritdoc />
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ErrorKey,
+		Description = LocalizedStrings.OrderErrorKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	[XmlIgnore]
+	public Exception Error { get; set; }
+
+	/// <summary>
+	/// Order condition (e.g., stop- and algo- orders parameters).
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ConditionKey,
+		Description = LocalizedStrings.OrderConditionDescKey,
+		GroupName = LocalizedStrings.ConditionalOrderKey)]
+	[XmlIgnore]
+	public OrderCondition Condition { get; set; }
+
+	/// <summary>
+	/// Is tick uptrend or downtrend in price. Uses only <see cref="DataType"/> for <see cref="DataType.Ticks"/>.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.UpTrendKey,
+		Description = LocalizedStrings.UpTrendDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public bool? IsUpTick { get; set; }
+
+	/// <summary>
+	/// Commission (broker, exchange etc.). Uses when <see cref="DataType"/> set to <see cref="DataType.Transactions"/>.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CommissionKey,
+		Description = LocalizedStrings.CommissionDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public decimal? Commission { get; set; }
+
+	/// <summary>
+	/// Commission currency. Can be <see langword=""/>.
+	/// </summary>
+	public string CommissionCurrency { get; set; }
+
+	/// <summary>
+	/// Network latency. Uses when <see cref="DataType"/> set to <see cref="DataType.Transactions"/>.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.LatencyKey,
+		Description = LocalizedStrings.NetworkLatencyKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public TimeSpan? Latency { get; set; }
+
+	/// <summary>
+	/// Slippage in trade price. Uses when <see cref="DataType"/> set to <see cref="DataType.Transactions"/>.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SlippageKey,
+		Description = LocalizedStrings.SlippageTradeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public decimal? Slippage { get; set; }
+
+	/// <summary>
+	/// User order id. Uses when <see cref="DataType"/> set to <see cref="DataType.Transactions"/>.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.UserIdKey,
+		Description = LocalizedStrings.UserOrderIdKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string UserOrderId { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public string StrategyId { get; set; }
+
+	/// <summary>
+	/// Trading security currency.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CurrencyKey,
+		Description = LocalizedStrings.CurrencyDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public CurrencyTypes? Currency { get; set; }
+
+	/// <summary>
+	/// The profit, realized by trade.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PnLKey,
+		Description = LocalizedStrings.PnLKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public decimal? PnL { get; set; }
+
+	/// <summary>
+	/// The position, generated by order or trade.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PositionKey,
+		Description = LocalizedStrings.PositionKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Nullable]
+	public decimal? Position { get; set; }
+
+	/// <summary>
+	/// Is the order of market-maker.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.MarketMakerKey,
+		Description = LocalizedStrings.MarketMakerOrderKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public bool? IsMarketMaker { get; set; }
+
+	/// <summary>
+	/// Margin mode.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.MarginKey,
+		Description = LocalizedStrings.MarginModeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public MarginModes? MarginMode { get; set; }
+
+	/// <summary>
+	/// Is order manual.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ManualKey,
+		Description = LocalizedStrings.IsOrderManualKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public bool? IsManual { get; set; }
+
+	/// <summary>
+	/// Average execution price.
+	/// </summary>
+	[DataMember]
+	public decimal? AveragePrice { get; set; }
+
+	/// <summary>
+	/// Market price at the moment of order registration (best opposite-side price).
+	/// </summary>
+	[DataMember]
+	public decimal? MarketPrice { get; set; }
+
+	/// <summary>
+	/// Yield.
+	/// </summary>
+	[DataMember]
+	public decimal? Yield { get; set; }
+
+	/// <summary>
+	/// Minimum quantity of an order to be executed.
+	/// </summary>
+	[DataMember]
+	public decimal? MinVolume { get; set; }
+
+	/// <summary>
+	/// Position effect.
+	/// </summary>
+	[DataMember]
+	public OrderPositionEffects? PositionEffect { get; set; }
+
+	/// <summary>
+	/// Post-only order.
+	/// </summary>
+	[DataMember]
+	public bool? PostOnly { get; set; }
+
+	/// <summary>
+	/// Used to identify whether the order initiator is an aggressor or not in the trade.
+	/// </summary>
+	[DataMember]
+	public bool? Initiator { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public long SeqNum { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public DataType BuildFrom { get; set; }
+
+	/// <summary>
+	/// Margin leverage.
+	/// </summary>
+	[DataMember]
+	public int? Leverage { get; set; }
+
+	/// <summary>
+	/// Order id (buy).
+	/// </summary>
+	[DataMember]
+	public long? OrderBuyId { get; set; }
+
+	/// <summary>
+	/// Order id (sell).
+	/// </summary>
+	[DataMember]
+	public long? OrderSellId { get; set; }
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="ExecutionMessage"/>.
+	/// </summary>
+	public ExecutionMessage()
+		: base(MessageTypes.Execution)
 	{
-		/// <summary>
-		/// Тиковая сделка.
-		/// </summary>
-		[EnumMember]
-		Tick,
-
-		/// <summary>
-		/// Лог заявок.
-		/// </summary>
-		[EnumMember]
-		Order,
-
-		/// <summary>
-		/// Собственная сделка.
-		/// </summary>
-		[EnumMember]
-		Trade,
-
-		/// <summary>
-		/// Лог заявок
-		/// </summary>
-		[EnumMember]
-		OrderLog,
 	}
 
-	/// <summary>
-	/// Сообщение, содержащее информацию об исполнении.
-	/// </summary>
-	[Serializable]
-	[System.Runtime.Serialization.DataContract]
-	public sealed class ExecutionMessage : Message
+	/// <inheritdoc />
+	public override DataType DataType => DataTypeEx;
+
+	/// <inheritdoc />
+	public DataType DataTypeEx { get; set; }
+
+	long? IComplexIdMessage.Id => TradeId;
+	string IComplexIdMessage.StringId => TradeStringId;
+	decimal ITickTradeMessage.Price => TradePrice ?? default;
+	decimal ITickTradeMessage.Volume => TradeVolume ?? default;
+	long? ISystemMessage.Status => OrderStatus ?? TradeStatus;
+
+	IOrderMessage IOrderLogMessage.Order => this;
+	ITickTradeMessage IOrderLogMessage.Trade => HasTradeInfo ? this : null;
+
+	OrderTypes? IOrderMessage.Type => OrderType;
+	decimal IOrderMessage.Price => OrderPrice;
+
+	/// <inheritdoc />
+	public override string ToString()
 	{
-		/// <summary>
-		/// Идентификатор инструмента.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.SecurityIdKey)]
-		[DescriptionLoc(LocalizedStrings.SecurityIdKey, true)]
-		[MainCategory]
-		public SecurityId SecurityId { get; set; }
+		var str = base.ToString() + $",T(S)={ServerTime:yyyy/MM/dd HH:mm:ss.fff},({DataType}),Sec={SecurityId},O/T={HasOrderInfo}/{HasTradeInfo},Ord={OrderId}/{OrderStringId}/{TransactionId}/{OriginalTransactionId},Fail={Error},Price={OrderPrice},OrdVol={OrderVolume},TrVol={TradeVolume},Bal={Balance},TId={TradeId},Pf={PortfolioName},TPrice={TradePrice},UId={UserOrderId},Type={OrderType},State={OrderState},Cond={Condition}";
 
-		/// <summary>
-		/// Название портфеля.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.PortfolioKey)]
-		[DescriptionLoc(LocalizedStrings.PortfolioNameKey)]
-		[MainCategory]
-		public string PortfolioName { get; set; }
+		if (!StrategyId.IsEmpty())
+			str += $",Strategy={StrategyId}";
 
-		/// <summary>
-		/// Название депозитария, где находится физически ценная бумага.
-		/// </summary>
-		[DisplayNameLoc(LocalizedStrings.DepoKey)]
-		[DescriptionLoc(LocalizedStrings.DepoNameKey)]
-		[MainCategory]
-		public string DepoName { get; set; }
+		if (PositionEffect != null)
+			str += $",PosEffect={PositionEffect.Value}";
 
-		/// <summary>
-		/// Серверное время.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.ServerTimeKey)]
-		[DescriptionLoc(LocalizedStrings.ServerTimeKey, true)]
-		[MainCategory]
-		public DateTimeOffset ServerTime { get; set; }
+		if (PostOnly != null)
+			str += $",PostOnly={PostOnly.Value}";
 
-		/// <summary>
-		/// Идентификатор транзакции.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.TransactionKey)]
-		[DescriptionLoc(LocalizedStrings.TransactionIdKey, true)]
-		[MainCategory]
-		public long TransactionId { get; set; }
+		if (Initiator != null)
+			str += $",Initiator={Initiator.Value}";
 
-		/// <summary>
-		/// Идентификатор первоначальной транзакции, для которой данное сообщение является ответом.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.OriginalTrasactionKey)]
-		[DescriptionLoc(LocalizedStrings.OriginalTrasactionIdKey)]
-		[MainCategory]
-		public long OriginalTransactionId { get; set; }
+		if (SeqNum != default)
+			str += $",SeqNum={SeqNum}";
 
-		/// <summary>
-		/// Тип данных, информация о которых содержится <see cref="ExecutionMessage"/>.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.DataTypeKey)]
-		[DescriptionLoc(LocalizedStrings.Str110Key)]
-		[MainCategory]
-		[Nullable]
-		public ExecutionTypes? ExecutionType { get; set; }
+		if (Leverage != null)
+			str += $",Leverage={Leverage.Value}";
 
-		/// <summary>
-		/// Является ли действие отменой заявки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.CancelKey)]
-		[DescriptionLoc(LocalizedStrings.IsActionOrderCancellationKey)]
-		[MainCategory]
-		public bool IsCancelled { get; set; }
+		if (OrderBuyId != null)
+			str += $",buy (id)={OrderBuyId.Value}";
 
-		/// <summary>
-		/// Идентификатор заявки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.OrderIdKey)]
-		[DescriptionLoc(LocalizedStrings.OrderIdStringKey, true)]
-		[MainCategory]
-		[Nullable]
-		public long? OrderId { get; set; }
+		if (OrderSellId != null)
+			str += $",sell (id)={OrderSellId.Value}";
 
-		/// <summary>
-		/// Идентификатор заявки (ввиде строки, если электронная площадка не использует числовое представление идентификатора заявки).
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.OrderIdStringKey)]
-		[DescriptionLoc(LocalizedStrings.OrderIdStringDescKey)]
-		[MainCategory]
-		public string OrderStringId { get; set; }
+		if (MarketPrice != null)
+			str += $",MktPrice={MarketPrice.Value}";
 
-		/// <summary>
-		/// Идентификатор заявки электронной площадки. Используется, если <see cref="OrderId"/> или <see cref="OrderStringId"/> содержат идентификаторы брокерской системы.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str117Key)]
-		[DescriptionLoc(LocalizedStrings.Str118Key)]
-		[MainCategory]
-		public string OrderBoardId { get; set; }
+		return str;
+	}
 
-		/// <summary>
-		/// Идентификатор производной заявки (например, условная заявка сгенерировала реальную биржевую).
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.DerivedKey)]
-		[DescriptionLoc(LocalizedStrings.DerivedOrderIdKey)]
-		[MainCategory]
-		[Nullable]
-		public long? DerivedOrderId { get; set; }
+	/// <inheritdoc />
+	public long OwnerUserId { get; set; }
 
-		/// <summary>
-		/// Идентификатор производной заявки (например, условная заявка сгенерировала реальную биржевую).
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.DerivedStringKey)]
-		[DescriptionLoc(LocalizedStrings.DerivedStringDescKey)]
-		[MainCategory]
-		public string DerivedOrderStringId { get; set; }
+	/// <inheritdoc />
+	public long OwnerPortfolioId { get; set; }
 
-		/// <summary>
-		/// Цена заявки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.PriceKey)]
-		[DescriptionLoc(LocalizedStrings.OrderPriceKey)]
-		[MainCategory]
-		public decimal Price { get; set; }
+	/// <inheritdoc />
+	public override void CopyTo(ExecutionMessage destination)
+	{
+		base.CopyTo(destination);
 
-		/// <summary>
-		/// Количество контрактов в заявке.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.VolumeKey)]
-		[DescriptionLoc(LocalizedStrings.OrderVolumeKey)]
-		[MainCategory]
-		[Nullable]
-		public decimal? Volume { get; set; }
+		destination.Balance = Balance;
+		destination.Comment = Comment;
+		destination.Condition = Condition?.Clone();
+		destination.ClientCode = ClientCode;
+		destination.BrokerCode = BrokerCode;
+		destination.Currency = Currency;
+		destination.ServerTime = ServerTime;
+		destination.DepoName = DepoName;
+		destination.Error = Error;
+		destination.ExpiryDate = ExpiryDate;
+		destination.IsSystem = IsSystem;
+		destination.OpenInterest = OpenInterest;
+		destination.OrderId = OrderId;
+		destination.OrderStringId = OrderStringId;
+		destination.OrderBoardId = OrderBoardId;
+		destination.DataTypeEx = DataTypeEx;
+		destination.IsCancellation = IsCancellation;
+		destination.OrderState = OrderState;
+		destination.OrderStatus = OrderStatus;
+		destination.OrderType = OrderType;
+		destination.OriginSide = OriginSide;
+		destination.PortfolioName = PortfolioName;
+		destination.OrderPrice = OrderPrice;
+		destination.SecurityId = SecurityId;
+		destination.Side = Side;
+		destination.SystemComment = SystemComment;
+		destination.TimeInForce = TimeInForce;
+		destination.TradeId = TradeId;
+		destination.TradeStringId = TradeStringId;
+		destination.TradePrice = TradePrice;
+		destination.TradeStatus = TradeStatus;
+		destination.TransactionId = TransactionId;
+		destination.OrderVolume = OrderVolume;
+		destination.TradeVolume = TradeVolume;
+		destination.VisibleVolume = VisibleVolume;
+		destination.IsUpTick = IsUpTick;
+		destination.Commission = Commission;
+		destination.Latency = Latency;
+		destination.Slippage = Slippage;
+		destination.UserOrderId = UserOrderId;
+		destination.StrategyId = StrategyId;
 
-		/// <summary>
-		/// Видимое количество контрактов в заявке.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.VisibleVolumeKey)]
-		[DescriptionLoc(LocalizedStrings.Str127Key)]
-		[MainCategory]
-		[Nullable]
-		public decimal? VisibleVolume { get; set; }
+		destination.PnL = PnL;
+		destination.Position = Position;
 
-		/// <summary>
-		/// Направление заявки (покупка или продажа).
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str128Key)]
-		[DescriptionLoc(LocalizedStrings.Str129Key)]
-		[MainCategory]
-		public Sides Side { get; set; }
+		destination.HasOrderInfo = HasOrderInfo;
 
-		/// <summary>
-		/// Остаток контрактов в заявке.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str130Key)]
-		[DescriptionLoc(LocalizedStrings.Str131Key)]
-		[MainCategory]
-		[Nullable]
-		public decimal? Balance { get; set; }
+		destination.IsMarketMaker = IsMarketMaker;
+		destination.MarginMode = MarginMode;
+		destination.IsManual = IsManual;
 
-		/// <summary>
-		/// Тип заявки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str132Key)]
-		[DescriptionLoc(LocalizedStrings.Str133Key)]
-		[MainCategory]
-		public OrderTypes OrderType { get; set; }
+		destination.CommissionCurrency = CommissionCurrency;
 
-		/// <summary>
-		/// Системный статус заявки.
-		/// </summary>
-		[DataMember]
-		[Browsable(false)]
-		[Nullable]
-		public OrderStatus? OrderStatus { get; set; }
-
-		/// <summary>
-		/// Состояние заявки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.StateKey)]
-		[DescriptionLoc(LocalizedStrings.Str134Key)]
-		[MainCategory]
-		[Nullable]
-		public OrderStates? OrderState { get; set; }
-
-		/// <summary>
-		/// Комментарий к выставляемой заявке.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str135Key)]
-		[DescriptionLoc(LocalizedStrings.Str136Key)]
-		[MainCategory]
-		public string Comment { get; set; }
-
-		/// <summary>
-		/// Сообщение к заявке (создается торговой системой при регистрации, изменении или снятии).
-		/// </summary>
-		[DisplayNameLoc(LocalizedStrings.Str137Key)]
-		[DescriptionLoc(LocalizedStrings.Str138Key)]
-		[MainCategory]
-		public string SystemComment { get; set; }
-
-		/// <summary>
-		/// Является ли заявка системной.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str139Key)]
-		[DescriptionLoc(LocalizedStrings.Str140Key)]
-		[MainCategory]
-		[Nullable]
-		public bool? IsSystem { get; set; }
-
-		/// <summary>
-		/// Время экспирации заявки. По-умолчанию равно <see langword="null"/>, что означает действие заявки до отмены (GTC).
-		/// </summary>
-		/// <remarks>
-		/// Если значение равно <see langword="null"/> или <see cref="DateTimeOffset.MaxValue"/>, то заявка выставляется до отмены (GTC).
-		/// Иначе, указывается конкретный срок.
-		/// </remarks>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str141Key)]
-		[DescriptionLoc(LocalizedStrings.Str142Key)]
-		[MainCategory]
-		public DateTimeOffset? ExpiryDate { get; set; }
-
-		/// <summary>
-		/// Условие исполнения лимитированной заявки.
-		/// </summary>
-		[DisplayNameLoc(LocalizedStrings.Str143Key)]
-		[DescriptionLoc(LocalizedStrings.Str144Key)]
-		[MainCategory]
-		[Nullable]
-		public TimeInForce? TimeInForce { get; set; }
-
-		/// <summary>
-		/// Идентификатор сделки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.OrderIdKey)]
-		[DescriptionLoc(LocalizedStrings.Str145Key)]
-		[MainCategory]
-		[Nullable]
-		public long? TradeId { get; set; }
-
-		/// <summary>
-		/// Идентификатор сделки (ввиде строки, если электронная площадка не использует числовое представление идентификатора сделки).
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.OrderIdStringKey)]
-		[DescriptionLoc(LocalizedStrings.Str146Key)]
-		[MainCategory]
-		public string TradeStringId { get; set; }
-
-		/// <summary>
-		/// Цена сделки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.PriceKey)]
-		[DescriptionLoc(LocalizedStrings.Str147Key)]
-		[MainCategory]
-		[Nullable]
-		public decimal? TradePrice { get; set; }
-
-		/// <summary>
-		/// Системный статус сделки.
-		/// </summary>
-		[DataMember]
-		[Browsable(false)]
-		[Nullable]
-		public int? TradeStatus { get; set; }
-
-		/// <summary>
-		/// Инициатор сделки (продавец или покупатель).
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str148Key)]
-		[DescriptionLoc(LocalizedStrings.Str149Key)]
-		[MainCategory]
-		[Nullable]
-		public Sides? OriginSide { get; set; }
-
-		/// <summary>
-		/// Количество открытых позиций (открытый интерес).
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str150Key)]
-		[DescriptionLoc(LocalizedStrings.Str151Key)]
-		[MainCategory]
-		[Nullable]
-		public decimal? OpenInterest { get; set; }
-
-		/// <summary>
-		/// Ошибка регистрации/отмены заявки.
-		/// </summary>
-		[DisplayNameLoc(LocalizedStrings.Str152Key)]
-		[DescriptionLoc(LocalizedStrings.Str153Key)]
-		[MainCategory]
-		public Exception Error { get; set; }
-
-		/// <summary>
-		/// Условие заявки (например, параметры стоп- или алго- заявков).
-		/// </summary>
-		[DisplayNameLoc(LocalizedStrings.Str154Key)]
-		[DescriptionLoc(LocalizedStrings.Str155Key)]
-		[CategoryLoc(LocalizedStrings.Str156Key)]
-		public OrderCondition Condition { get; set; }
-
-		///// <summary>
-		///// Является ли сообщение последним в запрашиваемом пакете (только для исторических сделок).
-		///// </summary>
-		//[DataMember]
-		//[DisplayName("Последний")]
-		//[Description("Является ли сообщение последним в запрашиваемом пакете (только для исторических сделок).")]
-		//[MainCategory]
-		//public bool IsFinished { get; set; }
-
-		/// <summary>
-		/// Является ли тик восходящим или нисходящим в цене. Заполняется только для <see cref="ExecutionType"/> равным <see cref="ExecutionTypes.Tick"/>.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str157Key)]
-		[DescriptionLoc(LocalizedStrings.Str158Key)]
-		[MainCategory]
-		[Nullable]
-		public bool? IsUpTick { get; set; }
-
-		/// <summary>
-		/// Комиссия (брокерская, биржевая и т.д.).  Заполняется при <see cref="ExecutionType"/> равном <see cref="ExecutionTypes.Order"/> или <see cref="ExecutionTypes.Trade"/>.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str159Key)]
-		[DescriptionLoc(LocalizedStrings.Str160Key)]
-		[MainCategory]
-		[Nullable]
-		public decimal? Commission { get; set; }
-
-		/// <summary>
-		/// Сетевая задержка. Заполняется при <see cref="ExecutionType"/> равном <see cref="ExecutionTypes.Order"/>.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str161Key)]
-		[DescriptionLoc(LocalizedStrings.Str162Key)]
-		[MainCategory]
-		[Nullable]
-		public TimeSpan? Latency { get; set; }
-
-		/// <summary>
-		/// Проскальзывание в цене сделки. Заполняется при <see cref="ExecutionType"/> равном <see cref="ExecutionTypes.Trade"/>.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str163Key)]
-		[DescriptionLoc(LocalizedStrings.Str164Key)]
-		[MainCategory]
-		[Nullable]
-		public decimal? Slippage { get; set; }
-
-		/// <summary>
-		/// Пользовательский идентификатор заявки. Заполняется при <see cref="ExecutionType"/> равном <see cref="ExecutionTypes.Order"/>.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str165Key)]
-		[DescriptionLoc(LocalizedStrings.Str166Key)]
-		[MainCategory]
-		public string UserOrderId { get; set; }
-
-		/// <summary>
-		/// Создать <see cref="ExecutionMessage"/>.
-		/// </summary>
-		public ExecutionMessage()
-			: base(MessageTypes.Execution)
-		{
-		}
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",T(S)={0:yyyy/MM/dd HH:mm:ss.fff},({1}),Sec={2},Ord={3}/{4}/{5},Fail={6},TId={7},Pf={8},TPrice={9},UId={10}"
-				.Put(ServerTime, ExecutionType, SecurityId, OrderId, TransactionId, OriginalTransactionId,
-					Error, TradeId, PortfolioName, TradePrice, UserOrderId);
-		}
-
-		/// <summary>
-		/// Создать копию объекта <see cref="ExecutionMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			var clone = new ExecutionMessage
-			{
-				Balance = Balance,
-				Comment = Comment,
-				Condition = Condition.CloneNullable(),
-				ServerTime = ServerTime,
-				DepoName = DepoName,
-				Error = Error,
-				ExpiryDate = ExpiryDate,
-				IsSystem = IsSystem,
-				LocalTime = LocalTime,
-				OpenInterest = OpenInterest,
-				OrderId = OrderId,
-				OrderStringId = OrderStringId,
-				OrderBoardId = OrderBoardId,
-				ExecutionType = ExecutionType,
-				IsCancelled = IsCancelled,
-				//Action = Action,
-				OrderState = OrderState,
-				OrderStatus = OrderStatus,
-				OrderType = OrderType,
-				OriginSide = OriginSide,
-				PortfolioName = PortfolioName,
-				Price = Price,
-				SecurityId = SecurityId,
-				Side = Side,
-				SystemComment = SystemComment,
-				TimeInForce = TimeInForce,
-				TradeId = TradeId,
-				TradeStringId = TradeStringId,
-				TradePrice = TradePrice,
-				TradeStatus = TradeStatus,
-				TransactionId = TransactionId,
-				OriginalTransactionId = OriginalTransactionId,
-				Volume = Volume,
-				//IsFinished = IsFinished,
-				VisibleVolume = VisibleVolume,
-				IsUpTick = IsUpTick,
-				Commission = Commission,
-				Latency = Latency,
-				Slippage = Slippage,
-				UserOrderId = UserOrderId,
-
-				DerivedOrderId = DerivedOrderId,
-				DerivedOrderStringId = DerivedOrderStringId,
-			};
-
-			this.CopyExtensionInfo(clone);
-
-			return clone;
-		}
+		destination.AveragePrice = AveragePrice;
+		destination.Yield = Yield;
+		destination.MinVolume = MinVolume;
+		destination.PositionEffect = PositionEffect;
+		destination.PostOnly = PostOnly;
+		destination.Initiator = Initiator;
+		destination.SeqNum = SeqNum;
+		destination.BuildFrom = BuildFrom;
+		destination.Leverage = Leverage;
+		destination.OrderBuyId = OrderBuyId;
+		destination.OrderSellId = OrderSellId;
+		destination.MarketPrice = MarketPrice;
+		destination.OwnerUserId = OwnerUserId;
+		destination.OwnerPortfolioId = OwnerPortfolioId;
 	}
 }

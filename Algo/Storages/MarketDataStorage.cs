@@ -1,402 +1,391 @@
-namespace StockSharp.Algo.Storages
+namespace StockSharp.Algo.Storages;
+
+abstract class MarketDataStorage<TMessage, TId> : IMarketDataStorage<TMessage>
+	where TMessage : Message, IServerTimeMessage
 {
-	using System;
-	using System.Collections;
-	using System.Collections.Generic;
-	using System.IO;
-	using System.Linq;
-	using System.Reflection;
+	private readonly Func<TMessage, SecurityId> _getSecurityId;
+	private readonly Func<TMessage, TId> _getId;
+	private readonly Func<TMessage, bool> _isValid;
+	private readonly SynchronizedDictionary<DateTime, AsyncReaderWriterLock> _locks = [];
+	private readonly AsyncReaderWriterLock _dateMetaInfosLock = new();
+	private readonly Dictionary<DateTime, IMarketDataMetaInfo> _dateMetaInfos = [];
 
-	using Ecng.Collections;
-	using Ecng.Common;
-	using Ecng.Serialization;
-
-	using StockSharp.BusinessEntities;
-	using StockSharp.Messages;
-	using StockSharp.Localization;
-
-	interface IMarketDataStorageInfo
+	protected MarketDataStorage(SecurityId securityId, DataType dataType, Func<TMessage, SecurityId> getSecurityId, Func<TMessage, TId> getId, IMarketDataSerializer<TMessage> serializer, IMarketDataStorageDrive drive, Func<TMessage, bool> isValid)
 	{
-		DateTimeOffset GetTime(object data);
+		_dataType = dataType ?? throw new ArgumentNullException(nameof(dataType));
+
+		if (_dataType.IsSecurityRequired && securityId == default)
+			throw new ArgumentException(LocalizedStrings.EmptySecId, nameof(securityId));
+
+		SecurityId = securityId;
+
+		AppendOnlyNew = true;
+
+		_getSecurityId = getSecurityId ?? throw new ArgumentNullException(nameof(getSecurityId));
+		_getId = getId ?? throw new ArgumentNullException(nameof(getId));
+		Drive = drive ?? throw new ArgumentNullException(nameof(drive));
+		Serializer = serializer ?? throw new ArgumentNullException(nameof(serializer));
+		_isValid = isValid ?? throw new ArgumentNullException(nameof(isValid));
 	}
 
-	interface IMarketDataStorageInfo<in TData> : IMarketDataStorageInfo
+	IAsyncEnumerable<DateTime> IMarketDataStorage.GetDatesAsync() => Drive.GetDatesAsync();
+
+	private readonly DataType _dataType;
+	DataType IMarketDataStorage.DataType => _dataType;
+
+	public SecurityId SecurityId { get; }
+
+	public bool AppendOnlyNew { get; set; }
+
+	IMarketDataSerializer IMarketDataStorage.Serializer => Serializer;
+	public IMarketDataSerializer<TMessage> Serializer { get; }
+
+	public IMarketDataStorageDrive Drive { get; }
+
+	protected DateTime GetTruncatedTime(TMessage data) => data.ServerTime.StorageTruncate(Serializer.TimePrecision);
+
+	private AsyncReaderWriterLock GetLock(DateTime date) => _locks.SafeAdd(date);
+	private AwaitableDisposable<IDisposable> GetReadSync(DateTime date, CancellationToken cancellationToken) => GetLock(date).ReaderLockAsync(cancellationToken);
+	private AwaitableDisposable<IDisposable> GetWriteSync(DateTime date, CancellationToken cancellationToken) => GetLock(date).WriterLockAsync(cancellationToken);
+
+	private ValueTask<Stream> LoadStreamAsync(DateTime date, bool readOnly, CancellationToken cancellationToken)
+		=> Drive.LoadStreamAsync(date, readOnly, cancellationToken);
+
+	private bool SecurityIdEqual(SecurityId securityId) => securityId.SecurityCode.EqualsIgnoreCase(SecurityId.SecurityCode) && securityId.BoardCode.EqualsIgnoreCase(SecurityId.BoardCode);
+
+	public async ValueTask<int> SaveAsync(IEnumerable<TMessage> data, CancellationToken cancellationToken)
 	{
-		DateTimeOffset GetTime(TData data);
+		if (data == null)
+			throw new ArgumentNullException(nameof(data));
+
+		var count = 0;
+
+		foreach (var group in data.Where(_isValid).GroupBy(d =>
+		{
+			var securityId = _getSecurityId(d);
+
+			if (securityId != default && !SecurityIdEqual(securityId))
+				throw new ArgumentException(LocalizedStrings.SecIdMustBe.Put(typeof(TMessage).Name, securityId, SecurityId));
+
+			var time = d.ServerTime;
+
+			if (time == DateTime.MinValue)
+				throw new ArgumentException(LocalizedStrings.EmptyMessageTime.Put(d));
+
+			return time.Date;
+		}))
+		{
+			var date = group.Key;
+			var newItems = group.OrderBy(e => e.ServerTime).ToArray();
+
+			using var _ = await GetWriteSync(date, cancellationToken);
+
+			var stream = await LoadStreamAsync(date, false, cancellationToken);
+
+			try
+			{
+				var metaInfo = await GetInfo(stream, date, cancellationToken);
+
+				if (metaInfo == null)
+				{
+					stream = new MemoryStream();
+					metaInfo = Serializer.CreateMetaInfo(date);
+				}
+
+				var diff = await SaveAsync(stream, metaInfo, newItems, false, cancellationToken);
+
+				if (diff == 0)
+					continue;
+
+				count += diff;
+
+				if (stream is not MemoryStream)
+					continue;
+
+				stream.Position = 0;
+				await Drive.SaveStreamAsync(date, stream, cancellationToken);
+			}
+			finally
+			{
+				stream.Dispose();
+			}
+		}
+
+		return count;
 	}
 
-	[Obfuscation(Feature = "Apply to member * when abstract: renaming", Exclude = true)]
-	abstract class MarketDataStorage<TData, TId> : IMarketDataStorage<TData>, IMarketDataStorageInfo<TData>
+	private async ValueTask<int> SaveAsync(Stream stream, IMarketDataMetaInfo metaInfo, TMessage[] data, bool isOverride, CancellationToken cancellationToken)
 	{
-		private readonly Func<TData, DateTimeOffset> _getTime;
-		private readonly Func<TData, SecurityId> _getSecurityId;
-		private readonly Func<TData, TId> _getId;
-		private readonly SynchronizedDictionary<DateTime, SyncObject> _syncRoots = new SynchronizedDictionary<DateTime, SyncObject>();
+		if (stream == null)
+			throw new ArgumentNullException(nameof(stream));
 
-		protected MarketDataStorage(Security security, object arg, Func<TData, DateTimeOffset> getTime, Func<TData, SecurityId> getSecurity, Func<TData, TId> getId, IMarketDataSerializer<TData> serializer, IMarketDataStorageDrive drive)
-			: this(security.ToSecurityId(), arg, getTime, getSecurity, getId, serializer, drive)
+		if (metaInfo == null)
+			throw new ArgumentNullException(nameof(metaInfo));
+
+		if (data == null)
+			throw new ArgumentNullException(nameof(data));
+
+		if (data.Length == 0)
+			throw new ArgumentOutOfRangeException(nameof(data));
+
+		if (metaInfo.Count == 0)
 		{
-			if (security == null)
-				throw new ArgumentNullException("security");
+			data = [.. FilterNewData(data, metaInfo)];
 
-			if (security.Id.IsEmpty())
-				throw new ArgumentException(LocalizedStrings.Str1025, "security");
+			if (data.IsEmpty())
+				return 0;
 
-			Security = security;
+			var time = GetTruncatedTime(data[0]);
+
+			//var priceStep = Security.PriceStep;
+			//var volumeStep = Security.VolumeStep;
+
+			//metaInfo.PriceStep = priceStep == null || priceStep == 0 ? 0.01m : priceStep.Value;
+			//metaInfo.VolumeStep = volumeStep == null || volumeStep == 0 ? 1m : volumeStep.Value;
+			metaInfo.LastTime = time;
+			metaInfo.FirstTime = time;
+
+			/*metaInfo.FirstPriceStep = */((MetaInfo)metaInfo).LastPriceStep = metaInfo.PriceStep;
+		}
+		else if (AppendOnlyNew)
+		{
+			data = [.. FilterNewData(data, metaInfo)];
+
+			if (data.IsEmpty())
+				return 0;
 		}
 
-		protected MarketDataStorage(SecurityId securityId, object arg, Func<TData, DateTimeOffset> getTime, Func<TData, SecurityId> getSecurityId, Func<TData, TId> getId, IMarketDataSerializer<TData> serializer, IMarketDataStorageDrive drive)
+		if (!isOverride && _dataType == DataType.MarketDepth)
 		{
-			if (securityId.IsDefault())
-				throw new ArgumentException(LocalizedStrings.Str1025, "securityId");
+			var isEmpty = metaInfo.Count == 0;
+			var isIncremental = default(bool?);
 
-			if (getTime == null)
-				throw new ArgumentNullException("getTime");
-
-			if (getSecurityId == null)
-				throw new ArgumentNullException("getSecurityId");
-
-			if (getId == null)
-				throw new ArgumentNullException("getId");
-
-			if (serializer == null)
-				throw new ArgumentNullException("serializer");
-
-			if (drive == null)
-				throw new ArgumentNullException("drive");
-
-			SecurityId = securityId;
-
-			AppendOnlyNew = true;
-
-			_getTime = getTime;
-			_getSecurityId = getSecurityId;
-			_getId = getId;
-			Drive = drive;
-			Serializer = serializer;
-			_arg = arg;
-		}
-
-		IEnumerable<DateTime> IMarketDataStorage.Dates
-		{
-			get { return Drive.Dates; }
-		}
-
-		Type IMarketDataStorage.DataType
-		{
-			get { return typeof(TData); }
-		}
-
-		public SecurityId SecurityId { get; private set; }
-
-		public Security Security { get; private set; }
-
-		private readonly object _arg;
-
-		object IMarketDataStorage.Arg
-		{
-			get { return _arg; }
-		}
-
-		public bool AppendOnlyNew { get; set; }
-
-		IMarketDataSerializer IMarketDataStorage.Serializer { get { return Serializer; } }
-		public IMarketDataSerializer<TData> Serializer { get; private set; }
-
-		public IMarketDataStorageDrive Drive { get; private set; }
-
-		private DateTime GetTruncatedTime(TData data)
-		{
-			return _getTime(data).Truncate().UtcDateTime;
-		}
-
-		private SyncObject GetSync(DateTime time)
-		{
-			return _syncRoots.SafeAdd(time);
-		}
-
-		private Stream LoadStream(DateTime date)
-		{
-			return Drive.LoadStream(date);
-		}
-
-		public void Save(IEnumerable<TData> data)
-		{
-			if (data == null)
-				throw new ArgumentNullException("data");
-
-			foreach (var group in data.GroupBy(d =>
+			for (int i = 0; i < data.Length; i++)
 			{
-				var security = _getSecurityId(d);
-
-				if (!security.IsDefault() && (security.SecurityCode != SecurityId.SecurityCode || security.BoardCode != SecurityId.BoardCode))
-					throw new ArgumentException(LocalizedStrings.Str1026Params.Put(typeof(TData).Name, security, SecurityId));
-
-				var time = _getTime(d);
-
-				if (time == DateTimeOffset.MinValue)
-					throw new ArgumentException(LocalizedStrings.EmptyMessageTime.Put(d));
-
-				return time.UtcDateTime.Date;
-			}))
-			{
-				var date = group.Key;
-				var newItems = group.OrderBy(_getTime).ToArray();
-
-				lock (GetSync(date))
+				if (data[i] is QuoteChangeMessage quoteMsg)
 				{
-					var stream = LoadStream(date);
-
-					try
+					if (isEmpty)
 					{
-						var metaInfo = GetInfo(stream, date);
-
-						if (metaInfo == null)
+						if (isIncremental == null)
+							isIncremental = quoteMsg.State != null;
+						else
 						{
-							stream = new MemoryStream();
-							metaInfo = Serializer.CreateMetaInfo(date);
-						}
-
-						Save(stream, metaInfo, newItems, false);
-
-						if (!(stream is MemoryStream))
-							continue;
-
-						stream.Position = 0;
-						Drive.SaveStream(date, stream);
-					}
-					finally
-					{
-						stream.Dispose();
-					}
-				}
-			}
-		}
-
-		private void Save(Stream stream, IMarketDataMetaInfo metaInfo, TData[] data, bool isOverride)
-		{
-			if (stream == null)
-				throw new ArgumentNullException("stream");
-
-			if (metaInfo == null)
-				throw new ArgumentNullException("metaInfo");
-
-			if (data == null)
-				throw new ArgumentNullException("data");
-
-			if (data.Length == 0)
-				throw new ArgumentOutOfRangeException("data");
-
-			if (metaInfo.Count == 0)
-			{
-				var time = GetTruncatedTime(data[0]);
-
-				metaInfo.PriceStep = Security.PriceStep ?? 0.01m;
-				metaInfo.VolumeStep = Security.VolumeStep ?? 1m;
-				metaInfo.LastTime = time;
-				metaInfo.FirstTime = time;
-			}
-			else
-			{
-				if (AppendOnlyNew)
-				{
-					data = FilterNewData(data, metaInfo).ToArray();
-
-					if (data.IsEmpty())
-						return;
-				}
-			}
-
-			var newDayData = Serializer.Serialize(data, metaInfo);
-
-			if (isOverride)
-				metaInfo.Count = data.Length;
-			else
-				metaInfo.Count += data.Length;
-
-			stream.Position = 0;
-			metaInfo.Write(stream);
-
-			if (isOverride)
-				stream.SetLength(stream.Position);
-			else
-				stream.Position = stream.Length;
-
-			stream.WriteRaw(newDayData);
-		}
-
-		protected virtual IEnumerable<TData> FilterNewData(IEnumerable<TData> data, IMarketDataMetaInfo metaInfo)
-		{
-			var pt = metaInfo.LastTime;
-			return data.Where(i => GetTruncatedTime(i) > pt);
-		}
-
-		void IMarketDataStorage.Save(IEnumerable data)
-		{
-			Save(data.Cast<TData>());
-		}
-
-		void IMarketDataStorage.Delete(IEnumerable data)
-		{
-			Delete(data.Cast<TData>());
-		}
-
-		public void Delete(IEnumerable<TData> data)
-		{
-			if (data == null)
-				throw new ArgumentNullException("data");
-
-			foreach (var group in data.GroupBy(i => _getTime(i).UtcDateTime.Date))
-			{
-				var date = group.Key;
-
-				lock (GetSync(date))
-				{
-					var stream = LoadStream(date);
-
-					try
-					{
-						var metaInfo = GetInfo(stream, date);
-
-						if (metaInfo == null)
-							continue;
-
-						var count = metaInfo.Count;
-
-						if (count != group.Count())
-						{
-							var loadedData = new Dictionary<TId, List<TData>>();
-
-							foreach (var item in Serializer.Deserialize(stream, metaInfo))
+							if (isIncremental.Value)
 							{
-								var id = _getId(item);
-
-								var loadedItems = loadedData.TryGetValue(id);
-
-								if (loadedItems == null)
-								{
-									loadedItems = new List<TData> { item };
-									loadedData.Add(id, loadedItems);
-								}
-								else
-									loadedItems.Add(item);
-							}
-
-							foreach (var item in group)
-								loadedData.Remove(_getId(item));
-
-							if (loadedData.Count > 0)
-							{
-								// повторная иницилизация потока, так как предыдущий раз он был закрыл выше
-								// при десериализации
-								stream = LoadStream(date);
-
-								Save(stream, Serializer.CreateMetaInfo(date),
-									loadedData.Values.SelectMany(l => l).ToArray(), true);
-
-								stream.Dispose();
-								stream = null;
+								if (quoteMsg.State == null)
+									throw new InvalidOperationException(LocalizedStrings.StorageRequiredIncremental.Put(true));
 							}
 							else
 							{
-								((IMarketDataStorage)this).Delete(date);
-								stream = null;
+								if (quoteMsg.State != null)
+									throw new InvalidOperationException(LocalizedStrings.StorageRequiredIncremental.Put(false));
 							}
 						}
-						else
-						{
-							stream.Dispose();
-							stream = null;
-
-							((IMarketDataStorage)this).Delete(date);
-						}
 					}
-					catch
+				}
+			}
+		}
+
+		var newDayData = new MemoryStream();
+
+		await Serializer.SerializeAsync(newDayData, data, metaInfo, cancellationToken);
+
+		if (isOverride)
+			metaInfo.Count = data.Length;
+		else
+			metaInfo.Count += data.Length;
+
+		stream.Position = 0;
+		metaInfo.Write(stream);
+
+		if (isOverride || metaInfo.IsOverride)
+			stream.SetLength(stream.Position);
+		else
+			stream.Position = stream.Length;
+
+		newDayData.Position = 0;
+		newDayData.CopyTo(stream);
+
+		return data.Length;
+	}
+
+	protected virtual IEnumerable<TMessage> FilterNewData(IEnumerable<TMessage> data, IMarketDataMetaInfo metaInfo)
+	{
+		var lastTime = metaInfo.LastTime;
+
+		foreach (var item in data)
+		{
+			var time = GetTruncatedTime(item);
+
+			if (time < lastTime)
+				continue;
+
+			lastTime = time;
+			yield return item;
+		}
+	}
+
+	ValueTask<int> IMarketDataStorage.SaveAsync(IEnumerable<Message> data, CancellationToken cancellationToken)
+	{
+		return SaveAsync(data.Cast<TMessage>(), cancellationToken);
+	}
+
+	ValueTask IMarketDataStorage.DeleteAsync(IEnumerable<Message> data, CancellationToken cancellationToken)
+	{
+		return DeleteAsync(data.Cast<TMessage>(), cancellationToken);
+	}
+
+	public async ValueTask DeleteAsync(IEnumerable<TMessage> data, CancellationToken cancellationToken)
+	{
+		if (data == null)
+			throw new ArgumentNullException(nameof(data));
+
+		foreach (var group in data.GroupBy(i => i.ServerTime.Date))
+		{
+			var date = group.Key;
+
+			using var _ = await GetWriteSync(date, cancellationToken);
+
+			var stream = await LoadStreamAsync(date, true, cancellationToken);
+
+			try
+			{
+				var metaInfo = await GetInfo(stream, date, cancellationToken);
+
+				if (metaInfo == null)
+					continue;
+
+				var loadedData = new Dictionary<TId, List<TMessage>>();
+
+				await foreach (var item in Serializer.DeserializeAsync(stream, metaInfo).WithEnforcedCancellation(cancellationToken))
+				{
+					var id = _getId(item);
+
+					var loadedItems = loadedData.TryGetValue(id);
+
+					if (loadedItems == null)
 					{
-						if (stream != null)
-							stream.Dispose();
-
-						throw;
+						loadedItems = [item];
+						loadedData.Add(id, loadedItems);
 					}
+					else
+						loadedItems.Add(item);
 				}
-			}
-		}
 
-		public IEnumerableEx<TData> Load(DateTime date)
-		{
-			lock (GetSync(date))
-			{
-				var stream = LoadStream(date);
+				// A delete names records, so what is removed is what the day actually holds of them.
+				// Matching by how many were asked for would drop a whole day for records it never had.
+				var removed = false;
 
-				try
+				foreach (var item in group)
+					removed |= loadedData.Remove(_getId(item));
+
+				stream.Dispose();
+				stream = null;
+
+				if (!removed)
+					continue;
+
+				if (loadedData.Count > 0)
 				{
-					var metaInfo = GetInfo(stream, date);
+					stream = await LoadStreamAsync(date, false, cancellationToken);
 
-					if (metaInfo == null)
-						return Enumerable.Empty<TData>().ToEx();
+					await SaveAsync(stream, Serializer.CreateMetaInfo(date),
+						[.. loadedData.Values.SelectMany(l => l)], true,
+						cancellationToken);
 
-					// нельзя закрывать поток, так как из него будут читаться данные через энумератор
-					//using (stream)
-					return Serializer.Deserialize(stream, metaInfo);
-				}
-				catch (Exception)
-				{
 					stream.Dispose();
-					throw;
+					stream = null;
+				}
+				else
+				{
+					await DoDelete(date, cancellationToken);
 				}
 			}
-		}
-
-		public IDataStorageReader<TData> GetReader(DateTime date)
-		{
-			lock (GetSync(date))
+			finally
 			{
-				var stream = LoadStream(date);
-				var metaInfo = GetInfo(stream, date);
-
-				return new DataStorageReader<TData>(stream, metaInfo, Serializer);
+				stream?.Dispose();
 			}
 		}
+	}
 
-		IMarketDataMetaInfo IMarketDataStorage.GetMetaInfo(DateTime date)
+	public IAsyncEnumerable<TMessage> LoadAsync(DateTime date)
+	{
+		return Impl(this, date);
+
+		static async IAsyncEnumerable<TMessage> Impl(MarketDataStorage<TMessage, TId> storage, DateTime date, [EnumeratorCancellation] CancellationToken cancellationToken = default)
 		{
-			lock (GetSync(date))
+			date = date.Date;
+
+			using var _ = await storage.GetReadSync(date, cancellationToken);
+
+			using var stream = await storage.LoadStreamAsync(date, true, cancellationToken);
+
+			var metaInfo = await storage.GetInfo(stream, date, cancellationToken);
+
+			if (metaInfo == null)
+				yield break;
+
+			await foreach (var msg in storage.Serializer.DeserializeAsync(stream, metaInfo).WithEnforcedCancellation(cancellationToken))
 			{
-				using (var stream = LoadStream(date))
-					return GetInfo(stream, date);
+				yield return msg;
 			}
 		}
+	}
 
-		private IMarketDataMetaInfo GetInfo(Stream stream, DateTime date)
+	async ValueTask<IMarketDataMetaInfo> IMarketDataStorage.GetMetaInfoAsync(DateTime date, CancellationToken cancellationToken)
+	{
+		date = date.Date;
+
+		using var _ = await GetReadSync(date, cancellationToken);
+
+		using var stream = await LoadStreamAsync(date, true, cancellationToken);
+		return await GetInfo(stream, date, cancellationToken);
+	}
+
+	private async ValueTask<IMarketDataMetaInfo> GetInfo(Stream stream, DateTime date, CancellationToken cancellationToken)
+	{
+		if (stream == Stream.Null)
+			return null;
+
+		IMarketDataMetaInfo metaInfo;
+
+		if (Serializer.Format == StorageFormats.Csv)
 		{
-			if (stream == Stream.Null)
-				return null;
-
-			var metaInfo = Serializer.CreateMetaInfo(date);
-			metaInfo.Read(stream);
-
-			return metaInfo;
+			metaInfo = await _dateMetaInfos.SafeAddAsync(_dateMetaInfosLock, date, async (d, ct) =>
+			{
+				var info = Serializer.CreateMetaInfo(date);
+				await info.ReadAsync(stream, ct);
+				return info;
+			}, cancellationToken);
+		}
+		else
+		{
+			metaInfo = Serializer.CreateMetaInfo(date);
+			await metaInfo.ReadAsync(stream, cancellationToken);
 		}
 
-		void IMarketDataStorage.Delete(DateTime date)
-		{
-			lock (GetSync(date))
-				Drive.Delete(date);
-		}
+		return metaInfo;
+	}
 
-		IEnumerable IMarketDataStorage.Load(DateTime date)
-		{
-			return Load(date);
-		}
+	async ValueTask IMarketDataStorage.DeleteAsync(DateTime date, CancellationToken cancellationToken)
+	{
+		date = date.Date;
 
-		DateTimeOffset IMarketDataStorageInfo<TData>.GetTime(TData data)
-		{
-			return _getTime(data);
-		}
+		using var _ = await GetWriteSync(date, cancellationToken);
 
-		DateTimeOffset IMarketDataStorageInfo.GetTime(object data)
-		{
-			return _getTime((TData)data);
-		}
+		await DoDelete(date, cancellationToken);
+	}
+
+	private async ValueTask DoDelete(DateTime date, CancellationToken cancellationToken)
+	{
+		await Drive.DeleteAsync(date, cancellationToken);
+
+		using (await _dateMetaInfosLock.WriterLockAsync(cancellationToken))
+			_dateMetaInfos.Remove(date);
+	}
+
+	IAsyncEnumerable<Message> IMarketDataStorage.LoadAsync(DateTime date)
+	{
+		return LoadAsync(date);
 	}
 }

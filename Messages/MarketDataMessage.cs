@@ -1,225 +1,307 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// Build modes.
+/// </summary>
+[DataContract]
+[Serializable]
+public enum MarketDataBuildModes
 {
-	using System;
-	using System.ComponentModel;
-	using System.Runtime.Serialization;
-
-	using Ecng.Common;
-
-	using StockSharp.Localization;
+	/// <summary>
+	/// Request built data and build the missing data from trades, depths etc.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.LoadAndBuildKey)]
+	LoadAndBuild,
 
 	/// <summary>
-	/// Типы маркет-данных.
+	/// Request only built data.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public enum MarketDataTypes
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.LoadKey)]
+	Load,
+
+	/// <summary>
+	/// Build from trades, depths etc.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.BuildKey)]
+	Build
+}
+
+/// <summary>
+/// Market-data message (uses as a subscribe/unsubscribe in outgoing case, confirmation event in incoming case).
+/// </summary>
+[DataContract]
+[Serializable]
+public class MarketDataMessage : SecurityMessage, ISubscriptionMessage, IGeneratedMessage
+{
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.FromKey,
+		Description = LocalizedStrings.StartDateDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public DateTime? From { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.UntilKey,
+		Description = LocalizedStrings.ToDateDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public DateTime? To { get; set; }
+
+	/// <summary>
+	/// Market data fields, which will be received with subscribed to <see cref="DataType.Level1"/> messages.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.MarketDataFieldsKey,
+		Description = LocalizedStrings.MarketDataFieldsDescKey,
+		GroupName = LocalizedStrings.GeneralKey,
+		Order = 3)]
+	public IEnumerable<Level1Fields> Fields { get; set; }
+
+	DataType IDataTypeMessage.DataType => DataType2;
+
+	private DataType _dataType2 = DataType.Level1;
+
+	/// <summary>
+	/// Market data type.
+	/// </summary>
+	[DataMember]
+	public DataType DataType2
 	{
-		/// <summary>
-		/// Первый уровень маркет-данных.
-		/// </summary>
-		[EnumMember]
-		Level1,
+		get => _dataType2;
+		set
+		{
+			_dataType2 = value ?? throw new ArgumentNullException(nameof(value));
 
-		/// <summary>
-		/// Глубина рынка (стаканы).
-		/// </summary>
-		[EnumMember]
-		MarketDepth,
+			if (SecurityId == default && value == DataType.News)
+				SecurityId = SecurityId.News;
+		}
+	}
 
-		/// <summary>
-		/// Тиковые сделки.
-		/// </summary>
-		[EnumMember]
-		Trades,
+	/// <inheritdoc />
+	[DataMember]
+	public bool IsSubscribe { get; set; }
 
-		/// <summary>
-		/// Лог заявок.
-		/// </summary>
-		[EnumMember]
-		OrderLog,
+	/// <inheritdoc />
+	[DataMember]
+	public long TransactionId { get; set; }
 
-		/// <summary>
-		/// Новости.
-		/// </summary>
-		[EnumMember]
-		News,
+	/// <inheritdoc />
+	[DataMember]
+	public long? Skip { get; set; }
 
-		/// <summary>
-		/// Свечи (тайм-фрейм).
-		/// </summary>
-		[EnumMember]
-		CandleTimeFrame,
+	/// <inheritdoc />
+	[DataMember]
+	public long? Count { get; set; }
 
-		/// <summary>
-		/// Свеча (тиковая).
-		/// </summary>
-		CandleTick,
+	/// <summary>
+	/// Max depth of requested order book. Uses in case <see cref="DataType2"/> = <see cref="DataType.MarketDepth"/>.
+	/// </summary>
+	[DataMember]
+	public int? MaxDepth { get; set; }
 
-		/// <summary>
-		/// Свеча (объем).
-		/// </summary>
-		[EnumMember]
-		CandleVolume,
+	/// <summary>
+	/// News id. Uses in case of request news text.
+	/// </summary>
+	[DataMember]
+	public string NewsId { get; set; }
 
-		/// <summary>
-		/// Свеча (рендж).
-		/// </summary>
-		[EnumMember]
-		CandleRange,
+	/// <summary>
+	/// To perform the calculation <see cref="CandleMessage.PriceLevels"/>. By default, it is disabled.
+	/// </summary>
+	[DataMember]
+	public bool IsCalcVolumeProfile { get; set; }
 
-		/// <summary>
-		/// Свеча (X&amp;0).
-		/// </summary>
-		[EnumMember]
-		CandlePnF,
+	/// <summary>
+	/// Build mode.
+	/// </summary>
+	[DataMember]
+	public MarketDataBuildModes BuildMode { get; set; }
 
-		/// <summary>
-		/// Свеча (ренко).
-		/// </summary>
-		[EnumMember]
-		CandleRenko,
+	/// <inheritdoc />
+	[DataMember]
+	public DataType BuildFrom { get; set; }
+
+	/// <summary>
+	/// Extra info for the <see cref="BuildFrom"/>.
+	/// </summary>
+	[DataMember]
+	public Level1Fields? BuildField { get; set; }
+
+	/// <summary>
+	/// Allow build candles from smaller timeframe.
+	/// </summary>
+	/// <remarks>
+	/// Available only for <see cref="TimeFrameCandleMessage"/>.
+	/// </remarks>
+	[DataMember]
+	public bool AllowBuildFromSmallerTimeFrame { get; set; } = true;
+
+	/// <summary>
+	/// Use only the regular trading hours for which data will be requested.
+	/// </summary>
+	[DataMember]
+	public bool? IsRegularTradingHours { get; set; }
+
+	/// <summary>
+	/// Request <see cref="CandleStates.Finished"/> only candles.
+	/// </summary>
+	[DataMember]
+	public bool IsFinishedOnly { get; set; }
+
+	/// <summary>
+	/// Board code.
+	/// </summary>
+	[DataMember]
+	public string BoardCode { get; set; }
+
+	/// <summary>
+	/// Interval for data refresh.
+	/// </summary>
+	[DataMember]
+	public TimeSpan? RefreshSpeed { get; set; }
+
+	/// <summary>
+	/// Order log to market depth builder.
+	/// </summary>
+	public IOrderLogMarketDepthBuilder DepthBuilder { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public FillGapsDays? FillGaps { get; set; }
+
+	/// <summary>
+	/// Pass through incremental <see cref="QuoteChangeMessage"/>.
+	/// </summary>
+	[DataMember]
+	public bool DoNotBuildOrderBookIncrement { get; set; }
+
+	bool ISubscriptionMessage.FilterEnabled => false;
+	bool ISubscriptionMessage.SpecificItemRequest => false;
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="MarketDataMessage"/>.
+	/// </summary>
+	public MarketDataMessage()
+		: base(MessageTypes.MarketData)
+	{
 	}
 
 	/// <summary>
-	/// Сообщение о подписке или отписки на маркет-данные (при отправке используется как команда, при получении является событием подтверждения).
+	/// Initialize <see cref="MarketDataMessage"/>.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public class MarketDataMessage : SecurityMessage
+	/// <param name="type">Message type.</param>
+	protected MarketDataMessage(MessageTypes type)
+		: base(type)
 	{
-		/// <summary>
-		/// Дата начала, с которой необходимо получать данные.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str343Key)]
-		[DescriptionLoc(LocalizedStrings.Str344Key)]
-		[MainCategory]
-		public DateTimeOffset From { get; set; }
+	}
 
-		/// <summary>
-		/// Дата окончания, до которой необходимо получать данные.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str345Key)]
-		[DescriptionLoc(LocalizedStrings.Str346Key)]
-		[MainCategory]
-		public DateTimeOffset To { get; set; }
+	/// <summary>
+	/// Create a copy of <see cref="MarketDataMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone()
+	{
+		var clone = new MarketDataMessage();
+		CopyTo(clone);
+		return clone;
+	}
 
-		/// <summary>
-		/// Тип маркет-данных.
-		/// </summary>
-		[Browsable(false)]
-		[DataMember]
-		public MarketDataTypes DataType { get; set; }
+	/// <summary>
+	/// Copy the message into the <paramref name="destination" />.
+	/// </summary>
+	/// <param name="destination">The object, to which copied information.</param>
+	public void CopyTo(MarketDataMessage destination)
+	{
+		base.CopyTo(destination);
 
-		/// <summary>
-		/// Дополнительный аргумент для запроса маркет-данных.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str347Key)]
-		[DescriptionLoc(LocalizedStrings.Str348Key)]
-		[MainCategory]
-		public object Arg { get; set; }
+		destination.DataType2 = DataType2.TypedClone();
+		destination.From = From;
+		destination.To = To;
+		destination.IsSubscribe = IsSubscribe;
+		destination.TransactionId = TransactionId;
+		destination.Skip = Skip;
+		destination.Count = Count;
+		destination.MaxDepth = MaxDepth;
+		destination.NewsId = NewsId;
+		destination.BuildMode = BuildMode;
+		destination.BuildFrom = BuildFrom?.TypedClone();
+		destination.BuildField = BuildField;
+		destination.IsCalcVolumeProfile = IsCalcVolumeProfile;
+		destination.AllowBuildFromSmallerTimeFrame = AllowBuildFromSmallerTimeFrame;
+		destination.IsRegularTradingHours = IsRegularTradingHours;
+		destination.IsFinishedOnly = IsFinishedOnly;
+		destination.BoardCode = BoardCode;
+		destination.RefreshSpeed = RefreshSpeed;
+		destination.DepthBuilder = DepthBuilder;
+		destination.FillGaps = FillGaps;
+		destination.DoNotBuildOrderBookIncrement = DoNotBuildOrderBookIncrement;
+		destination.Fields = Fields?.ToArray();
+	}
 
-		/// <summary>
-		/// Является ли сообщение подпиской на маркет-данные.
-		/// </summary>
-		[DataMember]
-		public bool IsSubscribe { get; set; }
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		var str = base.ToString() + $",DataType={DataType2},IsSubscribe={IsSubscribe}";
 
-		/// <summary>
-		/// Идентификатор запроса.
-		/// </summary>
-		[DataMember]
-		public long TransactionId { get; set; }
+		if (TransactionId != default)
+			str += $",TransId={TransactionId}";
 
-		/// <summary>
-		/// Поддерживает ли торговая система запрашиваемый тип данных. Заполняется в случае ответа.
-		/// </summary>
-		[DataMember]
-		public bool IsNotSupported { get; set; }
+		if (OriginalTransactionId != default)
+			str += $",OrigId={OriginalTransactionId}";
 
-		/// <summary>
-		/// Информация об ошибке. Сигнализирует об ошибке подписки или отписки. Заполняется в случае ответа.
-		/// </summary>
-		[DataMember]
-		public Exception Error { get; set; }
+		if (MaxDepth != default)
+			str += $",MaxDepth={MaxDepth}";
 
-		/// <summary>
-		/// Количество маркет-данных.
-		/// </summary>
-		[DataMember]
-		public long Count { get; set; }
+		if (Skip != default)
+			str += $",Skip={Skip}";
 
-		/// <summary>
-		/// Максимальная грубина стакана. Используется в случае <see cref="DataType"/> равные <see cref="MarketDataTypes.MarketDepth"/>.
-		/// </summary>
-		[DataMember]
-		public int MaxDepth { get; set; }
+		if (Count != default)
+			str += $",Cnt={Count}";
 
-		/// <summary>
-		/// Идентификатор новости. Используется, если идет запрос получения текста новости.
-		/// </summary>
-		[DataMember]
-		public string NewsId { get; set; }
+		if (From != default)
+			str += $",From={From}";
 
-		/// <summary>
-		/// Максимальная грубина стакана по-умолчанию.
-		/// </summary>
-		public const int DefaultMaxDepth = 50;
+		if (To != default)
+			str += $",To={To}";
 
-		/// <summary>
-		/// Создать <see cref="MarketDataMessage"/>.
-		/// </summary>
-		public MarketDataMessage()
-			: base(MessageTypes.MarketData)
-		{
-		}
+		if (BuildMode == MarketDataBuildModes.Build)
+			str += $",Build={BuildMode}/{BuildFrom}/{BuildField}";
 
-		/// <summary>
-		/// Инициализировать <see cref="MarketDataMessage"/>.
-		/// </summary>
-		/// <param name="type">Тип сообщения.</param>
-		protected MarketDataMessage(MessageTypes type)
-			: base(type)
-		{
-		}
+		if (AllowBuildFromSmallerTimeFrame)
+			str += $",SmallTF={AllowBuildFromSmallerTimeFrame}";
 
-		/// <summary>
-		/// Создать копию объекта <see cref="MarketDataMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			var clone = new MarketDataMessage
-			{
-				Arg = Arg,
-				DataType = DataType,
-				Error = Error,
-				From = From,
-				To = To,
-				IsSubscribe = IsSubscribe,
-				TransactionId = TransactionId,
-				Count = Count,
-				MaxDepth = MaxDepth,
-				NewsId = NewsId,
-				LocalTime = LocalTime,
-				IsNotSupported = IsNotSupported
-			};
+		if (IsRegularTradingHours is bool rth)
+			str += $",RTH={rth}";
 
-			CopyTo(clone);
+		if (IsFinishedOnly)
+			str += $",FinOnly={IsFinishedOnly}";
 
-			return clone;
-		}
+		if (IsCalcVolumeProfile)
+			str += $",Profile={IsCalcVolumeProfile}";
 
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",Sec={0},Types={1},IsSubscribe={2},TransId={3},OrigId={4}".Put(SecurityId, DataType, IsSubscribe, TransactionId, OriginalTransactionId);
-		}
+		if (!BoardCode.IsEmpty())
+			str += $",BoardCode={BoardCode}";
+
+		if (RefreshSpeed != null)
+			str += $",Speed={RefreshSpeed}";
+
+		if (FillGaps is not null)
+			str += $",gaps={FillGaps}";
+
+		if (DoNotBuildOrderBookIncrement)
+			str += $",NotBuildInc={DoNotBuildOrderBookIncrement}";
+
+		if (Fields is not null)
+			str += $",Fields={Fields.Select(f => f.GetDisplayName()).JoinCommaSpace()}";
+
+		return str;
 	}
 }

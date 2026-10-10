@@ -1,36 +1,30 @@
-namespace StockSharp.Messages
-{
-	using System;
-	using System.Runtime.Serialization;
+namespace StockSharp.Messages;
 
-	using StockSharp.Localization;
+/// <summary>
+/// Limit order time in force.
+/// </summary>
+[DataContract]
+[Serializable]
+public enum TimeInForce
+{
+	/// <summary>
+	/// Good til cancelled.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.GTCKey, Description = LocalizedStrings.GoodTilCancelledKey)]
+	PutInQueue,
 
 	/// <summary>
-	/// Время жизни лимитной заявки.
+	/// Fill Or Kill.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public enum TimeInForce
-	{
-		/// <summary>
-		/// Поставить в очередь.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str405Key)]
-		PutInQueue,
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.FOKKey, Description = LocalizedStrings.FillOrKillKey)]
+	MatchOrCancel,
 
-		/// <summary>
-		/// Немедленно или отклонить.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str406Key)]
-		MatchOrCancel,
-
-		/// <summary>
-		/// Снять остаток.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str407Key)]
-		CancelBalance,
-	}
+	/// <summary>
+	/// Immediate Or Cancel.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.IOCKey, Description = LocalizedStrings.ImmediateOrCancelKey)]
+	CancelBalance,
 }

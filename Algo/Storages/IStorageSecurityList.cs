@@ -1,11 +1,8 @@
-namespace StockSharp.Algo.Storages
-{
-	using StockSharp.BusinessEntities;
+namespace StockSharp.Algo.Storages;
 
-	/// <summary>
-	/// Интерфейс для доступа к хранилищу инструментов.
-	/// </summary>
-	public interface IStorageSecurityList : ISecurityList, IStorageEntityList<Security>, ISecurityStorage
-	{
-	}
+/// <summary>
+/// The interface for access to the instrument storage.
+/// </summary>
+public interface IStorageSecurityList : IStorageEntityList<Security>, ISecurityStorage
+{
 }

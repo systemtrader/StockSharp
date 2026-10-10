@@ -1,36 +1,37 @@
-﻿namespace StockSharp.Messages
-{
-	using System;
-	using System.Runtime.Serialization;
+namespace StockSharp.Messages;
 
-	using Ecng.ComponentModel;
+/// <summary>
+/// Т+ limit types.
+/// </summary>
+[DataContract]
+[Serializable]
+public enum TPlusLimits
+{
+	/// <summary>
+	/// Т+0.
+	/// </summary>
+	[EnumMember]
+	[Display(Name = "T+0")]
+	T0,
 
 	/// <summary>
-	/// Виды лимитов для Т+ рынка.
+	/// Т+1.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public enum TPlusLimits
-	{
-		/// <summary>
-		/// Т+0.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayName("T+0")]
-		T0,
+	[EnumMember]
+	[Display(Name = "T+1")]
+	T1,
 
-		/// <summary>
-		/// Т+1.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayName("T+1")]
-		T1,
-
-		/// <summary>
-		/// Т+2.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayName("T+2")]
-		T2
-	}
+	/// <summary>
+	/// Т+2.
+	/// </summary>
+	[EnumMember]
+	[Display(Name = "T+2")]
+	T2,
+	
+	/// <summary>
+	/// Т+x.
+	/// </summary>
+	[EnumMember]
+	[Display(Name = "T+x")]
+	Tx,
 }

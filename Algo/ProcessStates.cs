@@ -1,34 +1,29 @@
-namespace StockSharp.Algo
-{
-	using System.Runtime.Serialization;
+namespace StockSharp.Algo;
 
-	using StockSharp.Localization;
+/// <summary>
+/// States of the process.
+/// </summary>
+[DataContract]
+public enum ProcessStates
+{
+	/// <summary>
+	/// Stopped.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.StoppedKey)]
+	Stopped,
 
 	/// <summary>
-	/// Состояния процесса.
+	/// Stopping.
 	/// </summary>
-	[DataContract]
-	public enum ProcessStates
-	{
-		/// <summary>
-		/// Остановлено.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str1113Key)]
-		Stopped,
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.StoppingKey)]
+	Stopping,
 
-		/// <summary>
-		/// Останавливается.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str1114Key)]
-		Stopping,
-
-		/// <summary>
-		/// Запущено.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str1115Key)]
-		Started,
-	}
+	/// <summary>
+	/// Started.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.StartedKey)]
+	Started,
 }

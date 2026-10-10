@@ -1,81 +1,110 @@
-namespace StockSharp.Messages
-{
-	using System;
+namespace StockSharp.Messages;
 
-	using Ecng.Common;
+/// <summary>
+/// Message channel base interface.
+/// </summary>
+public interface IMessageChannel : IMessageTransport, IDisposable, ICloneable<IMessageChannel>
+{
+	/// <summary>
+	/// State.
+	/// </summary>
+	ChannelStates State { get; }
 
 	/// <summary>
-	/// Интерфейс, описывающий транспортный канал сообщений.
+	/// <see cref="State"/> change event.
 	/// </summary>
-	public interface IMessageChannel : IDisposable
+	event Action StateChanged;
+
+	/// <summary>
+	/// Open channel.
+	/// </summary>
+	void Open();
+
+	/// <summary>
+	/// Close channel.
+	/// </summary>
+	void Close();
+
+	/// <summary>
+	/// Suspend.
+	/// </summary>
+	void Suspend();
+
+	/// <summary>
+	/// Resume.
+	/// </summary>
+	void Resume();
+
+	/// <summary>
+	/// Clear.
+	/// </summary>
+	void Clear();
+}
+
+/// <summary>
+/// Message channel, which passes directly to the output all incoming messages.
+/// </summary>
+public class PassThroughMessageChannel : Cloneable<IMessageChannel>, IMessageChannel
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="PassThroughMessageChannel"/>.
+	/// </summary>
+	public PassThroughMessageChannel()
 	{
-		/// <summary>
-		/// Открыт ли канал.
-		/// </summary>
-		bool IsOpened { get; }
+	}
 
-		/// <summary>
-		/// Открыть канал.
-		/// </summary>
-		void Open();
+	void IDisposable.Dispose()
+	{
+		GC.SuppressFinalize(this);
+	}
 
-		/// <summary>
-		/// Закрыть канал.
-		/// </summary>
-		void Close();
+	ChannelStates IMessageChannel.State => ChannelStates.Started;
 
-		/// <summary>
-		/// Отправить сообщение.
-		/// </summary>
-		/// <param name="message">Сообщение.</param>
-		void SendInMessage(Message message);
+	event Action IMessageChannel.StateChanged
+	{
+		add { }
+		remove { }
+	}
 
-		/// <summary>
-		/// Событие появления нового сообщения.
-		/// </summary>
-		event Action<Message> NewOutMessage;
+	void IMessageChannel.Open()
+	{
+	}
+
+	void IMessageChannel.Close()
+	{
+	}
+
+	void IMessageChannel.Suspend()
+	{
+	}
+
+	void IMessageChannel.Resume()
+	{
+	}
+
+	void IMessageChannel.Clear()
+	{
+	}
+
+	ValueTask IMessageTransport.SendInMessageAsync(Message message, CancellationToken cancellationToken)
+	{
+		return _newOutMessageAsync.InvokeAsync(message, cancellationToken);
+	}
+
+	private Func<Message, CancellationToken, ValueTask> _newOutMessageAsync;
+
+	event Func<Message, CancellationToken, ValueTask> IMessageTransport.NewOutMessageAsync
+	{
+		add => _newOutMessageAsync += value;
+		remove => _newOutMessageAsync -= value;
 	}
 
 	/// <summary>
-	/// Транспортный канал сообщений, который передает сразу на выход все входящие сообщения.
+	/// Create a copy of <see cref="PassThroughMessageChannel"/>.
 	/// </summary>
-	public class PassThroughMessageChannel : IMessageChannel
+	/// <returns>Copy.</returns>
+	public override IMessageChannel Clone()
 	{
-		/// <summary>
-		/// Создать <see cref="PassThroughMessageChannel"/>.
-		/// </summary>
-		public PassThroughMessageChannel()
-		{
-		}
-
-		void IDisposable.Dispose()
-		{
-		}
-
-		bool IMessageChannel.IsOpened
-		{
-			get { return true; }
-		}
-
-		void IMessageChannel.Open()
-		{
-		}
-
-		void IMessageChannel.Close()
-		{
-		}
-
-		void IMessageChannel.SendInMessage(Message message)
-		{
-			_newMessage.SafeInvoke(message);
-		}
-
-		private Action<Message> _newMessage;
-
-		event Action<Message> IMessageChannel.NewOutMessage
-		{
-			add { _newMessage += value; }
-			remove { _newMessage -= value; }
-		}
+		return new PassThroughMessageChannel();
 	}
 }

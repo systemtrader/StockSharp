@@ -1,92 +1,83 @@
-namespace StockSharp.Algo.Storages
+namespace StockSharp.Algo.Storages;
+
+/// <summary>
+/// Meta-information on data for one day.
+/// </summary>
+public interface IMarketDataMetaInfo
 {
-	using System;
-	using System.IO;
-
-	using Ecng.Common;
-
-	using StockSharp.BusinessEntities;
+	/// <summary>
+	/// Date of day.
+	/// </summary>
+	DateTime Date { get; }
 
 	/// <summary>
-	/// Мета-информация о данных за один день.
+	/// Number of data.
 	/// </summary>
-	public interface IMarketDataMetaInfo
-	{
-		/// <summary>
-		/// Дата дня.
-		/// </summary>
-		DateTime Date { get; }
+	int Count { get; set; }
 
-		/// <summary>
-		/// Количество данных.
-		/// </summary>
-		int Count { get; set; }
+	/// <summary>
+	/// Value <see cref="Security.PriceStep"/> at day <see cref="Date"/>.
+	/// </summary>
+	decimal PriceStep { get; set; }
 
-		/// <summary>
-		/// Значение <see cref="Security.PriceStep"/> в день <see cref="Date"/>.
-		/// </summary>
-		decimal PriceStep { get; set; }
+	/// <summary>
+	/// Value <see cref="Security.VolumeStep"/> at day <see cref="Date"/>.
+	/// </summary>
+	decimal VolumeStep { get; set; }
 
-		/// <summary>
-		/// Значение <see cref="Security.VolumeStep"/> в день <see cref="Date"/>.
-		/// </summary>
-		decimal VolumeStep { get; set; }
+	/// <summary>
+	/// First record time.
+	/// </summary>
+	DateTime FirstTime { get; set; }
 
-		/// <summary>
-		/// Время первой записи.
-		/// </summary>
-		DateTime FirstTime { get; set; }
+	/// <summary>
+	/// Last record time.
+	/// </summary>
+	DateTime LastTime { get; set; }
 
-		/// <summary>
-		/// Время последней записи.
-		/// </summary>
-		DateTime LastTime { get; set; }
+	/// <summary>
+	/// Last record identifier.
+	/// </summary>
+	object LastId { get; set; }
 
-		/// <summary>
-		/// Сохранить параметры мета-информации в поток.
-		/// </summary>
-		/// <param name="stream">Поток данных.</param>
-		void Write(Stream stream);
+	/// <summary>
+	/// To save meta-information parameters to stream.
+	/// </summary>
+	/// <param name="stream">Data stream.</param>
+	void Write(Stream stream);
 
-		/// <summary>
-		/// Загрузить параметры мета-информации из потока.
-		/// </summary>
-		/// <param name="stream">Поток данных.</param>
-		void Read(Stream stream);
-	}
+	/// <summary>
+	/// To load meta-information parameters from the stream.
+	/// </summary>
+	/// <param name="stream">Data stream.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	ValueTask ReadAsync(Stream stream, CancellationToken cancellationToken);
 
-	abstract class MetaInfo<TMetaInfo> : Cloneable<TMetaInfo>, IMarketDataMetaInfo
-		where TMetaInfo : MetaInfo<TMetaInfo>
-	{
-		protected MetaInfo(DateTime date)
-		{
-			Date = date;
-		}
+	/// <summary>
+	/// Is override all data.
+	/// </summary>
+	bool IsOverride { get; }
+}
 
-		public DateTime Date { get; private set; }
-		public int Count { get; set; }
+abstract class MetaInfo(DateTime date) : IMarketDataMetaInfo
+{
+	public DateTime Date { get; } = date;
+	public int Count { get; set; }
 
-		public decimal PriceStep { get; set; }
-		public decimal VolumeStep { get; set; }
+	public decimal PriceStep { get; set; } = 0.01m;
+	public decimal VolumeStep { get; set; } = 1m;
 
-		public DateTime FirstTime { get; set; }
-		public DateTime LastTime { get; set; }
+	//public decimal FirstPriceStep { get; set; }
+	public decimal LastPriceStep { get; set; }
 
-		/// <summary>
-		/// Сохранить параметры мета-информации в поток.
-		/// </summary>
-		/// <param name="stream">Поток данных.</param>
-		public abstract void Write(Stream stream);
+	public DateTime FirstTime { get; set; }
+	public DateTime LastTime { get; set; }
 
-		/// <summary>
-		/// Загрузить параметры мета-информации из потока.
-		/// </summary>
-		/// <param name="stream">Поток данных.</param>
-		public abstract void Read(Stream stream);
+	public abstract object LastId { get; set; }
 
-		public static TMetaInfo CreateMetaInfo(DateTime date)
-		{
-			return typeof(TMetaInfo).CreateInstance<TMetaInfo>(date);
-		}
-	}
+	public abstract void Write(Stream stream);
+
+	public abstract ValueTask ReadAsync(Stream stream, CancellationToken cancellationToken);
+
+	public virtual bool IsOverride => false;
 }

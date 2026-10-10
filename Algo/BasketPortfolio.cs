@@ -1,206 +1,191 @@
-﻿namespace StockSharp.Algo
+namespace StockSharp.Algo;
+
+/// <summary>
+/// Basket portfolio.
+/// </summary>
+public abstract class BasketPortfolio : Portfolio
 {
-	using System;
-	using System.Collections.Generic;
-	using System.ComponentModel;
-	using System.Linq;
-
-	using Ecng.Common;
-	using Ecng.Collections;
-
-	using StockSharp.BusinessEntities;
-	using StockSharp.Messages;
+	/// <summary>
+	/// Portfolios from which this basket is created.
+	/// </summary>
+	[Browsable(false)]
+	public abstract IEnumerable<Portfolio> InnerPortfolios { get; }
 
 	/// <summary>
-	/// Корзина портфелей.
+	/// Positions from which this basket is created.
 	/// </summary>
-	public abstract class BasketPortfolio : Portfolio
-	{
-		/// <summary>
-		/// Портфели, из которых создана данная корзина.
-		/// </summary>
-		[Browsable(false)]
-		public abstract IEnumerable<Portfolio> InnerPortfolios { get; }
+	[Browsable(false)]
+	public abstract IEnumerable<BasketPosition> InnerPositions { get; }
+}
 
-		/// <summary>
-		/// Позиции, из которых создана данная корзина.
-		/// </summary>
-		[Browsable(false)]
-		public abstract IEnumerable<BasketPosition> InnerPositions { get; }
-	}
-
-	/// <summary>
-	/// Корзина портфелей, основанная на весах <see cref="Weights"/>.
-	/// </summary>
-	public class WeightedPortfolio : BasketPortfolio
+/// <summary>
+/// Portfolios basket based on the weights <see cref="Weights"/>.
+/// </summary>
+public class WeightedPortfolio : BasketPortfolio
+{
+	private sealed class WeightsDictionary : CachedSynchronizedDictionary<Portfolio, decimal>
 	{
-		private sealed class WeightsDictionary : CachedSynchronizedDictionary<Portfolio, decimal>
+		private sealed class WeightedPosition : BasketPosition
 		{
-			private sealed class WeightedPosition : BasketPosition
+			public WeightedPosition(WeightedPortfolio portfolio, IEnumerable<Position> innerPositions)
 			{
-				public WeightedPosition(WeightedPortfolio portfolio, IEnumerable<Position> innerPositions)
+				_innerPositions = innerPositions ?? throw new ArgumentNullException(nameof(innerPositions));
+
+				decimal? beginValue = null;
+				decimal? currentValue = null;
+				decimal? blockedValue = null;
+
+				foreach (var position in _innerPositions)
 				{
-					if (innerPositions == null)
-						throw new ArgumentNullException("innerPositions");
+					if (!portfolio.Weights.TryGetValue(position.Portfolio, out var mult))
+						continue;
 
-					_innerPositions = innerPositions;
-
-					var beginValue = 0m;
-					var currentValue = 0m;
-					var blockedValue = 0m;
-
-					foreach (var position in innerPositions)
-					{
-						var mult = portfolio.Weights[position.Portfolio];
-
+					if (beginValue == null)
+						beginValue = mult * position.BeginValue;
+					else
 						beginValue += mult * position.BeginValue;
+
+					if (currentValue == null)
+						currentValue = mult * position.CurrentValue;
+					else
 						currentValue += mult * position.CurrentValue;
+
+					if (blockedValue == null)
+						blockedValue = mult * position.BlockedValue;
+					else
 						blockedValue += mult * position.BlockedValue;
-					}
-
-					BeginValue = beginValue;
-					BlockedValue = blockedValue;
-					CurrentValue = currentValue;
 				}
 
-				private readonly IEnumerable<Position> _innerPositions; 
-
-				public override IEnumerable<Position> InnerPositions
-				{
-					get { return _innerPositions; }
-				}
+				BeginValue = beginValue;
+				BlockedValue = blockedValue;
+				CurrentValue = currentValue;
 			}
 
-			private readonly WeightedPortfolio _parent;
+			private readonly IEnumerable<Position> _innerPositions; 
 
-			public WeightsDictionary(WeightedPortfolio parent)
+			public override IEnumerable<Position> InnerPositions => _innerPositions;
+		}
+
+		private readonly WeightedPortfolio _parent;
+		private readonly IConnector _connector;
+
+		public WeightsDictionary(WeightedPortfolio parent, IConnector connector)
+		{
+			_parent = parent ?? throw new ArgumentNullException(nameof(parent));
+			_connector = connector ?? throw new ArgumentNullException(nameof(connector));
+
+			// Initialize parent properties with defaults
+			RefreshParent();
+		}
+
+		public IEnumerable<BasketPosition> Positions
+		{
+			get
 			{
-				if (parent == null)
-					throw new ArgumentNullException("parent");
-
-				_parent = parent;
+				return CachedKeys
+					.SelectMany(pf => _connector.Positions.Where(pos => pos.Portfolio == pf))
+					.GroupBy(pos => pos.Security)
+					.Select(g => new WeightedPosition(_parent, g));
 			}
+		}
 
-			public IEnumerable<BasketPosition> Positions
-			{
-				get
-				{
-					return CachedKeys
-								.SelectMany(pf => pf.Connector.Positions.Where(pos => pos.Portfolio == pf))
-								.GroupBy(pos => pos.Security)
-								.Select(g => new WeightedPosition(_parent, g));
-				}
-			}
+		public override void Add(Portfolio key, decimal value)
+		{
+			base.Add(key, value);
+			((INotifyPropertyChanged)key).PropertyChanged += OnPortfolioChanged;
+			RefreshName();
+		}
 
-			public override void Add(Portfolio key, decimal value)
+		public override bool Remove(Portfolio key)
+		{
+			if (base.Remove(key))
 			{
-				base.Add(key, value);
-				((INotifyPropertyChanged)key).PropertyChanged += OnPortfolioChanged;
+				((INotifyPropertyChanged)key).PropertyChanged -= OnPortfolioChanged;
 				RefreshName();
+				return true;
 			}
 
-			public override bool Remove(Portfolio key)
-			{
-				if (base.Remove(key))
-				{
-					((INotifyPropertyChanged)key).PropertyChanged -= OnPortfolioChanged;
-					RefreshName();
-					return true;
-				}
-
-				return false;
-			}
-
-			public override void Clear()
-			{
-				foreach (var portfolio in CachedKeys)
-					Remove(portfolio);
-			}
-
-			private void OnPortfolioChanged(object sender, PropertyChangedEventArgs e)
-			{
-				RefreshParent();
-			}
-
-			private void RefreshName()
-			{
-				_parent.Name = CachedPairs.Select(p => "{0}*{1}".Put(p.Value, p.Key)).Join(", ");
-				RefreshParent();
-			}
-
-			private void RefreshParent()
-			{
-				var currencyType = _parent.Currency;
-
-				var beginValue = 0m.ToCurrency(currencyType ?? CurrencyTypes.USD);
-				var currentValue = 0m.ToCurrency(currencyType ?? CurrencyTypes.USD);
-				var leverage = 0m.ToCurrency(currencyType ?? CurrencyTypes.USD);
-				var commission = 0m.ToCurrency(currencyType ?? CurrencyTypes.USD);
-
-				foreach (var pair in CachedPairs)
-				{
-					var portfolio = pair.Key;
-					var weight = (Currency)pair.Value;
-
-					beginValue += Multiple(beginValue, weight, portfolio.BeginValue);
-					currentValue += Multiple(currentValue, weight, portfolio.CurrentValue);
-					leverage += Multiple(leverage, weight, portfolio.Leverage);
-					commission += Multiple(commission, weight, portfolio.Commission);
-				}
-
-				_parent.BeginValue = beginValue.Value;
-				_parent.CurrentValue = currentValue.Value;
-				_parent.Leverage = leverage.Value / Count;
-				_parent.Commission = commission.Value;
-			}
-
-			private static Currency Multiple(Currency currency, Currency weight, Currency part)
-			{
-				if (currency == null)
-					throw new ArgumentNullException("currency");
-
-				if (part == null)
-					throw new ArgumentNullException("part");
-
-				if (currency.Type != part.Type)
-					part = part.Convert(currency.Type);
-
-				return currency * weight * part;
-			}
+			return false;
 		}
 
-		/// <summary>
-		/// Создать <see cref="WeightedPortfolio"/>.
-		/// </summary>
-		public WeightedPortfolio()
+		public override void Clear()
 		{
-			_weights = new WeightsDictionary(this);
+			foreach (var portfolio in CachedKeys)
+				Remove(portfolio);
 		}
 
-		private readonly WeightsDictionary _weights;
-
-		/// <summary>
-		/// Инструменты и их весовые коэффициенты в корзине.
-		/// </summary>
-		public SynchronizedDictionary<Portfolio, decimal> Weights
+		private void OnPortfolioChanged(object sender, PropertyChangedEventArgs e)
 		{
-			get { return _weights; }
+			RefreshParent();
 		}
 
-		/// <summary>
-		/// Портфели, из которых создана данная корзина.
-		/// </summary>
-		public override IEnumerable<Portfolio> InnerPortfolios
+		private void RefreshName()
 		{
-			get { return _weights.CachedKeys; }
+			_parent.Name = CachedPairs.Select(p => $"{p.Value}*{p.Key}").JoinCommaSpace();
+			RefreshParent();
 		}
 
-		/// <summary>
-		/// Позиции, из которых создана данная корзина.
-		/// </summary>
-		public override IEnumerable<BasketPosition> InnerPositions
+		private void RefreshParent()
 		{
-			get { return _weights.Positions; }
+			var currencyType = _parent.Currency;
+
+			var beginValue = 0m.ToCurrency(currencyType ?? CurrencyTypes.USD);
+			var currentValue = 0m.ToCurrency(currencyType ?? CurrencyTypes.USD);
+			var leverage = 0m.ToCurrency(currencyType ?? CurrencyTypes.USD);
+			var commission = 0m.ToCurrency(currencyType ?? CurrencyTypes.USD);
+
+			foreach (var pair in CachedPairs)
+			{
+				var portfolio = pair.Key;
+				var weight = pair.Value;
+
+				beginValue += Multiple(beginValue, weight, portfolio.BeginValue);
+				currentValue += Multiple(currentValue, weight, portfolio.CurrentValue);
+				leverage += Multiple(leverage, weight, portfolio.Leverage);
+				commission += Multiple(commission, weight, portfolio.Commission);
+			}
+
+			_parent.BeginValue = beginValue.Value;
+			_parent.CurrentValue = currentValue.Value;
+			_parent.Leverage = Count > 0 ? leverage.Value / Count : 0;
+			_parent.Commission = commission.Value;
+		}
+
+		private static Currency Multiple(Currency currency, decimal weight, decimal? part)
+		{
+			if (currency is null)
+				throw new ArgumentNullException(nameof(currency));
+
+			if (part is null)
+				return 0m.ToCurrency(currency.Type);
+
+			return (weight * part.Value).ToCurrency(currency.Type);
 		}
 	}
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="WeightedPortfolio"/>.
+	/// </summary>
+	/// <param name="connector">The connection of interaction with trade systems.</param>
+	public WeightedPortfolio(IConnector connector)
+	{
+		_weights = new WeightsDictionary(this, connector);
+	}
+
+	private readonly WeightsDictionary _weights;
+
+	/// <summary>
+	/// Instruments and their weighting coefficients in the basket.
+	/// </summary>
+	public SynchronizedDictionary<Portfolio, decimal> Weights => _weights;
+
+	/// <summary>
+	/// Portfolios from which this basket is created.
+	/// </summary>
+	public override IEnumerable<Portfolio> InnerPortfolios => _weights.CachedKeys;
+
+	/// <summary>
+	/// Positions from which this basket is created.
+	/// </summary>
+	public override IEnumerable<BasketPosition> InnerPositions => _weights.Positions;
 }

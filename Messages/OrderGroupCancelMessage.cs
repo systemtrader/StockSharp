@@ -1,92 +1,110 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// The message containing the order group cancel filter.
+/// </summary>
+[DataContract]
+[Serializable]
+public class OrderGroupCancelMessage : OrderMessage, ISecurityTypesMessage
 {
-	using System;
-	using System.Runtime.Serialization;
-
-	using Ecng.Common;
-
-	using StockSharp.Localization;
+	/// <summary>
+	/// <see langword="true" />, if cancel only a stop orders, <see langword="false" /> - if regular orders, <see langword="null" /> - both.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.StopOrdersKey,
+		Description = LocalizedStrings.StopOrdersDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public bool? IsStop { get; set; }
 
 	/// <summary>
-	/// Сообщение, содержащее фильтр для снятия заявок.
+	/// Order side. If the value is <see langword="null" />, the direction does not use.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public class OrderGroupCancelMessage : OrderMessage
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.DirectionKey,
+		Description = LocalizedStrings.CancelOrdersSideKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public Sides? Side { get; set; }
+
+	/// <summary>
+	/// Operation mode: cancel orders, close positions, or both.
+	/// </summary>
+	[DataMember]
+	public OrderGroupCancelModes Mode { get; set; } = OrderGroupCancelModes.CancelOrders;
+
+	/// <summary>
+	/// Securities types.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TypeKey,
+		Description = LocalizedStrings.SecurityTypeDescKey,
+		GroupName = LocalizedStrings.OptionsKey)]
+	public SecurityTypes[] SecurityTypes { get; set; }
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="OrderGroupCancelMessage"/>.
+	/// </summary>
+	public OrderGroupCancelMessage()
+		: base(MessageTypes.OrderGroupCancel)
 	{
-		///// <summary>
-		///// Тип инструмента. Если значение null, то отмена идет по всем типам инструментов.
-		///// </summary>
-		//[DataMember]
-		//[DisplayName("Тип")]
-		//[Description("Тип инструмента.")]
-		//[MainCategory]
-		//public SecurityTypes? SecurityType { get; set; }
-
-		/// <summary>
-		/// Идентификатор транзакции отмены.
-		/// </summary>
-		[DataMember]
-		public long TransactionId { get; set; }
-
-		/// <summary>
-		/// <see langword="true"/>, если нужно отменить только стоп-заявки, false - если только обычный и null - если оба типа.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str226Key)]
-		[DescriptionLoc(LocalizedStrings.Str227Key)]
-		[MainCategory]
-		public bool? IsStop { get; set; }
-
-		/// <summary>
-		/// Направление заявки. Если значение равно null, то направление не попадает в фильтр снятия заявок.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str128Key)]
-		[DescriptionLoc(LocalizedStrings.Str228Key)]
-		[MainCategory]
-		public Sides? Side { get; set; }
-
-		/// <summary>
-		/// Создать <see cref="OrderGroupCancelMessage"/>.
-		/// </summary>
-		public OrderGroupCancelMessage()
-			: base(MessageTypes.OrderGroupCancel)
-		{
-		}
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",IsStop={0},Side={1},SecType={2}".Put(IsStop, Side, SecurityType);
-		}
-
-		/// <summary>
-		/// Создать копию объекта <see cref="OrderGroupCancelMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			var clone = new OrderGroupCancelMessage
-			{
-				LocalTime = LocalTime,
-				SecurityId = SecurityId,
-				IsStop = IsStop,
-				OrderType = OrderType,
-				PortfolioName = PortfolioName,
-				//SecurityType = SecurityType,
-				Side = Side,
-				TransactionId = TransactionId,
-				ClientCode = ClientCode,
-				BrokerCode = BrokerCode,
-			};
-
-			CopyTo(clone);
-
-			return clone;
-		}
 	}
+
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		return base.ToString() + $",IsStop={IsStop},Side={Side},Mode={Mode}";
+	}
+
+	/// <summary>
+	/// Create a copy of <see cref="OrderGroupCancelMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone()
+	{
+		var clone = new OrderGroupCancelMessage();
+
+		CopyTo(clone);
+
+		return clone;
+	}
+
+	/// <summary>
+	/// Copy the message into the <paramref name="destination" />.
+	/// </summary>
+	/// <param name="destination">The object, to which copied information.</param>
+	public void CopyTo(OrderGroupCancelMessage destination)
+	{
+		base.CopyTo(destination);
+
+		destination.IsStop = IsStop;
+		destination.Side = Side;
+		destination.Mode = Mode;
+		destination.SecurityTypes = SecurityTypes?.ToArray();
+	}
+}
+
+/// <summary>
+/// Order group cancel modes.
+/// </summary>
+[DataContract]
+[Serializable]
+[Flags]
+public enum OrderGroupCancelModes
+{
+	/// <summary>
+	/// Cancel orders.
+	/// </summary>
+	[EnumMember]
+	CancelOrders = 1,
+
+	/// <summary>
+	/// Close positions.
+	/// </summary>
+	[EnumMember]
+	ClosePositions = CancelOrders << 1,
 }

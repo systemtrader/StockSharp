@@ -1,34 +1,58 @@
-﻿namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// Connect to a server message (uses as a command in outgoing case, event in incoming case).
+/// </summary>
+[DataContract]
+[Serializable]
+public class ConnectMessage : BaseConnectionMessage, IServerTimeMessage
 {
-	using System;
-	using System.Runtime.Serialization;
+	/// <summary>
+	/// Initializes a new instance of the <see cref="ConnectMessage"/>.
+	/// </summary>
+	public ConnectMessage()
+		: base(MessageTypes.Connect)
+	{
+	}
 
 	/// <summary>
-	/// Сообщение о подключении к торговой системе (при отправке используется как команда, при получении является событием подключения).
+	/// Client app version.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public class ConnectMessage : BaseConnectionMessage
-	{
-		/// <summary>
-		/// Создать <see cref="ConnectMessage"/>.
-		/// </summary>
-		public ConnectMessage()
-			: base(MessageTypes.Connect)
-		{
-		}
+	[DataMember]
+	public string ClientVersion { get; set; }
 
-		/// <summary>
-		/// Создать копию объекта <see cref="ConnectMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
+	/// <summary>
+	/// Optional server session id.
+	/// </summary>
+	[DataMember]
+	public string SessionId { get; set; }
+
+	/// <summary>
+	/// Language.
+	/// </summary>
+	[DataMember]
+	public string Language { get; set; }
+
+	/// <summary>
+	/// Create a copy of <see cref="ConnectMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone()
+	{
+		var clone = new ConnectMessage
 		{
-			return new ConnectMessage
-			{
-				Error = Error,
-				LocalTime = LocalTime,
-			};
-		}
+			ClientVersion = ClientVersion,
+			SessionId = SessionId,
+			Language = Language,
+		};
+
+		CopyTo(clone);
+		return clone;
+	}
+
+	DateTime IServerTimeMessage.ServerTime
+	{
+		get => LocalTime;
+		set => LocalTime = value;
 	}
 }

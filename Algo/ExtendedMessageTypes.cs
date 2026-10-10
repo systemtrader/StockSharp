@@ -1,16 +1,13 @@
-﻿namespace StockSharp.Algo
+﻿namespace StockSharp.Algo;
+
+/// <summary>
+/// Extended <see cref="MessageTypes"/>.
+/// </summary>
+static class ExtendedMessageTypes
 {
-	using System.Reflection;
+	internal const MessageTypes RemoveSecurity = (MessageTypes)(-9);
+	//internal const MessageTypes ProcessSuspended = (MessageTypes)(-10);
+	internal const MessageTypes Reconnect = (MessageTypes)(-12);
 
-	using StockSharp.Messages;
-
-	[Obfuscation(Feature = "Apply to member * when property: renaming", Exclude = true)]
-	static class ExtendedMessageTypes
-	{
-		public const MessageTypes Last = (MessageTypes)(-1);
-		public const MessageTypes Clearing = (MessageTypes)(-2);
-		public const MessageTypes EmulationState = (MessageTypes)(-5);
-		public const MessageTypes Generator = (MessageTypes)(-6);
-		public const MessageTypes CommissionRule = (MessageTypes)(-7);
-	}
+	internal const MessageTypes PartialDownload = (MessageTypes)(-21);
 }

@@ -1,723 +1,562 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// Measure units.
+/// </summary>
+[Serializable]
+[DataContract]
+public enum UnitTypes
 {
-	using System;
-	using System.Linq;
-	using System.Runtime.Serialization;
-
-	using Ecng.Common;
-	using Ecng.ComponentModel;
-	using Ecng.Localization;
-	using Ecng.Serialization;
-
-	using StockSharp.Localization;
+	/// <summary>
+	/// The absolute value. Incremental change is a given number.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.AbsoluteKey)]
+	Absolute,
 
 	/// <summary>
-	/// Единицы измерения.
+	/// Percents. Step change - one hundredth of a percent.
 	/// </summary>
-	[Serializable]
-	[System.Runtime.Serialization.DataContract]
-	public enum UnitTypes
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.PercentKey)]
+	Percent,
+
+	/// <summary>
+	/// Point.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.PointKey)]
+	[Obsolete("Use Absolute value.")]
+	Point,
+
+	/// <summary>
+	/// Price step.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.PriceStepKey)]
+	[Obsolete("Use Absolute value.")]
+	Step,
+
+	/// <summary>
+	/// Obsolete. Use <see cref="Absolute"/> instead.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.LimitKey)]
+	[Obsolete("Use Absolute value.")]
+	Limit,
+}
+
+/// <summary>
+/// Special class, allows to set the value as a percentage, absolute, points and pips values.
+/// </summary>
+[Serializable]
+[DataContract]
+public partial class Unit : Equatable<Unit>, IOperable<Unit>, IAsyncPersistable, IFormattable
+{
+	private class UnitOperator : BaseOperator<Unit>
 	{
-		/// <summary>
-		/// Абсолютное значение. Шаг изменения равен заданному числу.
-		/// </summary>
-		[EnumMember]
-		Absolute,
+		public override Unit Add(Unit first, Unit second) => first + second;
+		public override int Compare(Unit x, Unit y) => x.CompareTo(y);
+		public override Unit Divide(Unit first, Unit second) => first / second;
+		public override Unit Multiply(Unit first, Unit second) => first * second;
+		public override Unit Subtract(Unit first, Unit second) => first - second;
+	}
 
-		/// <summary>
-		/// Проценты. Шаг изменения – одна сотая процента.
-		/// </summary>
-		[EnumMember]
-		Percent,
+	static Unit()
+	{
+		Converter.AddTypedConverter<Unit, decimal>(input => (decimal)input);
+		Converter.AddTypedConverter<Unit, double>(input => (double)input);
+		Converter.AddTypedConverter<decimal, Unit>(input => input);
+		Converter.AddTypedConverter<int, Unit>(input => input);
+		Converter.AddTypedConverter<double, Unit>(input => input);
 
-		/// <summary>
-		/// Пункт цены инструмента.
-		/// </summary>
-		[EnumMember]
-		Point,
-
-		/// <summary>
-		/// Шаг цены инструмента.
-		/// </summary>
-		[EnumMember]
-		Step,
-
-		/// <summary>
-		/// Лимитированное значение. Данная единица изменения позволяет задавать конкретное число,
-		/// которое не может быть использовано в арифметических операциях <see cref="Unit"/>.
-		/// </summary>
-		[EnumMember]
-		Limit,
+		OperatorRegistry.AddOperator(new UnitOperator());
 	}
 
 	/// <summary>
-	/// Специальный класс, позволяющий задавать величины в процентном, абсолютном, пунктовым и пипсовых значениях.
+	/// Create unit.
 	/// </summary>
-	[Serializable]
-	[System.Runtime.Serialization.DataContract]
-	public class Unit : Equatable<Unit>, IOperable<Unit>
+	public Unit()
 	{
-		/// <summary>
-		/// Создать величину.
-		/// </summary>
-		public Unit()
+	}
+
+	/// <summary>
+	/// Create absolute value <see cref="UnitTypes.Absolute"/>.
+	/// </summary>
+	/// <param name="value">Value.</param>
+	public Unit(decimal value)
+		: this(value, UnitTypes.Absolute)
+	{
+	}
+
+	/// <summary>
+	/// Create a value of types <see cref="UnitTypes.Absolute"/> and <see cref="UnitTypes.Percent"/>.
+	/// </summary>
+	/// <param name="value">Value.</param>
+	/// <param name="type">Measure unit.</param>
+	public Unit(decimal value, UnitTypes type)
+	{
+		Value = value;
+		Type = type;
+	}
+
+	/// <summary>
+	/// Create a value of types <see cref="UnitTypes.Point"/> and <see cref="UnitTypes.Step"/>.
+	/// </summary>
+	/// <param name="value">Value.</param>
+	/// <param name="type">Measure unit.</param>
+	/// <param name="getTypeValue">The handler returns a value associated with <see cref="Unit.Type"/> (price or volume steps).</param>
+	[Obsolete("GetTypeValue is obsolete.")]
+	public Unit(decimal value, UnitTypes type, Func<UnitTypes, decimal?> getTypeValue)
+		: this(value, type)
+	{
+		GetTypeValue = getTypeValue;
+	}
+
+	private UnitTypes _type;
+
+	/// <summary>
+	/// Measure unit.
+	/// </summary>
+	[DataMember]
+	public UnitTypes Type
+	{
+		get => _type;
+		set
 		{
+#pragma warning disable CS0618
+			if (value < UnitTypes.Absolute || value > UnitTypes.Limit)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
+#pragma warning restore CS0618
+
+			_type = value;
 		}
+	}
 
-		/// <summary>
-		/// Создать абсолютную величину <see cref="UnitTypes.Absolute"/>.
-		/// </summary>
-		/// <param name="value">Значение.</param>
-		public Unit(decimal value)
-			: this(value, UnitTypes.Absolute)
+	/// <summary>
+	/// Value.
+	/// </summary>
+	[DataMember]
+	public decimal Value { get; set; }
+
+	[field: NonSerialized]
+	private Func<UnitTypes, decimal?> _getTypeValue;
+
+	/// <summary>
+	/// The handler returns a value associated with <see cref="Type"/> (price or volume steps).
+	/// </summary>
+	[XmlIgnore]
+	[Obsolete("Use absolute values.")]
+	public Func<UnitTypes, decimal?> GetTypeValue
+	{
+		get => _getTypeValue;
+		set => _getTypeValue = value;
+	}
+
+	/// <summary>
+	/// Create a copy of <see cref="Unit"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Unit Clone()
+	{
+		return new()
 		{
-		}
+			Type = Type,
+			Value = Value,
+		};
+	}
 
-		/// <summary>
-		/// Создать величину типа <see cref="UnitTypes.Absolute"/> или <see cref="UnitTypes.Percent"/>.
-		/// </summary>
-		/// <param name="value">Значение.</param>
-		/// <param name="type">Единица измерения.</param>
-		public Unit(decimal value, UnitTypes type)
-			: this(value, type, null)
-		{
-		}
+	/// <summary>
+	/// Compare <see cref="Unit"/> on the equivalence.
+	/// </summary>
+	/// <param name="other">Another value with which to compare.</param>
+	/// <returns>The result of the comparison.</returns>
+	public override int CompareTo(Unit other)
+	{
+		if (ReferenceEquals(this, other))
+			return 0;
 
-		/// <summary>
-		/// Создать величину типа <see cref="UnitTypes.Point"/> или <see cref="UnitTypes.Step"/>.
-		/// </summary>
-		/// <param name="value">Значение.</param>
-		/// <param name="type">Единица измерения.</param>
-		/// <param name="getTypeValue">Обработчик, возвращающие значение, ассоциированное с <see cref="Type"/> (шаг цены или объема).</param>
-		public Unit(decimal value, UnitTypes type, Func<UnitTypes, decimal?> getTypeValue)
-		{
-			// mika Данную проверку лучше делать при арифметических действиях
-			//
-			//if (type == UnitTypes.Point || type == UnitTypes.Step)
-			//{
-			//    if (security == null)
-			//        throw new ArgumentException("Единица измерения не может быть '{0}' так как не передана информация об инструменте.".Put(type), "type");
-			//}
-
-			Value = value;
-			Type = type;
-			GetTypeValue = getTypeValue;
-		}
-
-		/// <summary>
-		/// Единица измерения.
-		/// </summary>
-		[DataMember]
-		public UnitTypes Type { get; set; }
-
-		/// <summary>
-		/// Значение.
-		/// </summary>
-		[DataMember]
-		public decimal Value { get; set; }
-
-		[field: NonSerialized]
-		private Func<UnitTypes, decimal?> _getTypeValue;
-
-		/// <summary>
-		/// Обработчик, возвращающие значение, ассоциированное с <see cref="Type"/> (шаг цены или объема).
-		/// </summary>
-		[Ignore]
-		public Func<UnitTypes, decimal?> GetTypeValue
-		{
-			get { return _getTypeValue; }
-			set { _getTypeValue = value; }
-		}
-
-		///<summary>
-		/// Создать копию объекта <see cref="Unit" />.
-		///</summary>
-		///<returns>Копия.</returns>
-		public override Unit Clone()
-		{
-			return new Unit
-			{
-				Type = Type,
-				Value = Value,
-				GetTypeValue = GetTypeValue,
-			};
-		}
-
-		/// <summary>
-		/// Сравнить величину с другой.
-		/// </summary>
-		/// <param name="other">Другая величина, с которой необходимо сравнивать.</param>
-		/// <returns>Результат сравнения величин.</returns>
-		public override int CompareTo(Unit other)
-		{
-			if (this == other)
-				return 0;
-
-			if (this < other)
-				return -1;
-
+		if (other is null)
 			return 1;
-		}
 
-		/// <summary>
-		/// Привести <see cref="decimal"/> значение к объекту <see cref="Unit"/>.
-		/// </summary>
-		/// <param name="value"><see cref="decimal"/> значение.</param>
-		/// <returns>Объект <see cref="Unit"/>.</returns>
-		public static implicit operator Unit(decimal value)
-		{
-			return new Unit(value);
-		}
+		var type = Type.CompareTo(other.Type);
+		return type != 0 ? type : Value.CompareTo(other.Value);
+	}
 
-		/// <summary>
-		/// Привести <see cref="int"/> значение к объекту <see cref="Unit"/>.
-		/// </summary>
-		/// <param name="value"><see cref="int"/> значение.</param>
-		/// <returns>Объект <see cref="Unit"/>.</returns>
-		public static implicit operator Unit(int value)
-		{
-			return new Unit(value);
-		}
+	[Obsolete]
+	private decimal SafeGetTypeValue(Func<UnitTypes, decimal?> getTypeValue)
+	{
+		var func = (GetTypeValue ?? getTypeValue) ?? throw new InvalidOperationException(LocalizedStrings.UnitHandlerNotSet);
 
-		/// <summary>
-		/// Привести объект <see cref="Unit"/> к <see cref="decimal"/> значению.
-		/// </summary>
-		/// <param name="unit">Объект <see cref="Unit"/>.</param>
-		/// <returns><see cref="decimal"/> значение.</returns>
-		public static explicit operator decimal(Unit unit)
-		{
-			if (unit == null)
-				throw new ArgumentNullException("unit");
+		var value = func(Type);
 
-			switch (unit.Type)
-			{
-				case UnitTypes.Limit:
-				case UnitTypes.Absolute:
-					return unit.Value;
-				case UnitTypes.Percent:
-					throw new ArgumentException(LocalizedStrings.PercentagesConvert, "unit");
-				case UnitTypes.Point:
-					return unit.Value * unit.SafeGetTypeValue(null);
-				case UnitTypes.Step:
-					return unit.Value * unit.SafeGetTypeValue(null);
-				default:
-					throw new ArgumentOutOfRangeException("unit");
-			}
-		}
-
-		/// <summary>
-		/// Привести <see cref="double"/> значение к объекту <see cref="Unit"/>.
-		/// </summary>
-		/// <param name="value"><see cref="double"/> значение.</param>
-		/// <returns>Объект <see cref="Unit"/>.</returns>
-		public static implicit operator Unit(double value)
-		{
-			return (decimal)value;
-		}
-
-		/// <summary>
-		/// Привести объект <see cref="Unit"/> к <see cref="double"/> значению.
-		/// </summary>
-		/// <param name="unit">Объект <see cref="Unit"/>.</param>
-		/// <returns><see cref="double"/> значение.</returns>
-		public static explicit operator double(Unit unit)
-		{
-			return (double)(decimal)unit;
-		}
-
-		///// <summary>
-		///// Привести <see cref="string"/> значение к объекту <see cref="Unit"/>.
-		///// </summary>
-		///// <param name="value"><see cref="string"/> значение.</param>
-		///// <returns>Объект <see cref="Unit"/>.</returns>
-		//public static implicit operator Unit(string value)
-		//{
-		//    return value.ToUnit(null);
-		//}
-
-		private decimal SafeGetTypeValue(Func<UnitTypes, decimal?> getTypeValue)
-		{
-			var func = GetTypeValue ?? getTypeValue;
-
-			if (func == null)
-				throw new InvalidOperationException("Обработчик получения значения не установлен.");
-
-			var value = func(Type);
-
-			if (value != null && value != 0)
-				return value.Value;
-
-			if (getTypeValue == null)
-				throw new ArgumentNullException("getTypeValue");
-
-			value = getTypeValue(Type);
-
-			if (value == null || value == 0)
-				throw new InvalidOperationException(LocalizedStrings.Str1291);
-
+		if (value is not null and not 0)
 			return value.Value;
-		}
 
-		private static Unit CreateResult(Unit u1, Unit u2, Func<decimal, decimal, decimal> operation, Func<decimal, decimal, decimal> percentOperation)
+		if (getTypeValue is null)
+			throw new ArgumentNullException(nameof(getTypeValue));
+
+		value = getTypeValue(Type);
+
+		if (value is null or 0)
+			throw new InvalidOperationException(LocalizedStrings.InvalidValue);
+
+		return value.Value;
+	}
+
+	private static Unit CreateResult(Unit u1, Unit u2, Func<decimal, decimal, decimal> operation, Func<decimal, decimal, decimal> percentOperation)
+	{
+		//  prevent operator '==' call
+		if (u1 is null)
+			return null;
+
+		if (u2 is null)
+			return null;
+
+#pragma warning disable CS0618
+		if (u1.Type == UnitTypes.Limit || u2.Type == UnitTypes.Limit)
+			throw new ArgumentException(LocalizedStrings.LimitedValueNotMath);
+#pragma warning restore CS0618
+
+		if (operation is null)
+			throw new ArgumentNullException(nameof(operation));
+
+		if (percentOperation is null)
+			throw new ArgumentNullException(nameof(percentOperation));
+
+		var result = new Unit
 		{
-			//  предовратить вызов переопределенного оператора
-			//if (u1 == null)
-			if (u1.IsNull())
-				throw new ArgumentNullException("u1");
+			Type = u1.Type,
+		};
 
-			//if (u2 == null)
-			if (u2.IsNull())
-				throw new ArgumentNullException("u2");
-
-			if (u1.Type == UnitTypes.Limit || u2.Type == UnitTypes.Limit)
-				throw new ArgumentException(LocalizedStrings.LimitedValueNotMath);
-
-			if (operation == null)
-				throw new ArgumentNullException("operation");
-
-			if (percentOperation == null)
-				throw new ArgumentNullException("percentOperation");
-
-			//if (u1.CheckGetTypeValue(false) != u2.CheckGetTypeValue(false))
-			//	throw new ArgumentException("У одной из величин не установлено получение значения.");
-
-			//if (u1.GetTypeValue != null && u2.GetTypeValue != null && u1.GetTypeValue != u2.GetTypeValue)
-			//	throw new ArgumentException(LocalizedStrings.Str614Params.Put(u1.Security.Id, u2.Security.Id));
-
-			var result = new Unit
+		if (u1.Type == u2.Type)
+		{
+			result.Value = operation(u1.Value, u2.Value);
+		}
+		else
+		{
+			if (u1.Type == UnitTypes.Percent || u2.Type == UnitTypes.Percent)
 			{
-				Type = u1.Type,
-				GetTypeValue = u1.GetTypeValue ?? u2.GetTypeValue
-			};
+				result.Type = u1.Type == UnitTypes.Percent ? u2.Type : u1.Type;
 
-			if (u1.Type == u2.Type)
-			{
-				result.Value = operation(u1.Value, u2.Value);
+				var nonPerValue = u1.Type == UnitTypes.Percent ? u2.Value : u1.Value;
+				var perValue = u1.Type == UnitTypes.Percent ? u1.Value : u2.Value;
+
+				result.Value = percentOperation(nonPerValue, perValue * nonPerValue.Abs() / 100.0m);
 			}
 			else
 			{
-				if (u1.Type == UnitTypes.Percent || u2.Type == UnitTypes.Percent)
-				{
-					result.Type = u1.Type == UnitTypes.Percent ? u2.Type : u1.Type;
+				var value = operation((decimal)u1, (decimal)u2);
 
-					var nonPerValue = u1.Type == UnitTypes.Percent ? u2.Value : u1.Value;
-					var perValue = u1.Type == UnitTypes.Percent ? u1.Value : u2.Value;
+				if (result.Type != UnitTypes.Absolute)
+						throw new ArgumentOutOfRangeException(result.Type.ToString());
 
-					result.Value = percentOperation(nonPerValue, perValue * nonPerValue.Abs() / 100.0m);
-				}
-				else
-				{
-					var value = operation((decimal)u1, (decimal)u2);
-
-					switch (result.Type)
-					{
-						case UnitTypes.Absolute:
-							break;
-						case UnitTypes.Point:
-							value /= u1.SafeGetTypeValue(result.GetTypeValue);
-							break;
-						case UnitTypes.Step:
-							value /= u1.SafeGetTypeValue(result.GetTypeValue);
-							break;
-						default:
-							throw new ArgumentOutOfRangeException();
-					}
-
-					result.Value = value;
-				}
-			}
-
-			return result;
-		}
-
-		/// <summary>
-		/// Сложить два объекта <see cref="Unit"/>.
-		/// </summary>
-		/// <param name="u1">Первый объект <see cref="Unit"/>.</param>
-		/// <param name="u2">Второй объект <see cref="Unit"/>.</param>
-		/// <returns>Результат сложения.</returns>
-		public static Unit operator +(Unit u1, Unit u2)
-		{
-			return CreateResult(u1, u2, (v1, v2) => v1 + v2, (nonPer, per) => nonPer + per);
-		}
-
-		/// <summary>
-		/// Перемножить два объекта <see cref="Unit"/>.
-		/// </summary>
-		/// <param name="u1">Первый объект <see cref="Unit"/>.</param>
-		/// <param name="u2">Второй объект <see cref="Unit"/>.</param>
-		/// <returns>Результат перемножения.</returns>
-		public static Unit operator *(Unit u1, Unit u2)
-		{
-			return CreateResult(u1, u2, (v1, v2) => v1 * v2, (nonPer, per) => nonPer * per);
-		}
-
-		/// <summary>
-		/// Вычесть одну величину <see cref="Unit"/> из другой.
-		/// </summary>
-		/// <param name="u1">Первый объект <see cref="Unit"/>.</param>
-		/// <param name="u2">Второй объект <see cref="Unit"/>.</param>
-		/// <returns>Результат вычитания.</returns>
-		public static Unit operator -(Unit u1, Unit u2)
-		{
-			return CreateResult(u1, u2, (v1, v2) => v1 - v2, (nonPer, per) => (u1.Type == UnitTypes.Percent ? (per - nonPer) : (nonPer - per)));
-		}
-
-		/// <summary>
-		/// Поделить одну величину <see cref="Unit"/> на другую.
-		/// </summary>
-		/// <param name="u1">Первый объект <see cref="Unit"/>.</param>
-		/// <param name="u2">Второй объект <see cref="Unit"/>.</param>
-		/// <returns>Результат деления.</returns>
-		public static Unit operator /(Unit u1, Unit u2)
-		{
-			return CreateResult(u1, u2, (v1, v2) => v1 / v2, (nonPer, per) => u1.Type == UnitTypes.Percent ? per / nonPer : nonPer / per);
-		}
-
-		/// <summary>
-		/// Рассчитать хеш-код объекта <see cref="Unit"/>.
-		/// </summary>
-		/// <returns>Хеш-код.</returns>
-		public override int GetHashCode()
-		{
-			return Type.GetHashCode() ^ Value.GetHashCode();
-		}
-
-		/// <summary>
-		/// Сравнить величину на эквивалентность с другой.
-		/// </summary>
-		/// <param name="other">Другая величина, с которой необходимо сравнивать.</param>
-		/// <returns><see langword="true"/>, если другая величина равна текущей, иначе, <see langword="false"/>.</returns>
-		protected override bool OnEquals(Unit other)
-		{
-			//var retVal = Type == other.Type && Value == other.Value;
-
-			//if (Type == UnitTypes.Percent || Type == UnitTypes.Absolute || Type == UnitTypes.Limit)
-			//	return retVal;
-
-			//return retVal && CheckGetTypeValue(true) == other.CheckGetTypeValue(true);
-
-			if (Type == other.Type)
-				return Value == other.Value;
-
-			if (Type == UnitTypes.Percent || other.Type == UnitTypes.Percent)
-				return false;
-
-			var curr = this;
-
-			if (other.Type == UnitTypes.Absolute)
-				curr = Convert(other.Type);
-			else
-				other = other.Convert(Type);
-
-			return curr.Value == other.Value;
-		}
-
-		/// <summary>
-		/// Сравнить величину на эквивалентность с другой.
-		/// </summary>
-		/// <param name="obj">Другая величина, с которой необходимо сравнивать.</param>
-		/// <returns><see langword="true"/>, если другая величина равна текущей, иначе, <see langword="false"/>.</returns>
-		public override bool Equals(object obj)
-		{
-			return base.Equals(obj);
-		}
-
-		/// <summary>
-		/// Сравнить две величины на неравенство (если величины разных типов, то для сравнения будет применена конвертация).
-		/// </summary>
-		/// <param name="u1">Первая величина.</param>
-		/// <param name="u2">Вторая величина.</param>
-		/// <returns><see langword="true"/>, если величины не равны, иначе, <see langword="false"/>.</returns>
-		public static bool operator !=(Unit u1, Unit u2)
-		{
-			return !(u1 == u2);
-		}
-
-		/// <summary>
-		/// Сравнить две величины на равенство (если величины разных типов, то для сравнения будет применена конвертация).
-		/// </summary>
-		/// <param name="u1">Первая величина.</param>
-		/// <param name="u2">Вторая величина.</param>
-		/// <returns><see langword="true"/>, если величины равны, иначе, <see langword="false"/>.</returns>
-		public static bool operator ==(Unit u1, Unit u2)
-		{
-			if (ReferenceEquals(u1, null))
-				return u2.IsNull();
-
-			if (ReferenceEquals(u2, null))
-				return false;
-
-			return u1.OnEquals(u2);
-		}
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			switch (Type)
-			{
-				case UnitTypes.Percent:
-					return Value + "%";
-				case UnitTypes.Absolute:
-					return Value.To<string>();
-				case UnitTypes.Step:
-					return Value + (LocalizedStrings.ActiveLanguage == Languages.Russian ? "ш" : "s");
-				case UnitTypes.Point:
-					return Value + (LocalizedStrings.ActiveLanguage == Languages.Russian ? "п" : "p");
-				case UnitTypes.Limit:
-					return Value + (LocalizedStrings.ActiveLanguage == Languages.Russian ? "л" : "l");
-				default:
-					throw new InvalidOperationException(LocalizedStrings.UnknownUnitMeasurement.Put(Type));
+				result.Value = value;
 			}
 		}
 
-		/// <summary>
-		/// Перевести величину в другой тип измерения.
-		/// </summary>
-		/// <param name="destinationType">Тип измерения, в который необходимо перевести.</param>
-		/// <returns>Сконвертированная величина.</returns>
-		public Unit Convert(UnitTypes destinationType)
-		{
-			return Convert(destinationType, GetTypeValue);
-		}
-
-		/// <summary>
-		/// Перевести величину в другой тип измерения.
-		/// </summary>
-		/// <param name="destinationType">Тип измерения, в который необходимо перевести.</param>
-		/// <param name="getTypeValue">Обработчик, возвращающие значение, ассоциированное с <see cref="Type"/> (шаг цены или объема).</param>
-		/// <returns>Сконвертированная величина.</returns>
-		public Unit Convert(UnitTypes destinationType, Func<UnitTypes, decimal?> getTypeValue)
-		{
-			if (Type == destinationType)
-				return Clone();
-
-			if (Type == UnitTypes.Percent || destinationType == UnitTypes.Percent)
-				throw new InvalidOperationException(LocalizedStrings.PercentagesConvert);
-
-			var value = (decimal)this;
-
-			if (destinationType == UnitTypes.Point || destinationType == UnitTypes.Step)
-			{
-				if (getTypeValue == null)
-					throw new ArgumentException(LocalizedStrings.UnitHandlerNotSet, "destinationType");
-
-				switch (destinationType)
-				{
-					case UnitTypes.Point:
-						var point = getTypeValue(UnitTypes.Point);
-
-						if (point == null || point == 0)
-							throw new InvalidOperationException("Price step cost is equal to zero.".Translate());
-
-						value /= point.Value;
-						break;
-					case UnitTypes.Step:
-						var step = getTypeValue(UnitTypes.Step);
-
-						if (step == null || step == 0)
-							throw new InvalidOperationException(LocalizedStrings.Str1546);
-
-						value /= step.Value;
-						break;
-				}
-			}
-
-			return new Unit(value, destinationType, getTypeValue);
-		}
-
-		/// <summary>
-		/// Проверить, является ли первая величина больше второй.
-		/// </summary>
-		/// <param name="u1">Первая величина.</param>
-		/// <param name="u2">Вторая величина.</param>
-		/// <returns><see langword="true"/>, если первая величина больше второй, иначе, <see langword="false"/>.</returns>
-		public static bool operator >(Unit u1, Unit u2)
-		{
-			if (u1.IsNull())
-				throw new ArgumentNullException("u1");
-
-			if (u2.IsNull())
-				throw new ArgumentNullException("u2");
-
-			//if (u1.Type == UnitTypes.Limit || u2.Type == UnitTypes.Limit)
-			//	throw new ArgumentException("Лимитированное значение не может участвовать в арифметических операциях.");
-
-			//if (u1.CheckGetTypeValue(false) != u2.CheckGetTypeValue(false))
-			//	throw new ArgumentException("У одной из величин не установлено получение значения.");
-
-			if (u1.Type != u2.Type)
-			{
-				if (u1.Type == UnitTypes.Percent || u2.Type == UnitTypes.Percent)
-					throw new ArgumentException(LocalizedStrings.PercentagesCannotCompare.Put(u1, u2));
-
-				if (u2.Type == UnitTypes.Absolute)
-					u1 = u1.Convert(u2.Type);
-				else
-					u2 = u2.Convert(u1.Type);
-			}
-
-			return u1.Value > u2.Value;
-		}
-
-		/// <summary>
-		/// Проверить, является ли первая величина больше или равной второй.
-		/// </summary>
-		/// <param name="u1">Первая величина.</param>
-		/// <param name="u2">Вторая величина.</param>
-		/// <returns><see langword="true"/>, если первая величина больше или равной второй, иначе, <see langword="false"/>.</returns>
-		public static bool operator >=(Unit u1, Unit u2)
-		{
-			return u1 == u2 || u1 > u2;
-		}
-
-		/// <summary>
-		/// Проверить, является ли первая величина меньше второй.
-		/// </summary>
-		/// <param name="u1">Первая величина.</param>
-		/// <param name="u2">Вторая величина.</param>
-		/// <returns><see langword="true"/>, если первая величина меньше второй, иначе, <see langword="false"/>.</returns>
-		public static bool operator <(Unit u1, Unit u2)
-		{
-			return u1 != u2 && !(u1 > u2);
-		}
-
-		/// <summary>
-		/// Проверить, является ли первая величина меньше или равной второй.
-		/// </summary>
-		/// <param name="u1">Первая величина.</param>
-		/// <param name="u2">Вторая величина.</param>
-		/// <returns><see langword="true"/>, если первая величина меньше или равной второй, иначе, <see langword="false"/>.</returns>
-		public static bool operator <=(Unit u1, Unit u2)
-		{
-			return !(u1 > u2);
-		}
-
-		/// <summary>
-		/// Получить величину с противоположным знаком у значения <see cref="Value"/>.
-		/// </summary>
-		/// <param name="u">Величина.</param>
-		/// <returns>Обратная величина.</returns>
-		public static Unit operator -(Unit u)
-		{
-			if (u == null)
-				throw new ArgumentNullException("u");
-
-			return new Unit
-			{
-				GetTypeValue = u.GetTypeValue,
-				Type = u.Type,
-				Value = -u.Value
-			};
-		}
-
-		Unit IOperable<Unit>.Add(Unit other)
-		{
-			return this + other;
-		}
-
-		Unit IOperable<Unit>.Subtract(Unit other)
-		{
-			return this - other;
-		}
-
-		Unit IOperable<Unit>.Multiply(Unit other)
-		{
-			return this * other;
-		}
-
-		Unit IOperable<Unit>.Divide(Unit other)
-		{
-			return this / other;
-		}
+		return result;
 	}
 
 	/// <summary>
-	/// Вспомогательный класс для <see cref="Unit"/>.
+	/// Add the two objects <see cref="Unit"/>.
 	/// </summary>
-	public static class UnitHelper
+	/// <param name="u1">First object <see cref="Unit"/>.</param>
+	/// <param name="u2">Second object <see cref="Unit"/>.</param>
+	/// <returns>The result of addition.</returns>
+	public static Unit operator +(Unit u1, Unit u2)
 	{
-		/// <summary>
-		/// Создать из <see cref="int"/> значения проценты.
-		/// </summary>
-		/// <param name="value"><see cref="int"/> значение.</param>
-		/// <returns>Проценты.</returns>
-		public static Unit Percents(this int value)
+		return CreateResult(u1, u2, (v1, v2) => v1 + v2, (nonPer, per) => nonPer + per);
+	}
+
+	/// <summary>
+	/// Multiply the two objects <see cref="Unit"/>.
+	/// </summary>
+	/// <param name="u1">First object <see cref="Unit"/>.</param>
+	/// <param name="u2">Second object <see cref="Unit"/>.</param>
+	/// <returns>The result of the multiplication.</returns>
+	public static Unit operator *(Unit u1, Unit u2)
+	{
+		return CreateResult(u1, u2, (v1, v2) => v1 * v2, (nonPer, per) => per);
+	}
+
+	/// <summary>
+	/// Subtract the unit <see cref="Unit"/> from another.
+	/// </summary>
+	/// <param name="u1">First object <see cref="Unit"/>.</param>
+	/// <param name="u2">Second object <see cref="Unit"/>.</param>
+	/// <returns>The result of the subtraction.</returns>
+	public static Unit operator -(Unit u1, Unit u2)
+	{
+		return CreateResult(u1, u2, (v1, v2) => v1 - v2, (nonPer, per) => (u1.Type == UnitTypes.Percent ? (per - nonPer) : (nonPer - per)));
+	}
+
+	/// <summary>
+	/// Divide the unit <see cref="Unit"/> to another.
+	/// </summary>
+	/// <param name="u1">First object <see cref="Unit"/>.</param>
+	/// <param name="u2">Second object <see cref="Unit"/>.</param>
+	/// <returns>The result of the division.</returns>
+	public static Unit operator /(Unit u1, Unit u2)
+	{
+		return CreateResult(u1, u2, (v1, v2) => v1 / v2, (nonPer, per) => u1.Type == UnitTypes.Percent ? per / nonPer : nonPer / per);
+	}
+
+	/// <summary>
+	/// Get the hash code of the object <see cref="Unit"/>.
+	/// </summary>
+	/// <returns>A hash code.</returns>
+	public override int GetHashCode() => Type.GetHashCode() ^ Value.GetHashCode();
+
+	// A percent, a point, a step and an absolute measure different things and nothing here turns one
+	// into another, so only two of the same kind can be told apart by their number. This is also what
+	// GetHashCode is built from, and what CompareTo orders by.
+	private bool EqualsImpl(Unit other)
+		=> Type == other.Type && Value == other.Value;
+
+	/// <summary>
+	/// Compare <see cref="Unit"/> on the equivalence.
+	/// </summary>
+	/// <param name="other">Another value with which to compare.</param>
+	/// <returns><see langword="true" />, if the specified object is equal to the current object, otherwise, <see langword="false" />.</returns>
+	protected override bool OnEquals(Unit other) => EqualsImpl(other);
+
+	/// <summary>
+	/// Compare <see cref="Unit"/> on the equivalence.
+	/// </summary>
+	/// <param name="other">Another value with which to compare.</param>
+	/// <returns><see langword="true" />, if the specified object is equal to the current object, otherwise, <see langword="false" />.</returns>
+	public override bool Equals(object other) => base.Equals(other);
+
+	/// <summary>
+	/// Compare two values in the inequality (if the value of different types, the conversion will be used).
+	/// </summary>
+	/// <param name="u1">First unit.</param>
+	/// <param name="u2">Second unit.</param>
+	/// <returns><see langword="true" />, if the values are equals, otherwise, <see langword="false" />.</returns>
+	public static bool operator !=(Unit u1, Unit u2)
+	{
+		if (u1 is null)
+			return u2 is not null;
+
+		if (u2 is null)
+			return true;
+
+		return !u1.EqualsImpl(u2);
+	}
+
+	/// <summary>
+	/// Compare two values for equality (if the value of different types, the conversion will be used).
+	/// </summary>
+	/// <param name="u1">First unit.</param>
+	/// <param name="u2">Second unit.</param>
+	/// <returns><see langword="true" />, if the values are equals, otherwise, <see langword="false" />.</returns>
+	public static bool operator ==(Unit u1, Unit u2)
+	{
+		if (u1 is null)
+			return u2 is null;
+
+		if (u2 is null)
+			return false;
+
+		return u1.OnEquals(u2);
+	}
+
+	/// <inheritdoc />
+	public override string ToString()
+		=> ToString(null, null);
+
+	/// <inheritdoc/>
+	public string ToString(string format, IFormatProvider formatProvider)
+		=> Value.ToString(format, formatProvider) + GetTypeSuffix(Type);
+
+	/// <summary>
+	/// Get string suffix.
+	/// </summary>
+	/// <param name="type">Measure unit.</param>
+	/// <returns>String suffix.</returns>
+	public static string GetTypeSuffix(UnitTypes type)
+		=> type switch
 		{
-			return Percents((decimal)value);
-		}
+			UnitTypes.Percent	=> "%",
+			UnitTypes.Absolute	=> string.Empty,
 
-		/// <summary>
-		/// Создать из <see cref="double"/> значения проценты.
-		/// </summary>
-		/// <param name="value"><see cref="double"/> значение.</param>
-		/// <returns>Проценты.</returns>
-		public static Unit Percents(this double value)
+#pragma warning disable CS0618
+			UnitTypes.Limit		=> "l",
+			UnitTypes.Step 		=> "s",
+			UnitTypes.Point 	=> "p",
+#pragma warning restore CS0618
+
+			_ => throw new ArgumentOutOfRangeException(nameof(type), type, LocalizedStrings.InvalidValue),
+		};
+
+	/// <summary>
+	/// Cast the value to another type.
+	/// </summary>
+	/// <param name="destinationType">Destination value type.</param>
+	/// <returns>Converted value.</returns>
+	public Unit Convert(UnitTypes destinationType)
+	{
+		if (Type == destinationType)
+			return Clone();
+
+		if (Type == UnitTypes.Percent || destinationType == UnitTypes.Percent)
+			throw new InvalidOperationException(LocalizedStrings.PercentagesConvert);
+
+		var value = ToDecimal();
+
+		return new(value, destinationType);
+	}
+
+	private decimal ToDecimal()
+	{
+		var value = Value;
+
+		return Type switch
 		{
-			return Percents((decimal)value);
-		}
+			UnitTypes.Absolute => value,
+			UnitTypes.Percent => throw new InvalidOperationException(LocalizedStrings.PercentagesConvert),
+#pragma warning disable CS0618
+			UnitTypes.Limit => value,
+#pragma warning restore CS0618
+			_ => throw new InvalidOperationException(Type.ToString()),
+		};
+	}
 
-		/// <summary>
-		/// Создать из <see cref="decimal"/> значения проценты.
-		/// </summary>
-		/// <param name="value"><see cref="decimal"/> значение.</param>
-		/// <returns>Проценты.</returns>
-		public static Unit Percents(this decimal value)
+	/// <summary>
+	/// Cast the value to another type.
+	/// </summary>
+	/// <param name="destinationType">Destination value type.</param>
+	/// <param name="getTypeValue">The handler returns a value associated with <see cref="Type"/> (price or volume steps).</param>
+	/// <param name="throwException">Throw exception in case of impossible conversion. Otherwise, returns <see langword="null"/>.</param>
+	/// <returns>Converted value.</returns>
+	[Obsolete("GetTypeValue is obsolete.")]
+	public Unit Convert(UnitTypes destinationType, Func<UnitTypes, decimal?> getTypeValue, bool throwException = true)
+	{
+		return Convert(destinationType);
+	}
+
+	private static bool? MoreThan(Unit u1, Unit u2)
+	{
+		if (u1 is null)
+			return null;
+
+		if (u2 is null)
+			return null;
+
+		if (u1.Type != u2.Type)
 		{
-			return new Unit(value, UnitTypes.Percent);
-		}
-
-		/// <summary>
-		/// Пробразовать строку в <see cref="Unit"/>.
-		/// </summary>
-		/// <param name="str">Строковое представление <see cref="Unit"/>.</param>
-		/// <param name="getTypeValue">Обработчик, возвращающие значение, ассоциированное с <see cref="Type"/> (шаг цены или объема).</param>
-		/// <returns>Объект <see cref="Unit"/>.</returns>
-		public static Unit ToUnit(this string str, Func<UnitTypes, decimal?> getTypeValue = null)
-		{
-			if (str.IsEmpty())
-				throw new ArgumentNullException("str");
-
-			var lastSymbol = str.Last();
-
-			if (char.IsDigit(lastSymbol))
-				return new Unit(str.To<decimal>(), UnitTypes.Absolute);
-
-			var value = str.Substring(0, str.Length - 1).To<decimal>();
-
-			UnitTypes type;
-
-			switch (lastSymbol)
+			if (u1.Type == UnitTypes.Percent || u2.Type == UnitTypes.Percent)
 			{
-				case 'ш':
-				case 's':
-					if (getTypeValue == null)
-						throw new ArgumentNullException("getTypeValue");
-
-					type = UnitTypes.Step;
-					break;
-				case 'п':
-				case 'p':
-					if (getTypeValue == null)
-						throw new ArgumentNullException("getTypeValue");
-			
-					type = UnitTypes.Point;
-					break;
-				case '%':
-					type = UnitTypes.Percent;
-					break;
-				case 'л':
-				case 'l':
-					type = UnitTypes.Limit;
-					break;
-				default:
-					throw new ArgumentException(LocalizedStrings.UnknownUnitMeasurement.Put(lastSymbol), "str");
+				return null;
+				//throw new ArgumentException(LocalizedStrings.PercentagesCannotCompare.Put(u1, u2));
 			}
 
-			return new Unit(value, type, getTypeValue);
+			if (u2.Type == UnitTypes.Absolute)
+			{
+				u1 = u1.Convert(u2.Type);
+
+				if (u1 is null)
+					return null;
+			}
+			else
+			{
+				u2 = u2.Convert(u1.Type);
+
+				if (u2 is null)
+					return null;
+			}
 		}
+
+		return u1.Value > u2.Value;
+	}
+
+	/// <summary>
+	/// Check whether the first value is greater than the second.
+	/// </summary>
+	/// <param name="u1">First unit.</param>
+	/// <param name="u2">Second unit.</param>
+	/// <returns><see langword="true" />, if the first value is greater than the second, <see langword="false" />.</returns>
+	public static bool operator >(Unit u1, Unit u2) => MoreThan(u1, u2) == true;
+
+	/// <summary>
+	/// Check whether the first value is greater than or equal to the second.
+	/// </summary>
+	/// <param name="u1">First unit.</param>
+	/// <param name="u2">Second unit.</param>
+	/// <returns><see langword="true" />, if the first value is greater than or equal the second, otherwise, <see langword="false" />.</returns>
+	public static bool operator >=(Unit u1, Unit u2) => u1 == u2 || u1 > u2;
+
+	/// <summary>
+	/// Check whether the first value is less than the second.
+	/// </summary>
+	/// <param name="u1">First unit.</param>
+	/// <param name="u2">Second unit.</param>
+	/// <returns><see langword="true" />, if the first value is less than the second, <see langword="false" />.</returns>
+	public static bool operator <(Unit u1, Unit u2) => MoreThan(u2, u1) == true;
+
+	/// <summary>
+	/// Check whether the first value is less than or equal to the second.
+	/// </summary>
+	/// <param name="u1">First unit.</param>
+	/// <param name="u2">Second unit.</param>
+	/// <returns><see langword="true" />, if the first value is less than or equal to the second, <see langword="false" />.</returns>
+	public static bool operator <=(Unit u1, Unit u2) => u1 == u2 || MoreThan(u2, u1) == true;
+
+	/// <summary>
+	/// Get the value with the opposite sign from the value <see cref="Unit.Value"/>.
+	/// </summary>
+	/// <param name="u">Unit.</param>
+	/// <returns>Opposite value.</returns>
+	public static Unit operator -(Unit u)
+	{
+		if (u is null)
+			return null;
+
+		return new Unit
+		{
+			Type = u.Type,
+			Value = -u.Value
+		};
+	}
+
+	Unit IOperable<Unit>.Add(Unit other) => this + other;
+	Unit IOperable<Unit>.Subtract(Unit other) => this - other;
+	Unit IOperable<Unit>.Multiply(Unit other) => this * other;
+	Unit IOperable<Unit>.Divide(Unit other) => this / other;
+
+	/// <summary>
+	/// Make the value positive.
+	/// </summary>
+	/// <returns><see cref="Unit"/></returns>
+	public Unit Abs()
+		=> new() { Type = Type, Value = Value.Abs() };
+
+	/// <summary>
+	/// Load settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		Type = storage.GetValue<UnitTypes>(nameof(Type));
+		Value = storage.GetValue<decimal>(nameof(Value));
+
+		return Task.CompletedTask;
+	}
+
+	/// <summary>
+	/// Save settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		storage.SetValue(nameof(Type), Type.To<string>());
+		storage.SetValue(nameof(Value), Value);
+
+		return Task.CompletedTask;
 	}
 }

@@ -1,126 +1,177 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// Order book states.
+/// </summary>
+[DataContract]
+[Serializable]
+public enum QuoteChangeStates
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Linq;
-	using System.Runtime.Serialization;
-
-	using Ecng.Common;
-
-	using StockSharp.Localization;
+	/// <summary>
+	/// Snapshot started.
+	/// </summary>
+	[EnumMember]
+	SnapshotStarted,
 
 	/// <summary>
-	/// Сообщение, содержащее данные по котировкам.
+	/// Snapshot building.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public sealed class QuoteChangeMessage : Message
+	[EnumMember]
+	SnapshotBuilding,
+
+	/// <summary>
+	/// Snapshot complete.
+	/// </summary>
+	[EnumMember]
+	SnapshotComplete,
+
+	/// <summary>
+	/// Incremental.
+	/// </summary>
+	[EnumMember]
+	Increment,
+}
+
+/// <summary>
+/// Messages containing quotes.
+/// </summary>
+[DataContract]
+[Serializable]
+public sealed class QuoteChangeMessage : BaseSubscriptionIdMessage<QuoteChangeMessage>, IOrderBookMessage
+{
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SecurityIdKey,
+		Description = LocalizedStrings.SecurityIdKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public SecurityId SecurityId { get; set; }
+
+	private QuoteChange[] _bids = [];
+
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.BidsKey,
+		Description = LocalizedStrings.QuotesBuyKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public QuoteChange[] Bids
 	{
-		/// <summary>
-		/// Идентификатор инструмента.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.SecurityIdKey)]
-		[DescriptionLoc(LocalizedStrings.SecurityIdKey, true)]
-		[MainCategory]
-		public SecurityId SecurityId { get; set; }
+		get => _bids;
+		set => _bids = value ?? throw new ArgumentNullException(nameof(value));
+	}
 
-		private IEnumerable<QuoteChange> _bids = Enumerable.Empty<QuoteChange>();
+	private QuoteChange[] _asks = [];
 
-		/// <summary>
-		/// Котировки на покупку.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str281Key)]
-		[DescriptionLoc(LocalizedStrings.Str282Key)]
-		[MainCategory]
-		public IEnumerable<QuoteChange> Bids
-		{
-			get { return _bids; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.AsksKey,
+		Description = LocalizedStrings.QuotesSellKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public QuoteChange[] Asks
+	{
+		get => _asks;
+		set => _asks = value ?? throw new ArgumentNullException(nameof(value));
+	}
 
-				_bids = value;
-			}
-		}
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ServerTimeKey,
+		Description = LocalizedStrings.ChangeServerTimeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public DateTime ServerTime { get; set; }
 
-		private IEnumerable<QuoteChange> _asks = Enumerable.Empty<QuoteChange>();
+	/// <inheritdoc />
+	[DataMember]
+	public DataType BuildFrom { get; set; }
 
-		/// <summary>
-		/// Котировки на продажу.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str283Key)]
-		[DescriptionLoc(LocalizedStrings.Str284Key)]
-		[MainCategory]
-		public IEnumerable<QuoteChange> Asks
-		{
-			get { return _asks; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
+	/// <summary>
+	/// The quote change contains filtered quotes.
+	/// </summary>
+	[Browsable(false)]
+	public bool IsFiltered { get; set; }
 
-				_asks = value;
-			}
-		}
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CurrencyKey,
+		Description = LocalizedStrings.CurrencyDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	//[Ecng.Serialization.Nullable]
+	public CurrencyTypes? Currency { get; set; }
 
-		/// <summary>
-		/// Серверное время изменения.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.ServerTimeKey)]
-		[DescriptionLoc(LocalizedStrings.Str168Key)]
-		[MainCategory]
-		public DateTimeOffset ServerTime { get; set; }
+	/// <inheritdoc />
+	[DataMember]
+	public QuoteChangeStates? State { get; set; }
 
-		/// <summary>
-		/// Отсортированы ли котировки по цене (<see cref="Bids"/> по убыванию, <see cref="Asks"/> по возрастанию).
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str285Key)]
-		[DescriptionLoc(LocalizedStrings.Str285Key, true)]
-		[MainCategory]
-		public bool IsSorted { get; set; }
+	/// <summary>
+	/// Determines a <see cref="QuoteChange.StartPosition"/> initialized.
+	/// </summary>
+	[DataMember]
+	public bool HasPositions { get; set; }
 
-		/// <summary>
-		/// Создать <see cref="QuoteChangeMessage"/>.
-		/// </summary>
-		public QuoteChangeMessage()
-			: base(MessageTypes.QuoteChange)
-		{
-		}
+	/// <inheritdoc />
+	[DataMember]
+	public long SeqNum { get; set; }
 
-		/// <summary>
-		/// Создать копию объекта <see cref="QuoteChangeMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			var clone = new QuoteChangeMessage
-			{
-				LocalTime = LocalTime,
-				SecurityId = SecurityId,
-				Bids = Bids.Select(q => q.Clone()).ToArray(),
-				Asks = Asks.Select(q => q.Clone()).ToArray(),
-				ServerTime = ServerTime,
-				IsSorted = IsSorted
-			};
+	/// <inheritdoc />
+	public override DataType DataType => DataType.MarketDepth;
 
-			this.CopyExtensionInfo(clone);
+	/// <summary>
+	/// Initializes a new instance of the <see cref="QuoteChangeMessage"/>.
+	/// </summary>
+	public QuoteChangeMessage()
+		: base(MessageTypes.QuoteChange)
+	{
+	}
 
-			return clone;
-		}
+	// A copy of the book owns its levels, and the quotes a grouped level was built from are part of
+	// those levels: sharing them hands two consumers one set of quotes to write into.
+	private static QuoteChange[] Copy(QuoteChange[] quotes)
+	{
+		var copy = new QuoteChange[quotes.Length];
 
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",T(S)={0:yyyy/MM/dd HH:mm:ss.fff}".Put(ServerTime);
-		}
+		for (var i = 0; i < copy.Length; i++)
+			copy[i] = quotes[i].Clone();
+
+		return copy;
+	}
+
+	/// <inheritdoc />
+	public override void CopyTo(QuoteChangeMessage destination)
+	{
+		base.CopyTo(destination);
+
+		destination.SecurityId = SecurityId;
+		destination.Bids = Copy(Bids);
+		destination.Asks = Copy(Asks);
+		destination.ServerTime = ServerTime;
+		destination.Currency = Currency;
+		destination.BuildFrom = BuildFrom;
+		destination.IsFiltered = IsFiltered;
+		destination.State = State;
+		destination.HasPositions = HasPositions;
+		destination.SeqNum = SeqNum;
+	}
+
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		var str = base.ToString() + $",Sec={SecurityId},T(S)={ServerTime:yyyy/MM/dd HH:mm:ss.fff},B={Bids.Length},A={Asks.Length}";
+
+		if (State != default)
+			str += $",State={State.Value}";
+
+		if (SeqNum != default)
+			str += $",SQ={SeqNum}";
+
+		return str;
 	}
 }

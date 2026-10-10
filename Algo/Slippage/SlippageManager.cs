@@ -1,133 +1,179 @@
-namespace StockSharp.Algo.Slippage
+namespace StockSharp.Algo.Slippage;
+
+/// <summary>
+/// The slippage manager.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="SlippageManager"/>.
+/// </remarks>
+/// <param name="state">State storage.</param>
+public class SlippageManager(ISlippageManagerState state) : ISlippageManager
 {
-	using System;
+	private readonly ISlippageManagerState _state = state ?? throw new ArgumentNullException(nameof(state));
 
-	using Ecng.Common;
-	using Ecng.Collections;
-
-	using StockSharp.Messages;
+	/// <inheritdoc />
+	public decimal Slippage => _state.Slippage;
 
 	/// <summary>
-	/// Менеджер проскальзывания.
+	/// To calculate negative slippage. By default, the calculation is enabled.
 	/// </summary>
-	public class SlippageManager : ISlippageManager
+	public bool CalculateNegative { get; set; } = true;
+
+	/// <inheritdoc />
+	public void Reset()
 	{
-		private readonly SynchronizedDictionary<SecurityId, RefPair<decimal, decimal>> _bestPrices = new SynchronizedDictionary<SecurityId, RefPair<decimal, decimal>>();
-		private readonly SynchronizedDictionary<long, Tuple<Sides, decimal>> _plannedPrices = new SynchronizedDictionary<long, Tuple<Sides, decimal>>();
+		_state.Clear();
+	}
 
-		/// <summary>
-		/// Создать <see cref="SlippageManager"/>.
-		/// </summary>
-		public SlippageManager()
+	/// <inheritdoc />
+	public decimal? ProcessMessage(Message message)
+	{
+		switch (message.Type)
 		{
-			CalculateNegative = true;
-		}
-
-		/// <summary>
-		/// Суммарное значение проскальзывания.
-		/// </summary>
-		public virtual decimal Slippage { get; private set; }
-
-		/// <summary>
-		/// Считать отрицательное проскальзывание. По-умолчанию расчет выключен.
-		/// </summary>
-		public bool CalculateNegative { get; set; }
-
-		/// <summary>
-		/// Обнулить <see cref="ISlippageManager.Slippage"/>.
-		/// </summary>
-		public virtual void Reset()
-		{
-			Slippage = 0;
-			_bestPrices.Clear();
-			_plannedPrices.Clear();
-		}
-
-		/// <summary>
-		/// Рассчитать проскальзывание.
-		/// </summary>
-		/// <param name="message">Сообщение.</param>
-		/// <returns>Проскальзывание. Если проскальзывание рассчитать невозможно, то будет возвращено <see langword="null"/>.</returns>
-		public decimal? ProcessMessage(Message message)
-		{
-			switch (message.Type)
+			case MessageTypes.Reset:
 			{
-				case MessageTypes.Level1Change:
-				{
-					var l1Msg = (Level1ChangeMessage)message;
-					var pair = _bestPrices.SafeAdd(l1Msg.SecurityId);
-
-					var bidPrice = (decimal?)l1Msg.Changes.TryGetValue(Level1Fields.BestBidPrice);
-					if (bidPrice != null)
-						pair.First = bidPrice.Value;
-
-					var askPrice = (decimal?)l1Msg.Changes.TryGetValue(Level1Fields.BestAskPrice);
-					if (askPrice != null)
-						pair.Second = askPrice.Value;
-
-					break;
-				}
-
-				case MessageTypes.QuoteChange:
-				{
-					var quotesMsg = (QuoteChangeMessage)message;
-					var pair = _bestPrices.SafeAdd(quotesMsg.SecurityId);
-
-					var bid = quotesMsg.GetBestBid();
-					if (bid != null)
-						pair.First = bid.Price;
-
-					var ask = quotesMsg.GetBestAsk();
-					if (ask != null)
-						pair.Second = ask.Price;
-
-					break;
-				}
-
-				case MessageTypes.OrderRegister:
-				{
-					var regMsg = (OrderRegisterMessage)message;
-
-					var prices = _bestPrices.TryGetValue(regMsg.SecurityId);
-
-					if (prices != null)
-					{
-						var price = regMsg.Side == Sides.Buy ? prices.Second : prices.First;
-
-						if (price != 0)
-							_plannedPrices.Add(regMsg.TransactionId, Tuple.Create(regMsg.Side, price));
-					}
-
-					break;
-				}
-
-				case MessageTypes.Execution:
-				{
-					var execMsg = (ExecutionMessage)message;
-
-					if (execMsg.ExecutionType == ExecutionTypes.Trade)
-					{
-						var plannedPrice = _plannedPrices.TryGetValue(execMsg.OriginalTransactionId);
-
-						if (plannedPrice != null)
-						{
-							var slippage = execMsg.TradePrice - plannedPrice.Item2;
-
-							if (plannedPrice.Item1 == Sides.Sell)
-								slippage = -slippage;
-
-							if (slippage < 0 && !CalculateNegative)
-								slippage = 0;
-
-							return slippage;
-						}
-					}
-
-					break;
-				}
+				Reset();
+				break;
 			}
 
-			return null;
+			case MessageTypes.Level1Change:
+			{
+				var l1Msg = (Level1ChangeMessage)message;
+
+				var bidPrice = l1Msg.TryGetDecimal(Level1Fields.BestBidPrice);
+				var askPrice = l1Msg.TryGetDecimal(Level1Fields.BestAskPrice);
+
+				if (bidPrice != null || askPrice != null)
+					_state.UpdateBestPrices(l1Msg.SecurityId, bidPrice, askPrice, l1Msg.ServerTime);
+
+				break;
+			}
+
+			case MessageTypes.QuoteChange:
+			{
+				var quotesMsg = (QuoteChangeMessage)message;
+
+				if (quotesMsg.State != null)
+					break;
+
+				var bid = quotesMsg.GetBestBid();
+				var ask = quotesMsg.GetBestAsk();
+
+				if (bid != null || ask != null)
+					_state.UpdateBestPrices(quotesMsg.SecurityId, bid?.Price, ask?.Price, quotesMsg.ServerTime);
+
+				break;
+			}
+
+			case MessageTypes.OrderRegister:
+			{
+				var regMsg = (OrderRegisterMessage)message;
+
+				if (_state.TryGetBestPrice(regMsg.SecurityId, regMsg.Side, out var price))
+					_state.AddPlannedPrice(regMsg.TransactionId, regMsg.Side, price);
+
+				break;
+			}
+
+			case MessageTypes.OrderReplace:
+			{
+				var replaceMsg = (OrderReplaceMessage)message;
+
+				if (_state.TryGetBestPrice(replaceMsg.SecurityId, replaceMsg.Side, out var price))
+					_state.AddPlannedPrice(replaceMsg.TransactionId, replaceMsg.Side, price);
+
+				break;
+			}
+
+			case MessageTypes.Execution:
+			{
+				var execMsg = (ExecutionMessage)message;
+
+				// remove on order complete messages (no trade info) if possible
+				if (!execMsg.HasTradeInfo() && execMsg.HasOrderInfo())
+				{
+					if (execMsg.OrderState?.IsFinal() == true)
+						_state.RemovePlannedPrice(execMsg.OriginalTransactionId);
+
+					break;
+				}
+
+				if (execMsg.HasTradeInfo())
+				{
+					if (_state.TryGetPlannedPrice(execMsg.OriginalTransactionId, out var side, out var plannedPrice))
+					{
+						// fill MarketPrice if not already set by emulator or external source
+						execMsg.MarketPrice ??= plannedPrice;
+
+						// If there is no trade price, cannot compute slippage; keep planned price for future executions.
+						if (execMsg.TradePrice == null)
+							return null;
+
+						// If there is no trade volume, cannot compute weighted slippage; keep planned price for future executions.
+						if (execMsg.TradeVolume is not decimal trVol)
+							return null;
+
+						var diff = side == Sides.Buy
+							? execMsg.TradePrice.Value - plannedPrice
+							: plannedPrice - execMsg.TradePrice.Value;
+
+						var weighted = diff * trVol;
+
+						if (!CalculateNegative && weighted < 0)
+							weighted = 0;
+
+						_state.AddSlippage(weighted);
+
+						// cleanup only when order is completed (if such info present)
+						if (execMsg.HasOrderInfo() && (execMsg.OrderState == OrderStates.Done || execMsg.Balance == 0))
+							_state.RemovePlannedPrice(execMsg.OriginalTransactionId);
+
+						return weighted;
+					}
+				}
+
+				break;
+			}
 		}
+
+		return null;
+	}
+
+	/// <summary>
+	/// Load settings.
+	/// </summary>
+	/// <param name="storage">Storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		CalculateNegative = storage.GetValue<bool>(nameof(CalculateNegative));
+
+		return Task.CompletedTask;
+	}
+
+	/// <summary>
+	/// Save settings.
+	/// </summary>
+	/// <param name="storage">Storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		storage.SetValue(nameof(CalculateNegative), CalculateNegative);
+
+		return Task.CompletedTask;
+	}
+
+	/// <summary>
+	/// Creates a clone of this manager with new state.
+	/// </summary>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Cloned manager.</returns>
+	public async ValueTask<ISlippageManager> CloneAsync(CancellationToken cancellationToken)
+	{
+		var clone = new SlippageManager(_state.GetType().CreateInstance<ISlippageManagerState>());
+		await clone.LoadAsync(await this.SaveAsync(cancellationToken), cancellationToken);
+		return clone;
 	}
 }

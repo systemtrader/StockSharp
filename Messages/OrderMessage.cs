@@ -1,67 +1,159 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// A message containing info about the order.
+/// </summary>
+/// <remarks>
+/// Initialize <see cref="OrderMessage"/>.
+/// </remarks>
+/// <param name="type">Message type.</param>
+[DataContract]
+[Serializable]
+public abstract class OrderMessage(MessageTypes type) : SecurityMessage(type),
+	ITransactionIdMessage, IPortfolioNameMessage, IClientCodeMessage, IBrokerCodeMessage, IStrategyIdMessage, IOwnerMessage
 {
-	using System;
-	using System.Runtime.Serialization;
-	
-	using StockSharp.Localization;
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TransactionKey,
+		Description = LocalizedStrings.TransactionIdKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public long TransactionId { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PortfolioKey,
+		Description = LocalizedStrings.OrderPortfolioNameKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string PortfolioName { get; set; }
 
 	/// <summary>
-	/// Сообщение, содержащее общую информацию о заявке.
+	/// Order type.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public abstract class OrderMessage : SecurityMessage
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.OrderTypeKey,
+		Description = LocalizedStrings.OrderTypeDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public OrderTypes? OrderType { get; set; }
+
+	/// <summary>
+	/// User's order ID.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.UserIdKey,
+		Description = LocalizedStrings.UserOrderIdKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string UserOrderId { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public string StrategyId { get; set; }
+
+	/// <summary>
+	/// Broker firm code.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.BrokerKey,
+		Description = LocalizedStrings.BrokerCodeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string BrokerCode { get; set; }
+
+	/// <summary>
+	/// Client code assigned by the broker.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ClientCodeKey,
+		Description = LocalizedStrings.ClientCodeDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string ClientCode { get; set; }
+
+	/// <summary>
+	/// Order condition (e.g., stop- and algo- orders parameters).
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ConditionKey,
+		Description = LocalizedStrings.OrderConditionDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	[XmlIgnore]
+	public OrderCondition Condition { get; set; }
+
+	/// <summary>
+	/// Placed order comment.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CommentKey,
+		Description = LocalizedStrings.OrderCommentKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string Comment { get; set; }
+
+	/// <summary>
+	/// Margin mode.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.MarginKey,
+		Description = LocalizedStrings.MarginModeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public MarginModes? MarginMode { get; set; }
+
+	/// <inheritdoc />
+	public long OwnerUserId { get; set; }
+
+	/// <inheritdoc />
+	public long OwnerPortfolioId { get; set; }
+
+	/// <summary>
+	/// Copy the message into the <paramref name="destination" />.
+	/// </summary>
+	/// <param name="destination">The object, to which copied information.</param>
+	public void CopyTo(OrderMessage destination)
 	{
-		/// <summary>
-		/// Название портфеля, по которому необходимо выставить/снять заявку.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.PortfolioKey)]
-		[DescriptionLoc(LocalizedStrings.Str229Key)]
-		[MainCategory]
-		public string PortfolioName { get; set; }
+		base.CopyTo(destination);
 
-		/// <summary>
-		/// Тип заявки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str132Key)]
-		[DescriptionLoc(LocalizedStrings.Str133Key)]
-		[MainCategory]
-		public OrderTypes OrderType { get; set; }
+		destination.TransactionId = TransactionId;
+		destination.PortfolioName = PortfolioName;
+		destination.OrderType = OrderType;
+		destination.UserOrderId = UserOrderId;
+		destination.StrategyId = StrategyId;
+		destination.BrokerCode = BrokerCode;
+		destination.ClientCode = ClientCode;
+		destination.Condition = Condition?.Clone();
+		destination.Comment = Comment;
+		destination.MarginMode = MarginMode;
+		destination.OwnerUserId = OwnerUserId;
+		destination.OwnerPortfolioId = OwnerPortfolioId;
+	}
 
-		/// <summary>
-		/// Пользовательский идентификатор заявки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str165Key)]
-		[DescriptionLoc(LocalizedStrings.Str166Key)]
-		[MainCategory]
-		public string UserOrderId { get; set; }
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		var str = base.ToString() + $",TransId={TransactionId},OrdType={OrderType},Pf={PortfolioName}(ClCode={ClientCode}),Cond={Condition},MR={MarginMode}";
 
-		/// <summary>
-		/// Код брокерской фирмы.
-		/// </summary>
-		[CategoryLoc(LocalizedStrings.Str2593Key)]
-		[DisplayNameLoc(LocalizedStrings.BrokerKey)]
-		[DescriptionLoc(LocalizedStrings.Str2619Key)]
-		public string BrokerCode { get; set; }
+		if (!Comment.IsEmpty())
+			str += $",Comment={Comment}";
 
-		/// <summary>
-		/// Код клиента, присвоенный брокером.
-		/// </summary>
-		[CategoryLoc(LocalizedStrings.Str2593Key)]
-		[DisplayNameLoc(LocalizedStrings.Str3425Key)]
-		[DescriptionLoc(LocalizedStrings.Str3426Key)]
-		public string ClientCode { get; set; }
+		if (!UserOrderId.IsEmpty())
+			str += $",UID={UserOrderId}";
 
-		/// <summary>
-		/// Инициализировать <see cref="OrderMessage"/>.
-		/// </summary>
-		/// <param name="type">Тип сообщения.</param>
-		protected OrderMessage(MessageTypes type)
-			: base(type)
-		{
-		}
+		if (!StrategyId.IsEmpty())
+			str += $",Strategy={StrategyId}";
+
+		if (!BrokerCode.IsEmpty())
+			str += $",BrID={BrokerCode}";
+
+		return str;
 	}
 }

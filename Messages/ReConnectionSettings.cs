@@ -1,158 +1,154 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// Connection tracking settings <see cref="IMessageAdapter"/> with a server.
+/// </summary>
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.ReConnectionSettingsKey,
+	Description = LocalizedStrings.ReConnectionDescKey)]
+[TypeConverter(typeof(ExpandableObjectConverter))]
+public class ReConnectionSettings : IAsyncPersistable
 {
-	using System;
+	/// <summary>
+	/// Initializes a new instance of the <see cref="ReConnectionSettings"/>.
+	/// </summary>
+	public ReConnectionSettings()
+	{
+	}
 
-	using Ecng.Serialization;
-
-	using StockSharp.Localization;
-
-	using Xceed.Wpf.Toolkit.PropertyGrid.Attributes;
+	private TimeSpan _interval = TimeSpan.FromSeconds(10);
 
 	/// <summary>
-	/// Настройки механизма отслеживания соединений <see cref="IMessageAdapter"/> с торговом системой.
+	/// The interval at which attempts will establish a connection. The default value is 10 seconds.
 	/// </summary>
-	[DisplayNameLoc(LocalizedStrings.Str977Key)]
-	[DescriptionLoc(LocalizedStrings.Str978Key)]
-	[ExpandableObject]
-	public class ReConnectionSettings : IPersistable
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.IntervalKey,
+		Description = LocalizedStrings.IntervalToConnectKey,
+		GroupName = LocalizedStrings.ConnectionKey)]
+	public TimeSpan Interval
 	{
-		/// <summary>
-		/// Создать <see cref="ReConnectionSettings"/>.
-		/// </summary>
-		public ReConnectionSettings()
+		get => _interval;
+		set
 		{
+			if (value < TimeSpan.Zero)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
+
+			_interval = value;
 		}
+	}
 
-		private TimeSpan _interval = TimeSpan.FromSeconds(10);
+	private int _attemptCount;
 
-		/// <summary>
-		/// Интервал, с которым будут происходить попытки установить соединение. По умолчанию интервал равен 10 секунд.
-		/// </summary>
-		[CategoryLoc(LocalizedStrings.Str174Key)]
-		[DisplayNameLoc(LocalizedStrings.Str175Key)]
-		[DescriptionLoc(LocalizedStrings.Str176Key)]
-		public TimeSpan Interval
+	/// <summary>
+	/// The number of attempts to establish the initial connection, if it has not been established (timeout, network failure, etc.). The default value is 0. To establish infinite number uses -1.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.InitiallyKey,
+		Description = LocalizedStrings.InitiallyConnectKey,
+		GroupName = LocalizedStrings.ConnectionKey)]
+	public int AttemptCount
+	{
+		get => _attemptCount;
+		set
 		{
-			get { return _interval; }
-			set
-			{
-				if (value < TimeSpan.Zero)
-					throw new ArgumentOutOfRangeException("value", value, LocalizedStrings.Str177);
+			if (value < -1)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
 
-				_interval = value;
-			}
+			_attemptCount = value;
 		}
+	}
 
-		private int _attemptCount;
+	private int _reAttemptCount = 100;
 
-		/// <summary>
-		/// Количество попыток установить первоначальное соединение, если оно не было установлено (тайм-аут, сетевой сбой и т.д.).
-		/// По-умолчанию количество попыток равно 0. Для установление беконечного количества попыток используется значение -1.
-		/// </summary>
-		[CategoryLoc(LocalizedStrings.Str174Key)]
-		[DisplayNameLoc(LocalizedStrings.Str178Key)]
-		[DescriptionLoc(LocalizedStrings.Str179Key)]
-		public int AttemptCount
+	/// <summary>
+	/// The number of attempts to reconnect if the connection was lost during the operation. The default value is 100. To establish infinite number uses -1.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ReconnectionKey,
+		Description = LocalizedStrings.ReconnectAttemptsKey,
+		GroupName = LocalizedStrings.ConnectionKey)]
+	public int ReAttemptCount
+	{
+		get => _reAttemptCount;
+		set
 		{
-			get { return _attemptCount; }
-			set
-			{
-				if (value < -1)
-					throw new ArgumentOutOfRangeException("value", value, LocalizedStrings.Str177);
+			if (value < -1)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
 
-				_attemptCount = value;
-			}
+			_reAttemptCount = value;
 		}
+	}
 
-		private int _reAttemptCount = 100;
+	private TimeSpan _timeOutInterval = TimeSpan.FromSeconds(30);
 
-		/// <summary>
-		/// Количество попыток переподключиться, если соединение было утеряно в процессе работы.
-		/// По-умолчанию количество попыток равно 100. Для установление беконечного количества попыток используется значение -1.
-		/// </summary>
-		[CategoryLoc(LocalizedStrings.Str174Key)]
-		[DisplayNameLoc(LocalizedStrings.Str180Key)]
-		[DescriptionLoc(LocalizedStrings.Str181Key)]
-		public int ReAttemptCount
+	/// <summary>
+	/// Timeout successful connection / disconnection. If the value is <see cref="TimeSpan.Zero"/>, the monitoring is performed. The default value is 30 seconds.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TimeOutKey,
+		Description = LocalizedStrings.ConnectDisconnectTimeoutKey,
+		GroupName = LocalizedStrings.ConnectionKey)]
+	public TimeSpan TimeOutInterval
+	{
+		get => _timeOutInterval;
+		set
 		{
-			get { return _reAttemptCount; }
-			set
-			{
-				if (value < -1)
-					throw new ArgumentOutOfRangeException("value", value, LocalizedStrings.Str177);
+			if (value < TimeSpan.Zero)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
 
-				_reAttemptCount = value;
-			}
+			_timeOutInterval = value;
 		}
+	}
 
-		private TimeSpan _timeOutInterval = TimeSpan.FromSeconds(30);
+	private WorkingTime _workingTime = new();
 
-		/// <summary>
-		/// Время ожидания успешного подключения/отключения. Если значение равно <see cref="TimeSpan.Zero"/>, то мониторинг не производится.
-		/// По-умолчанию значение равно 30 секундам.
-		/// </summary>
-		[CategoryLoc(LocalizedStrings.Str174Key)]
-		[DisplayNameLoc(LocalizedStrings.Str182Key)]
-		[DescriptionLoc(LocalizedStrings.Str183Key)]
-		public TimeSpan TimeOutInterval
-		{
-			get { return _timeOutInterval; }
-			set
-			{
-				if (value < TimeSpan.Zero)
-					throw new ArgumentOutOfRangeException("value", value, LocalizedStrings.Str177);
+	/// <summary>
+	/// Schedule, during which it is necessary to make the connection. For example, there is no need to track connection when trading on the exchange finished.
+	/// </summary>
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.WorkScheduleKey,
+		Description = LocalizedStrings.ReConnectWorkScheduleKey,
+		GroupName = LocalizedStrings.ConnectionKey)]
+	public WorkingTime WorkingTime
+	{
+		get => _workingTime;
+		set => _workingTime = value ?? throw new ArgumentNullException(nameof(value));
+	}
 
-				_timeOutInterval = value;
-			}
-		}
+	/// <summary>
+	/// Load settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		await WorkingTime.LoadAsync(storage, nameof(WorkingTime), cancellationToken);
 
-		private WorkingTime _workingTime = new WorkingTime();
+		Interval = storage.GetValue<TimeSpan>(nameof(Interval));
+		AttemptCount = storage.GetValue<int>(nameof(AttemptCount));
+		ReAttemptCount = storage.GetValue<int>(nameof(ReAttemptCount));
+		TimeOutInterval = storage.GetValue<TimeSpan>(nameof(TimeOutInterval));
+	}
 
-		/// <summary>
-		/// Режим работы, во время которого необходимо производить подключения.
-		/// Например, нет необходимости проводить подключение, когда окончены торги на бирже.
-		/// </summary>
-		[CategoryLoc(LocalizedStrings.Str174Key)]
-		[DisplayNameLoc(LocalizedStrings.Str184Key)]
-		[DescriptionLoc(LocalizedStrings.Str185Key)]
-		public WorkingTime WorkingTime
-		{
-			get { return _workingTime; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
-
-				_workingTime = value;
-			}
-		}
-
-		/// <summary>
-		/// Загрузить настройки.
-		/// </summary>
-		/// <param name="storage">Хранилище настроек.</param>
-		public void Load(SettingsStorage storage)
-		{
-			if (storage.ContainsKey("WorkingTime"))
-				WorkingTime.Load(storage.GetValue<SettingsStorage>("WorkingTime"));
-
-			Interval = storage.GetValue<TimeSpan>("Interval");
-			AttemptCount = storage.GetValue<int>("AttemptCount");
-			ReAttemptCount = storage.GetValue<int>("ReAttemptCount");
-			TimeOutInterval = storage.GetValue<TimeSpan>("TimeOutInterval");
-		}
-
-		/// <summary>
-		/// Сохранить настройки.
-		/// </summary>
-		/// <param name="storage">Хранилище настроек.</param>
-		public void Save(SettingsStorage storage)
-		{
-			storage.SetValue("WorkingTime", WorkingTime.Save());
-			storage.SetValue("Interval", Interval);
-			storage.SetValue("AttemptCount", AttemptCount);
-			storage.SetValue("ReAttemptCount", ReAttemptCount);
-			storage.SetValue("TimeOutInterval", TimeOutInterval);
-		}
+	/// <summary>
+	/// Save settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		storage.SetValue(nameof(WorkingTime), await WorkingTime.SaveAsync(cancellationToken));
+		storage.SetValue(nameof(Interval), Interval);
+		storage.SetValue(nameof(AttemptCount), AttemptCount);
+		storage.SetValue(nameof(ReAttemptCount), ReAttemptCount);
+		storage.SetValue(nameof(TimeOutInterval), TimeOutInterval);
 	}
 }

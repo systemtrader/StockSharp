@@ -1,60 +1,48 @@
-namespace StockSharp.Algo.Storages
+namespace StockSharp.Algo.Storages;
+
+/// <summary>
+/// The interface describing the trade objects storage.
+/// </summary>
+public interface IEntityRegistry : IAsyncDisposable
 {
-	using StockSharp.BusinessEntities;
+	/// <summary>
+	/// List of exchanges.
+	/// </summary>
+	IStorageEntityList<Exchange> Exchanges { get; }
 
 	/// <summary>
-	/// Интерфейс, описывающий хранилище торговых объектов.
+	/// The list of stock boards.
 	/// </summary>
-	public interface IEntityRegistry
-	{
-		/// <summary>
-		/// Список бирж.
-		/// </summary>
-		IStorageEntityList<Exchange> Exchanges { get; }
+	IStorageEntityList<ExchangeBoard> ExchangeBoards { get; }
 
-		/// <summary>
-		/// Список биржевых площадок.
-		/// </summary>
-		IStorageEntityList<ExchangeBoard> ExchangeBoards { get; }
+	/// <summary>
+	/// The list of instruments.
+	/// </summary>
+	IStorageSecurityList Securities { get; }
 
-		/// <summary>
-		/// Список инструментов.
-		/// </summary>
-		IStorageSecurityList Securities { get; }
+	/// <summary>
+	/// Position storage.
+	/// </summary>
+	IPositionStorage PositionStorage { get; }
 
-		/// <summary>
-		/// Список портфелей.
-		/// </summary>
-		IStorageEntityList<Portfolio> Portfolios { get; }
+	/// <summary>
+	/// The list of portfolios.
+	/// </summary>
+	IStorageEntityList<Portfolio> Portfolios { get; }
 
-		/// <summary>
-		/// Список позиций.
-		/// </summary>
-		IStorageEntityList<Position> Positions { get; }
+	/// <summary>
+	/// The list of positions.
+	/// </summary>
+	IStoragePositionList Positions { get; }
 
-		/// <summary>
-		/// Список собственных сделок.
-		/// </summary>
-		IStorageEntityList<MyTrade> MyTrades { get; }
+	/// <summary>
+	/// The list of subscriptions.
+	/// </summary>
+	IStorageEntityList<MarketDataMessage> Subscriptions { get; }
 
-		/// <summary>
-		/// Список тиковых сделок.
-		/// </summary>
-		IStorageEntityList<Trade> Trades { get; }
-
-		/// <summary>
-		/// Список заявок.
-		/// </summary>
-		IStorageEntityList<Order> Orders { get; }
-
-		/// <summary>
-		/// Список ошибок регистрации и снятия заявок.
-		/// </summary>
-		IStorageEntityList<OrderFail> OrderFails { get; }
-
-		/// <summary>
-		/// Список новостей.
-		/// </summary>
-		IStorageEntityList<News> News { get; }
-	}
+	/// <summary>
+	/// Initialize the storage.
+	/// </summary>
+	/// <returns>Possible errors with storage names. Empty dictionary means initialization without any issues.</returns>
+	ValueTask<Dictionary<object, Exception>> InitAsync(CancellationToken cancellationToken);
 }

@@ -1,29 +1,23 @@
-namespace StockSharp.Messages
-{
-	using System;
-	using System.Runtime.Serialization;
+namespace StockSharp.Messages;
 
-	using StockSharp.Localization;
+/// <summary>
+/// Sides.
+/// </summary>
+[DataContract]
+[Serializable]
+public enum Sides
+{
+	/// <summary>
+	/// Buy.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.Buy2Key)]
+	Buy,
 
 	/// <summary>
-	/// Стороны действий.
+	/// Sell.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public enum Sides
-	{
-		/// <summary>
-		/// Покупка.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str403Key)]
-		Buy,
-
-		/// <summary>
-		/// Продажа.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str404Key)]
-		Sell,
-	}
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.Sell2Key)]
+	Sell,
 }

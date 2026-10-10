@@ -1,85 +1,105 @@
-﻿namespace StockSharp.Messages
-{
-	using System;
-	using System.Runtime.Serialization;
+namespace StockSharp.Messages;
 
-	using Ecng.Common;
+/// <summary>
+/// A message containing the data for the cancellation of the order.
+/// </summary>
+[DataContract]
+[Serializable]
+public class OrderCancelMessage : OrderMessage
+{
+	/// <summary>
+	/// ID cancellation order.
+	/// </summary>
+	[DataMember]
+	public long? OrderId { get; set; }
 
 	/// <summary>
-	/// Сообщение, содержащее данные для снятия заявки.
+	/// Cancelling order id (as a string if the electronic board does not use a numeric representation of the identifiers).
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public class OrderCancelMessage : OrderMessage
+	[DataMember]
+	public string OrderStringId { get; set; }
+
+	/// <summary>
+	/// Cancelling balance.
+	/// </summary>
+	[DataMember]
+	public decimal? Balance { get; set; }
+
+	/// <summary>
+	/// Cancelling volume. If not specified, then it canceled the entire balance.
+	/// </summary>
+	[DataMember]
+	public decimal? Volume { get; set; }
+
+	/// <summary>
+	/// Order side.
+	/// </summary>
+	[DataMember]
+	public Sides? Side { get; set; }
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="OrderCancelMessage"/>.
+	/// </summary>
+	public OrderCancelMessage()
+		: base(MessageTypes.OrderCancel)
 	{
-		/// <summary>
-		/// Идентификатор отменяемой заявки.
-		/// </summary>
-		[DataMember]
-		public long? OrderId { get; set; }
+	}
 
-		/// <summary>
-		/// Идентификатор отменяемой заявки (ввиде строки, если электронная площадка не использует числовое представление идентификатора заявки).
-		/// </summary>
-		[DataMember]
-		public string OrderStringId { get; set; }
+	/// <summary>
+	/// Initialize <see cref="OrderCancelMessage"/>.
+	/// </summary>
+	/// <param name="type">Message type.</param>
+	protected OrderCancelMessage(MessageTypes type)
+		: base(type)
+	{
+	}
 
-		/// <summary>
-		/// Идентификатор транзакции отмены.
-		/// </summary>
-		[DataMember]
-		public long TransactionId { get; set; }
+	/// <summary>
+	/// Copy the message into the <paramref name="destination" />.
+	/// </summary>
+	/// <param name="destination">The object, to which copied information.</param>
+	protected void CopyTo(OrderCancelMessage destination)
+	{
+		base.CopyTo(destination);
 
-		/// <summary>
-		/// Идентификатор транзакции отменяемой заявки.
-		/// </summary>
-		[DataMember]
-		public long OrderTransactionId { get; set; }
+		destination.OrderId = OrderId;
+		destination.OrderStringId = OrderStringId;
+		destination.Balance = Balance;
+		destination.Volume = Volume;
+		destination.Side = Side;
+	}
 
-		/// <summary>
-		/// Отменяемый объем. Если значение не указано, то отменяется весь активный объем заявки.
-		/// </summary>
-		[DataMember]
-		public decimal Volume { get; set; }
+	/// <summary>
+	/// Create a copy of <see cref="OrderCancelMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone()
+	{
+		var clone = new OrderCancelMessage();
+		CopyTo(clone);
+		return clone;
+	}
 
-		/// <summary>
-		/// Создать <see cref="OrderCancelMessage"/>.
-		/// </summary>
-		public OrderCancelMessage()
-			: base(MessageTypes.OrderCancel)
-		{
-		}
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		var str = base.ToString();
 
-		/// <summary>
-		/// Создать копию объекта <see cref="OrderCancelMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			var clone = new OrderCancelMessage
-			{
-				OrderId = OrderId,
-				OrderStringId = OrderStringId,
-				TransactionId = TransactionId,
-				OrderTransactionId = OrderTransactionId,
-				Volume = Volume,
-				OrderType = OrderType,
-				PortfolioName = PortfolioName,
-				SecurityId = SecurityId,
-			};
+		if (OrderId != null)
+			str += $",OrdId={OrderId.Value}";
 
-			CopyTo(clone);
+		if (!OrderStringId.IsEmpty())
+			str += $",OrdStrId={OrderStringId}";
 
-			return clone;
-		}
+		if (Balance != null)
+			str += $",Bal={Balance.Value}";
 
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",OriginTransId={0},TransId={1},OrderId={2}".Put(OrderTransactionId, TransactionId, OrderId);
-		}
+		if (Volume != null)
+			str += $",Vol={Volume.Value}";
+
+		if (Side != null)
+			str += $",Side={Side.Value}";
+
+		return str;
 	}
 }

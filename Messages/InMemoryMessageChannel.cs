@@ -1,226 +1,220 @@
-﻿namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// Message channel, based on the queue and operate within a single process.
+/// </summary>
+public class InMemoryMessageChannel : Disposable, IMessageChannel
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Globalization;
+	private readonly IMessageQueue _queue;
+	private readonly Action<Exception> _errorHandler;
 
-	using Ecng.Collections;
-	using Ecng.Common;
-
-	using StockSharp.Localization;
-	using StockSharp.Logging;
+	private CancellationTokenSource _cancellationTokenSource;
+	private Task _processingTask;
 
 	/// <summary>
-	/// Транспортный канал сообщений, основанный на очереди и работающий в пределах одного процесса.
+	/// Initializes a new instance of the <see cref="InMemoryMessageChannel"/>.
 	/// </summary>
-	public class InMemoryMessageChannel : IMessageChannel
+	/// <param name="queue">Message queue.</param>
+	/// <param name="name">Channel name.</param>
+	/// <param name="errorHandler">Error handler.</param>
+	public InMemoryMessageChannel(IMessageQueue queue, string name, Action<Exception> errorHandler)
 	{
-		private class BlockingPriorityQueue : BaseBlockingQueue<KeyValuePair<DateTime, Message>, OrderedPriorityQueue<DateTime, Message>>
+		if (name.IsEmpty())
+			throw new ArgumentNullException(nameof(name));
+
+		Name = name;
+
+		_queue = queue ?? throw new ArgumentNullException(nameof(queue));
+		_errorHandler = errorHandler ?? throw new ArgumentNullException(nameof(errorHandler));
+
+		_queue.Close();
+	}
+
+	/// <summary>
+	/// Handler name.
+	/// </summary>
+	public string Name { get; }
+
+	/// <summary>
+	/// Message queue count.
+	/// </summary>
+	public int MessageCount => _queue.Count;
+
+	/// <summary>
+	/// The channel cannot be opened.
+	/// </summary>
+	public bool Disabled { get; set; }
+
+	private ChannelStates _state = ChannelStates.Stopped;
+
+	/// <inheritdoc />
+	public ChannelStates State
+	{
+		get => _state;
+		private set
 		{
-			public BlockingPriorityQueue()
-				: base(new OrderedPriorityQueue<DateTime, Message>())
+			if (_state == value)
+				return;
+
+			if (!_state.ValidateChannelState(value))
+				return;
+
+			_state = value;
+			StateChanged?.Invoke();
+		}
+	}
+
+	/// <inheritdoc />
+	public event Action StateChanged;
+
+	/// <inheritdoc />
+	public void Open()
+	{
+		if (Disabled)
+			return;
+
+		if (State == ChannelStates.Started || State == ChannelStates.Starting)
+			return;
+
+		// Close previous task if exists
+		if (_processingTask != null)
+		{
+			_cancellationTokenSource?.Cancel();
+
+			try
+			{
+				_processingTask.Wait(TimeSpan.FromSeconds(1));
+			}
+			catch (AggregateException)
 			{
 			}
 
-			protected override void OnEnqueue(KeyValuePair<DateTime, Message> item, bool force)
-			{
-				InnerCollection.Enqueue(item.Key, item.Value);
-			}
+			_cancellationTokenSource?.Dispose();
+		}
 
-			protected override KeyValuePair<DateTime, Message> OnDequeue()
-			{
-				return InnerCollection.Dequeue();
-			}
+		State = ChannelStates.Starting;
+		_queue.Open();
 
-			protected override KeyValuePair<DateTime, Message> OnPeek()
-			{
-				return InnerCollection.Peek();
-			}
+		_cancellationTokenSource = new();
 
-			public void Clear(ClearQueueMessage message)
+		State = ChannelStates.Started;
+		_processingTask = ProcessMessagesAsync(_cancellationTokenSource.Token);
+	}
+
+	private async Task ProcessMessagesAsync(CancellationToken cancellationToken)
+	{
+		try
+		{
+			await foreach (var message in _queue.ReadAllAsync(cancellationToken).NoWait())
 			{
-				lock (SyncRoot)
+				var state = State;
+
+				if (state != ChannelStates.Started)
 				{
-					switch (message.ClearMessageType)
+					// Wait while suspended
+					while (state == ChannelStates.Suspended || state == ChannelStates.Suspending)
 					{
-						case MessageTypes.Execution:
-							InnerCollection
-								.RemoveWhere(m =>
-								{
-									if (m.Value.Type != MessageTypes.Execution)
-										return false;
+						if (cancellationToken.IsCancellationRequested)
+							return;
 
-									var execMsg = (ExecutionMessage)m.Value;
-
-									return (message.SecurityId == null || execMsg.SecurityId == message.SecurityId) && (message.Arg == null || message.Arg.Compare(execMsg.ExecutionType) == 0);
-								});
-
-							break;
-
-						case MessageTypes.QuoteChange:
-							InnerCollection.RemoveWhere(m => m.Value.Type == MessageTypes.QuoteChange && (message.SecurityId == null || ((QuoteChangeMessage)m.Value).SecurityId == message.SecurityId));
-							break;
-
-						case MessageTypes.Level1Change:
-							InnerCollection.RemoveWhere(m => m.Value.Type == MessageTypes.Level1Change && (message.SecurityId == null || ((Level1ChangeMessage)m.Value).SecurityId == message.SecurityId));
-							break;
-
-						case null:
-							InnerCollection.Clear();
-							break;
+						await Task.Delay(10, cancellationToken);
+						state = State;
 					}
+
+					if (state == ChannelStates.Stopping || state == ChannelStates.Stopped)
+						break;
+				}
+
+				try
+				{
+					await NewOutMessageAsync.InvokeAsync(message, cancellationToken);
+				}
+				catch (Exception ex)
+				{
+					_errorHandler(ex);
 				}
 			}
 		}
-
-		private static readonly MemoryStatisticsValue<Message> _msgStat = new MemoryStatisticsValue<Message>(LocalizedStrings.Messages);
-
-		static InMemoryMessageChannel()
+		catch (Exception ex)
 		{
-			MemoryStatistics.Instance.Values.Add(_msgStat);
+			if (!cancellationToken.IsCancellationRequested)
+				_errorHandler(ex);
+		}
+		finally
+		{
+			State = ChannelStates.Stopped;
+		}
+	}
+
+	/// <inheritdoc />
+	public void Close()
+	{
+		if (State == ChannelStates.Stopped || State == ChannelStates.Stopping)
+			return;
+
+		State = ChannelStates.Stopping;
+
+		_cancellationTokenSource?.Cancel();
+		_queue.Close();
+
+		try
+		{
+			_processingTask?.Wait(TimeSpan.FromSeconds(5));
+		}
+		catch (AggregateException)
+		{
+			// Ignore cancellation exceptions
 		}
 
-		private readonly Action<Exception> _errorHandler;
-		private readonly BlockingPriorityQueue _messageQueue = new BlockingPriorityQueue();
+		// Clear queue only after processing task has stopped
+		_queue.Clear();
 
-		/// <summary>
-		/// Создать <see cref="InMemoryMessageChannel"/>.
-		/// </summary>
-		/// <param name="name">Название канала.</param>
-		/// <param name="errorHandler">Обработчик ошибок.</param>
-		public InMemoryMessageChannel(string name, Action<Exception> errorHandler)
+		_cancellationTokenSource?.Dispose();
+		_cancellationTokenSource = null;
+		_processingTask = null;
+	}
+
+	void IMessageChannel.Suspend()
+	{
+		State = ChannelStates.Suspending;
+		State = ChannelStates.Suspended;
+	}
+
+	void IMessageChannel.Resume()
+	{
+		State = ChannelStates.Starting;
+		State = ChannelStates.Started;
+	}
+
+	void IMessageChannel.Clear()
+	{
+		_queue.Clear();
+	}
+
+	ValueTask IMessageTransport.SendInMessageAsync(Message message, CancellationToken cancellationToken)
+	{
+		if (!this.IsOpened())
 		{
-			if (name.IsEmpty())
-				throw new ArgumentNullException("name");
-
-			if (errorHandler == null)
-				throw new ArgumentNullException("errorHandler");
-
-			Name = name;
-
-			_errorHandler = errorHandler;
-			_messageQueue.Close();
+			//throw new InvalidOperationException();
+			return default;
 		}
 
-		/// <summary>
-		/// Название обработчика.
-		/// </summary>
-		public string Name { get; private set; }
+		return _queue.Enqueue(message, cancellationToken);
+	}
 
-		/// <summary>
-		/// Количество сообщений в очереди.
-		/// </summary>
-		public int MessageCount
-		{
-			get { return _messageQueue.Count; }
-		}
+	/// <inheritdoc />
+	public event Func<Message, CancellationToken, ValueTask> NewOutMessageAsync;
 
-		/// <summary>
-		/// Максимальный размер очереди сообщений. 
-		/// </summary>
-		/// <remarks>
-		/// Значение по умолчанию равно -1, что соответствует размеру без ограничений.
-		/// </remarks>
-		public int MaxMessageCount
-		{
-			get { return _messageQueue.MaxSize; }
-			set { _messageQueue.MaxSize = value; }
-		}
+	/// <inheritdoc />
+	public virtual IMessageChannel Clone()
+		=> new InMemoryMessageChannel(_queue.Clone(), Name, _errorHandler);
 
-		/// <summary>
-		/// Событие закрытия канала.
-		/// </summary>
-		public event Action Closed;
+	object ICloneable.Clone() => Clone();
 
-		/// <summary>
-		/// Открыт ли канал.
-		/// </summary>
-		public bool IsOpened
-		{
-			get { return !_messageQueue.IsClosed; }
-		}
-
-		/// <summary>
-		/// Открыть канал.
-		/// </summary>
-		public void Open()
-		{
-			_messageQueue.Open();
-
-			ThreadingHelper
-				.Thread(() => CultureInfo.InvariantCulture.DoInCulture(() =>
-				{
-					while (!_messageQueue.IsClosed)
-					{
-						try
-						{
-							KeyValuePair<DateTime, Message> pair;
-
-							if (!_messageQueue.TryDequeue(out pair))
-							{
-								break;
-							}
-
-							//if (!(message is TimeMessage) && message.GetType().Name != "BasketMessage")
-							//	Console.WriteLine("<< ({0}) {1}", System.Threading.Thread.CurrentThread.Name, message);
-
-							_msgStat.Remove(pair.Value);
-							NewOutMessage.SafeInvoke(pair.Value);
-						}
-						catch (Exception ex)
-						{
-							_errorHandler(ex);
-						}
-					}
-
-					Closed.SafeInvoke();
-				}))
-				.Name("{0} channel thread.".Put(Name))
-				//.Culture(CultureInfo.InvariantCulture)
-				.Launch();
-		}
-
-		/// <summary>
-		/// Закрыть канал.
-		/// </summary>
-		public void Close()
-		{
-			_messageQueue.Close();
-		}
-
-		/// <summary>
-		/// Отправить сообщение.
-		/// </summary>
-		/// <param name="message">Сообщение.</param>
-		public void SendInMessage(Message message)
-		{
-			if (!IsOpened)
-				throw new InvalidOperationException();
-
-			var clearMsg = message as ClearQueueMessage;
-
-			if (clearMsg != null)
-			{
-				_messageQueue.Clear(clearMsg);
-			}
-			else
-			{
-				//if (!(message is TimeMessage) && message.GetType().Name != "BasketMessage")
-				//	Console.WriteLine(">> ({0}) {1}", System.Threading.Thread.CurrentThread.Name, message);
-
-				_msgStat.Add(message);
-				_messageQueue.Enqueue(new KeyValuePair<DateTime, Message>(message.LocalTime, message));	
-			}
-		}
-
-		/// <summary>
-		/// Событие появления нового сообщения.
-		/// </summary>
-		public event Action<Message> NewOutMessage;
-
-		void IDisposable.Dispose()
-		{
-			Close();
-		}
+	/// <inheritdoc />
+	protected override void DisposeManaged()
+	{
+		Close();
+		base.DisposeManaged();
 	}
 }

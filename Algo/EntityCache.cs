@@ -1,912 +1,1411 @@
-namespace StockSharp.Algo
+namespace StockSharp.Algo;
+
+/// <summary>
+/// Order operation types.
+/// </summary>
+public enum OrderOperations
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Linq;
+	/// <summary>
+	/// Order registration.
+	/// </summary>
+	Register,
 
-	using Ecng.Common;
-	using Ecng.Collections;
+	/// <summary>
+	/// Order cancellation.
+	/// </summary>
+	Cancel,
 
-	using MoreLinq;
+	/// <summary>
+	/// Order modification.
+	/// </summary>
+	Edit,
+}
 
-	using StockSharp.BusinessEntities;
-	using StockSharp.Logging;
-	using StockSharp.Messages;
-	using StockSharp.Localization;
-
-	class EntityCache
+/// <summary>
+/// Entity cache for storing orders, trades, news and other trading entities.
+/// </summary>
+/// <param name="logReceiver">Log receiver for logging messages.</param>
+/// <param name="exchangeInfoProvider">Exchange info provider.</param>
+/// <param name="positionProvider">Position provider.</param>
+public class EntityCache(ILogReceiver logReceiver, IExchangeInfoProvider exchangeInfoProvider, IPositionProvider positionProvider) : ISnapshotHolder
+{
+	/// <summary>
+	/// Information about order state change.
+	/// </summary>
+	public class OrderChangeInfo
 	{
-		private static readonly MemoryStatisticsValue<Trade> _tradeStat = new MemoryStatisticsValue<Trade>(LocalizedStrings.Ticks);
-
-		private sealed class OrderInfo
-		{
-			public Order Order { get; private set; }
-
-			public bool RaiseNewOrder { get; set; }
-
-			public OrderInfo(Order order, bool raiseNewOrder = true)
-			{
-				Order = order;
-				RaiseNewOrder = raiseNewOrder;
-			}
-
-			public static explicit operator Order(OrderInfo info)
-			{
-				return info == null ? null : info.Order;
-			}
-		}
-
-		private sealed class Cache
-		{
-			public sealed class SecurityData
-			{
-				public readonly CachedSynchronizedDictionary<Tuple<long, long>, MyTrade> MyTrades = new CachedSynchronizedDictionary<Tuple<long, long>, MyTrade>();
-				public readonly CachedSynchronizedDictionary<Tuple<long, bool, bool>, OrderInfo> Orders = new CachedSynchronizedDictionary<Tuple<long, bool, bool>, OrderInfo>();
-
-				public readonly SynchronizedDictionary<long, Trade> TradesById = new SynchronizedDictionary<long, Trade>();
-				public readonly SynchronizedDictionary<string, Trade> TradesByStrId = new SynchronizedDictionary<string, Trade>(StringComparer.InvariantCultureIgnoreCase);
-				public readonly SynchronizedList<Trade> Trades = new SynchronizedList<Trade>();
-
-				public readonly SynchronizedDictionary<long, Order> OrdersById = new SynchronizedDictionary<long, Order>();
-				public readonly SynchronizedDictionary<string, Order> OrdersByStringId = new SynchronizedDictionary<string, Order>(StringComparer.InvariantCultureIgnoreCase);
-			}
-
-			private readonly SynchronizedDictionary<Security, SecurityData> _securityData = new SynchronizedDictionary<Security, SecurityData>();
-			private readonly CachedSynchronizedList<Trade> _trades = new CachedSynchronizedList<Trade>();
-
-			public readonly SynchronizedDictionary<Tuple<long, bool>, Order> AllOrdersByTransactionId = new SynchronizedDictionary<Tuple<long, bool>, Order>();
-			public readonly SynchronizedDictionary<long, Order> AllOrdersById = new SynchronizedDictionary<long, Order>();
-			public readonly SynchronizedDictionary<string, Order> AllOrdersByStringId = new SynchronizedDictionary<string, Order>(StringComparer.InvariantCultureIgnoreCase);
-
-			public IEnumerable<Trade> Trades
-			{
-				get
-				{
-					return _securityData.SyncGet(d => d.SelectMany(p => p.Value.Trades.SyncGet(t => t.ToArray()).Concat(p.Value.TradesById.SyncGet(t => t.Values.ToArray())).Concat(p.Value.TradesByStrId.SyncGet(t => t.Values.ToArray()))).ToArray());
-				}
-			}
-
-			public readonly SynchronizedDictionary<string, News> NewsById = new SynchronizedDictionary<string, News>(StringComparer.InvariantCultureIgnoreCase);
-			public readonly SynchronizedList<News> NewsWithoutId = new SynchronizedList<News>();
-
-			public IEnumerable<News> News
-			{
-				get
-				{
-					return NewsWithoutId.SyncGet(t => t.ToArray()).Concat(NewsById.SyncGet(t => t.Values.ToArray())).ToArray();
-				}
-			}
-
-			private int _tradesKeepCount = 100000;
-
-			public int TradesKeepCount
-			{
-				get { return _tradesKeepCount; }
-				set
-				{
-					if (_tradesKeepCount == value)
-						return;
-
-					if (value < -1)
-						throw new ArgumentOutOfRangeException("value", value, "Количество тиковых сделок для хранения не может быть отрицательным.");
-
-					_tradesKeepCount = value;
-					RecycleTrades();
-				}
-			}
-
-			private int _ordersKeepCount = 1000;
-
-			public int OrdersKeepCount
-			{
-				get { return _ordersKeepCount; }
-				set
-				{
-					if (_ordersKeepCount == value)
-						return;
-
-					if (value < -1)
-						throw new ArgumentOutOfRangeException("value", value, "Количество заявок для хранения не может быть отрицательным.");
-
-					_ordersKeepCount = value;
-					RecycleOrders();
-				}
-			}
-
-			public readonly CachedSynchronizedList<MyTrade> MyTrades = new CachedSynchronizedList<MyTrade>();
-			public readonly CachedSynchronizedList<Order> Orders = new CachedSynchronizedList<Order>();
-			
-			public void AddTrade(Trade trade)
-			{
-				_tradeStat.Add(trade);
-				_trades.Add(trade);
-				RecycleTrades();
-			}
-
-			public void AddOrder(Order order)
-			{
-				Orders.Add(order);
-				RecycleOrders();
-			}
-
-			private void RecycleTrades()
-			{
-				var totalCount = _trades.Count;
-
-				if (TradesKeepCount == -1 || totalCount < (1.5 * TradesKeepCount))
-					return;
-
-				var countToRemove = totalCount - TradesKeepCount;
-
-				lock (_securityData.SyncRoot)
-				{
-					var toRemove = _trades.SyncGet(d =>
-					{
-						var tmp = d.Take(countToRemove).ToArray();
-						d.RemoveRange(0, countToRemove);
-						return tmp;
-					});
-
-					foreach (var trade in toRemove)
-					{
-						_tradeStat.Remove(trade);
-
-						var data = GetData(trade.Security);
-
-						if (trade.Id != 0)
-							data.TradesById.Remove(trade.Id);
-						else if (!trade.StringId.IsEmpty())
-							data.TradesByStrId.Remove(trade.StringId);
-						else
-							data.Trades.Remove(trade);
-					}
-				}
-			}
-
-			private void RecycleOrders()
-			{
-				var totalCount = Orders.Count;
-
-				if (OrdersKeepCount == -1 || totalCount < (1.5 * OrdersKeepCount))
-					return;
-
-				var countToRemove = totalCount - OrdersKeepCount;
-
-				lock (_securityData.SyncRoot)
-				{
-					var toRemove = Orders.SyncGet(d =>
-					{
-						var tmp = d.Where(o => o.State == OrderStates.Done || o.State == OrderStates.Failed).Take(countToRemove).ToHashSet();
-						d.RemoveRange(tmp);
-						return tmp;
-					});
-
-					MyTrades.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Order)));
-					AllOrdersByTransactionId.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value)));
-					AllOrdersById.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value)));
-					AllOrdersByStringId.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value)));
-
-					foreach (var pair in _securityData)
-					{
-						pair.Value.Orders.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value.Order)));
-						pair.Value.MyTrades.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value.Order)));
-						pair.Value.OrdersById.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value)));
-						pair.Value.OrdersByStringId.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value)));
-					}
-				}
-			}
-
-			public SecurityData GetData(Security security)
-			{
-				return _securityData.SafeAdd(security);
-			}
-
-			public void Clear()
-			{
-				_securityData.Clear();
-
-				AllOrdersById.Clear();
-				AllOrdersByStringId.Clear();
-				AllOrdersByTransactionId.Clear();
-				Orders.Clear();
-
-				NewsById.Clear();
-				NewsWithoutId.Clear();
-
-				MyTrades.Clear();
-
-				_trades.Clear();
-				_tradeStat.Clear();
-			}
-		}
-
-		private readonly CachedSynchronizedDictionary<string, Portfolio> _portfolios = new CachedSynchronizedDictionary<string, Portfolio>();
-		private readonly Cache _cache = new Cache();
-		private readonly HashSet<long> _orderStatusTransactions = new HashSet<long>();
-
-		private IEntityFactory _entityFactory = Algo.EntityFactory.Instance;
+		private OrderChangeInfo() { }
 
 		/// <summary>
-		/// Фабрика бизнес-сущностей (<see cref="Security"/>, <see cref="Order"/> и т.д.).
+		/// Initializes a new instance of the <see cref="OrderChangeInfo"/>.
 		/// </summary>
-		public IEntityFactory EntityFactory
+		/// <param name="order">Order.</param>
+		/// <param name="isNew">Is new order.</param>
+		/// <param name="isChanged">Is order changed.</param>
+		/// <param name="isEdit">Is order edited.</param>
+		public OrderChangeInfo(Order order, bool isNew, bool isChanged, bool isEdit)
 		{
-			get { return _entityFactory; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
+			Order = order ?? throw new ArgumentNullException(nameof(order));
 
-				_entityFactory = value;
-			}
+			IsNew = isNew;
+			IsChanged = isChanged;
+			IsEdit = isEdit;
 		}
 
 		/// <summary>
-		/// Количество тиковых сделок для хранения. 
-		/// По умолчанию равно 100000. Если значение установлено в -1, то сделки не будут удаляться.
+		/// Order.
 		/// </summary>
-		public int TradesKeepCount
-		{
-			get { return _cache.TradesKeepCount; }
-			set { _cache.TradesKeepCount = value; }
-		}
+		public Order Order { get; }
 
 		/// <summary>
-		/// Количество заявок для хранения. 
-		/// По умолчанию равно 1000. Если значение установлено в -1, то заявки не будут удаляться.
+		/// Is new order.
 		/// </summary>
-		public int OrdersKeepCount
-		{
-			get { return _cache.OrdersKeepCount; }
-			set { _cache.OrdersKeepCount = value; }
-		}
+		public bool IsNew { get; }
 
 		/// <summary>
-		/// Получить все заявки.
+		/// Is order changed.
 		/// </summary>
-		public IEnumerable<Order> Orders
-		{
-			get { return _cache.Orders.Cache; }
-		}
+		public bool IsChanged { get; }
 
 		/// <summary>
-		/// Получить все сделки.
+		/// Is order edited.
 		/// </summary>
-		public IEnumerable<Trade> Trades
-		{
-			get { return _cache.Trades; }
-		}
+		public bool IsEdit { get; }
 
 		/// <summary>
-		/// Получить все собственные сделки.
+		/// Order does not exist.
 		/// </summary>
-		public IEnumerable<MyTrade> MyTrades
+		public static readonly OrderChangeInfo NotExist = new();
+	}
+
+	private class OrderInfo(EntityCache parent, Order order, bool raiseNewOrder)
+	{
+		private readonly EntityCache _parent = parent ?? throw new ArgumentNullException(nameof(parent));
+
+		public Order Order { get; } = order ?? throw new ArgumentNullException(nameof(order));
+
+		public IEnumerable<OrderChangeInfo> ApplyChanges(ExecutionMessage message, OrderOperations operation, Action<Order> process)
 		{
-			get { return _cache.MyTrades.Cache; }
-		}
+			if (process is null)
+				throw new ArgumentNullException(nameof(process));
 
-		/// <summary>
-		/// Все новости.
-		/// </summary>
-		public IEnumerable<News> News
-		{
-			get { return _cache.News; }
-		}
+			var order = Order;
 
-		/// <summary>
-		/// Получить все портфели.
-		/// </summary>
-		public virtual IEnumerable<Portfolio> Portfolios
-		{
-			get { return _portfolios.CachedValues; }
-		}
-
-		public void Clear()
-		{
-			_cache.Clear();
-			_orderStatusTransactions.Clear();
-		}
-
-		public void AddOrderStatusTransactionId(long transactionId)
-		{
-			_orderStatusTransactions.Add(transactionId);
-		}
-
-		public IEnumerable<Order> GetOrders(Security security, OrderStates state)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			return _cache.GetData(security).Orders.CachedValues.Select(info => info.Order).Filter(state);
-		}
-
-		public Order GetOrderById(long id)
-		{
-			return _cache.AllOrdersById.TryGetValue(id);
-		}
-
-		public Order GetOrderByTransactionId(long transactionId, bool isCancel)
-		{
-			return _cache.AllOrdersByTransactionId.TryGetValue(Tuple.Create(transactionId, isCancel));
-		}
-
-		public void AddOrderByCancelTransaction(long transactionId, Order order)
-		{
-			if (order == null)
-				return;
-
-			var key = CreateOrderKey(order.Type == OrderTypes.Conditional ? OrderTypes.Conditional : OrderTypes.Limit, transactionId, true);
-			_cache.GetData(order.Security).Orders.Add(key, new OrderInfo(order, false));
-			_cache.AllOrdersByTransactionId.Add(Tuple.Create(transactionId, true), order);
-		}
-
-		public bool TryAddOrder(Order order)
-		{
-			if (order == null)
-				throw new ArgumentNullException("order");
-
-			bool isNew;
-			GetOrderInfo(_cache.GetData(order.Security), order.Type, order.TransactionId, null, null, id => order, out isNew);
-			return isNew;
-		}
-
-		public Tuple<Order, bool, bool> ProcessOrderMessage(Security security, ExecutionMessage message)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			if (message == null)
-				throw new ArgumentNullException("message");
-
-			if (message.Error != null)
-				throw new ArgumentException(LocalizedStrings.Str714Params.PutEx(message));
-
-			bool isNew;
-
-			var transactionId = message.TransactionId;
-
-			if (transactionId == 0)
+			if (order.State == OrderStates.Failed)
 			{
-				// ExecMsg.OriginalTransactionId == OrderStatMsg.TransactionId when orders info requested by OrderStatMsg
-				transactionId = _orderStatusTransactions.Contains(message.OriginalTransactionId) ? 0 : message.OriginalTransactionId;
+				// some adapters can resend order's info
+
+				//throw new InvalidOperationException();
+				yield break;
 			}
 
-			var securityData = _cache.GetData(security);
-
-			var orderInfo = GetOrderInfo(securityData, message.OrderType, transactionId, message.OrderId, message.OrderStringId, trId =>
-			{
-				var o = EntityFactory.CreateOrder(security, message.OrderType, trId);
-
-				o.Time = message.ServerTime;
-				o.Price = message.Price;
-				o.Volume = message.Volume ?? 0;
-				o.Direction = message.Side;
-				o.Comment = message.Comment;
-				o.ExpiryDate = message.ExpiryDate;
-				o.Condition = message.Condition;
-				o.UserOrderId = message.UserOrderId;
-				o.Portfolio = message.PortfolioName.IsEmpty()
-					? _portfolios.FirstOrDefault().Value
-					: ProcessPortfolio(message.PortfolioName).Item1;
-
-				return o;
-			}, out isNew, true);
-
-			var order = orderInfo.Item1;
-			var isCancelled = orderInfo.Item2;
-			//var isReReregisterCancelled = orderInfo.Item3;
-			var raiseNewOrder = orderInfo.Item3;
-
+			var isDone = order.State == OrderStates.Done;
 			var isPending = order.State == OrderStates.Pending;
-			//var isPrevIdSet = (order.Id != null || !order.StringId.IsEmpty());
 
-			bool isChanged;
-
-			if (order.State == OrderStates.Done)
-			{
-				// данные о заявке могут приходить из маркет-дата и транзакционного адаптеров
-				isChanged = false;
-				//throw new InvalidOperationException("Изменение заявки в состоянии Done невозможно.");
-			}
-			else
-			{
-				if (message.OrderId != null)
-					order.Id = message.OrderId.Value;
-
-				if (!message.OrderStringId.IsEmpty())
-					order.StringId = message.OrderStringId;
-
-				if (!message.OrderBoardId.IsEmpty())
-					order.BoardId = message.OrderBoardId;
-
-				//// некоторые коннекторы не транслируют при отмене отмененный объем
-				//// esper. при перерегистрации заявок необходимо обновлять баланс
-				//if (message.Balance > 0 || !isCancelled || isReReregisterCancelled)
-				//{
-				//	// BTCE коннектор не транслирует баланс заявки
-				//	if (!(message.OrderState == OrderStates.Active && message.Balance == 0))
-				//		order.Balance = message.Balance;
-				//}
-
-				if (message.Balance != null)
-					order.Balance = message.Balance.Value;
-
-				// IB коннектор не транслирует состояние заявки в одном из своих сообщений
-				if (message.OrderState != null)
-					order.State = message.OrderState.Value;
-
-				if (order.Time == DateTimeOffset.MinValue)
-					order.Time = message.ServerTime;
-
-				// для новых заявок используем серверное время, 
-				// т.к. заявка получена первый раз и не менялась
-				// ServerTime для заявки - это время регистрации
-				order.LastChangeTime = isNew ? message.ServerTime : message.LocalTime;
-				order.LocalTime = message.LocalTime;
-
-				//нулевой объем может быть при перерегистрации
-				if (order.Volume == 0 && message.Volume != null)
-					order.Volume = message.Volume.Value;
-
-				if (message.Commission != null)
-					order.Commission = message.Commission;
-
-				if (message.TimeInForce != null)
-					order.TimeInForce = message.TimeInForce.Value;
-
-				if (isPending)
-				{
-					if (order.State != OrderStates.Pending && message.Latency != null)
-						order.LatencyRegistration = message.Latency.Value;
-				}
-				else if (isCancelled && order.State == OrderStates.Done)
-				{
-					if (message.Latency != null)
-						order.LatencyCancellation = message.Latency.Value;
-				}
-
-				isChanged = true;
-			}
-
-			//if (isNew || (!isPrevIdSet && (order.Id != null || !order.StringId.IsEmpty())))
-			//{
-
-			// так как биржевые идентифиаторы могут повторяться, то переписываем старые заявки новыми как наиболее актуальными
-					
-			if (order.Id != null)
-			{
-				securityData.OrdersById[order.Id.Value] = order;
-				_cache.AllOrdersById[order.Id.Value] = order;
-			}
-				
-			if (!order.StringId.IsEmpty())
-			{
-				securityData.OrdersByStringId[order.StringId] = order;
-				_cache.AllOrdersByStringId[order.StringId] = order;
-			}
-
-			//}
-
-			//if (message.OrderType == OrderTypes.Conditional && (message.DerivedOrderId != null || !message.DerivedOrderStringId.IsEmpty()))
-			//{
-			//	var derivedOrder = GetOrder(security, 0L, message.DerivedOrderId ?? 0, message.DerivedOrderStringId);
-
-			//	if (order == null)
-			//		_orderStopOrderAssociations.Add(Tuple.Create(message.DerivedOrderId ?? 0, message.DerivedOrderStringId), new RefPair<Order, Action<Order, Order>>(order, (s, o) => s.DerivedOrder = o));
-			//	else
-			//		order.DerivedOrder = derivedOrder;
-			//}
-
-			message.CopyExtensionInfo(order);
-
-			return Tuple.Create(order, raiseNewOrder, isChanged);
-		}
-
-		public Tuple<OrderFail, bool> ProcessOrderFailMessage(Security security, ExecutionMessage message)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			if (message == null)
-				throw new ArgumentNullException("message");
-
-			var data = _cache.GetData(security);
-
-			Order order = null;
+			if (message.OrderId != null)
+				order.Id = message.OrderId.Value;
 
 			if (!message.OrderStringId.IsEmpty())
-				order = data.OrdersByStringId.TryGetValue(message.OrderStringId);
+				order.StringId = message.OrderStringId;
 
-			bool isCancelled;
+			if (!message.OrderBoardId.IsEmpty())
+				order.BoardId = message.OrderBoardId;
 
-			if (order == null)
-			{
-				if (message.OriginalTransactionId == 0)
-					throw new ArgumentOutOfRangeException("message", message.OriginalTransactionId, LocalizedStrings.Str715);
+			if (!isDone && message.Balance != null)
+				order.Balance = ((decimal?)order.Balance).ApplyNewBalance(message.Balance.Value, order.TransactionId, _parent._logReceiver);
 
-				var orders = data.Orders;
+			if (!isDone && message.OrderState != null)
+				order.ApplyNewState(message.OrderState.Value, _parent._logReceiver);
 
-				order = (Order)orders.TryGetValue(CreateOrderKey(message.OrderType, message.OriginalTransactionId, true));
+			if (order.Time == DateTime.MinValue)
+				order.Time = message.ServerTime;
 
-				if (order != null && order.Id == message.OrderId)
-					isCancelled = true;
-				else
-				{
-					order = (Order)orders.TryGetValue(CreateOrderKey(message.OrderType, message.OriginalTransactionId, false));
-					isCancelled = false;
-				}
-
-				if (order == null)
-					return null;
-			}
-			else
-			{
-				var pair = data.Orders.LastOrDefault(p => p.Value.Order == order);
-				isCancelled = pair.Key.Item3;
-			}
-
+			// для новых заявок используем серверное время,
+			// т.к. заявка получена первый раз и не менялась
 			// ServerTime для заявки - это время регистрации
-			order.LastChangeTime = message.LocalTime;
+			order.ServerTime = raiseNewOrder ? message.ServerTime : message.LocalTime;
 			order.LocalTime = message.LocalTime;
 
-			if (message.OrderStatus != null)
-				order.Status = message.OrderStatus;
+			if (message.OrderState == OrderStates.Done)
+			{
+				if (message.IsCanceled())
+					order.CancelledTime ??= message.ServerTime;
+				else
+					order.MatchedTime ??= message.ServerTime;
+			}
 
-			//для ошибок снятия не надо менять состояние заявки
-			if (!isCancelled)
-				order.State = OrderStates.Failed;
+			if (!isDone && message.OrderPrice != 0)
+				order.Price = message.OrderPrice;
 
-			if (message.Commission != null)
+			if (!isDone && message.OrderVolume != null)
+				order.Volume = message.OrderVolume.Value;
+
+			if (message.Commission != default)
 				order.Commission = message.Commission;
 
-			message.CopyExtensionInfo(order);
+			if (!message.CommissionCurrency.IsEmpty())
+				order.CommissionCurrency = message.CommissionCurrency;
 
-			var error = message.Error ?? new InvalidOperationException(
-				isCancelled ? LocalizedStrings.Str716 : LocalizedStrings.Str717);
+			if (message.TimeInForce != default)
+				order.TimeInForce = message.TimeInForce.Value;
 
-			var fail = EntityFactory.CreateOrderFail(order, error);
-			fail.ServerTime = message.ServerTime;
-			fail.LocalTime = message.LocalTime;
-			return Tuple.Create(fail, isCancelled);
-		}
-
-		public Tuple<MyTrade, bool> ProcessMyTradeMessage(Security security, ExecutionMessage message)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			if (message == null)
-				throw new ArgumentNullException("message");
-
-			var originalTransactionId = _orderStatusTransactions.Contains(message.OriginalTransactionId)
-				? 0 : message.OriginalTransactionId;
-
-			if (originalTransactionId == 0 && message.OrderId == null && message.OrderStringId.IsEmpty())
-				throw new ArgumentOutOfRangeException("message", originalTransactionId, LocalizedStrings.Str715);
-
-			var securityData = _cache.GetData(security);
-
-			var myTrade = securityData.MyTrades.TryGetValue(Tuple.Create(originalTransactionId, message.TradeId ?? 0));
-
-			if (myTrade != null)
-				return Tuple.Create(myTrade, false);
-
-			var order = GetOrder(security, originalTransactionId, message.OrderId, message.OrderStringId);
-
-			if (order == null)
-				return null;
-
-			var trade = message.ToTrade(EntityFactory.CreateTrade(security, message.TradeId, message.TradeStringId));
-
-			var isNew = false;
-
-			myTrade = securityData.MyTrades.SafeAdd(Tuple.Create(order.TransactionId, trade.Id), key =>
+			if (message.Latency != default)
 			{
-				isNew = true;
-
-				var t = EntityFactory.CreateMyTrade(order, trade);
-
-				if (t.ExtensionInfo == null)
-					t.ExtensionInfo = new Dictionary<object, object>();
-
-				if (message.Commission != null)
-					t.Commission = message.Commission;
-
-				if (message.Slippage != null)
-					t.Slippage = message.Slippage;
-
-				message.CopyExtensionInfo(t);
-
-				//trades.Add(t);
-				_cache.MyTrades.Add(t);
-
-				return t;
-			});
-
-			return Tuple.Create(myTrade, isNew);
-
-			// mika
-			// http://stocksharp.com/forum/yaf_postst1072_Probliemy-so-sdielkami--pozitsiiami.aspx
-			// из-за того, что сделки по заявке иногда приходит быстрее события NewOrders, неправильно расчитывается поза по стратегиям
-
-			//var raiseOrderChanged = false;
-
-			//trades.SyncDo(d =>
-			//{
-			//    var newBalance = order.Volume - d.Sum(t => t.Trade.Volume);
-
-			//    if (order.Balance > newBalance)
-			//    {
-			//        raiseOrderChanged = true;
-
-			//        order.Balance = newBalance;
-
-			//        if (order.Balance == 0)
-			//            order.State = OrderStates.Done;
-			//    }
-			//});
-
-			//if (raiseOrderChanged)
-			//    RaiseOrderChanged(order);
-		}
-
-		public Tuple<Trade, bool> ProcessTradeMessage(Security security, ExecutionMessage message)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			if (message == null)
-				throw new ArgumentNullException("message");
-
-			var trade = GetTrade(security, message.TradeId, message.TradeStringId, (id, stringId) =>
-			{
-				var t = message.ToTrade(EntityFactory.CreateTrade(security, id, stringId));
-				t.LocalTime = message.LocalTime;
-				t.Time = message.ServerTime;
-				message.CopyExtensionInfo(t);
-				return t;
-			});
-
-			return trade;
-		}
-
-		public Tuple<News, bool> ProcessNewsMessage(Security security, NewsMessage message)
-		{
-			if (message == null)
-				throw new ArgumentNullException("message");
-
-			var isNew = false;
-
-			News news;
-
-			if (!message.Id.IsEmpty())
-			{
-				news = _cache.NewsById.SafeAdd(message.Id, key =>
+				switch (operation)
 				{
-					isNew = true;
-					return EntityFactory.CreateNews();
-				});
+					case OrderOperations.Register:
+					{
+						if (isPending && order.State != OrderStates.Pending)
+							order.LatencyRegistration = message.Latency.Value;
+
+						break;
+					}
+					case OrderOperations.Cancel:
+					{
+						order.LatencyCancellation = message.Latency.Value;
+						break;
+					}
+					case OrderOperations.Edit:
+					{
+						order.LatencyEdition = message.Latency.Value;
+						break;
+					}
+					default:
+						throw new ArgumentOutOfRangeException(operation.ToString());
+				}
+			}
+
+			if (message.AveragePrice != default)
+				order.AveragePrice = message.AveragePrice;
+
+			if (message.Yield != default)
+				order.Yield = message.Yield;
+
+			if (message.PostOnly != default)
+				order.PostOnly = message.PostOnly;
+
+			if (message.SeqNum != default)
+				order.SeqNum = message.SeqNum;
+
+			if (message.Leverage != default)
+				order.Leverage = message.Leverage;
+
+			if (message.MarketPrice != default)
+				order.MarketPrice = message.MarketPrice;
+
+			var retVal = new OrderChangeInfo(order, raiseNewOrder, true, operation == OrderOperations.Edit);
+			raiseNewOrder = false;
+			process(order);
+			yield return retVal;
+		}
+	}
+
+	private class SecurityData
+	{
+		public readonly CachedSynchronizedDictionary<(long transId, long tradeId, string tradeStrId), MyTrade> MyTrades = [];
+		public readonly CachedSynchronizedDictionary<(long transId, bool conditional, OrderOperations operation), OrderInfo> Orders = [];
+
+		public OrderInfo TryGetOrder(OrderTypes? type, long transactionId, OrderOperations operation)
+		{
+			return Orders.TryGetValue(CreateOrderKey(type, transactionId, operation))
+				?? (type == null ? Orders.TryGetValue(CreateOrderKey(OrderTypes.Conditional, transactionId, operation)) : null);
+		}
+
+		public readonly SynchronizedDictionary<long, Order> OrdersById = [];
+		public readonly SynchronizedDictionary<string, Order> OrdersByStringId = new(StringComparer.InvariantCultureIgnoreCase);
+	}
+
+	private readonly SynchronizedDictionary<Security, SecurityData> _securityData = [];
+
+	private SecurityData GetData(Security security)
+		=> _securityData.SafeAdd(security);
+
+	private readonly SynchronizedDictionary<(long transId, OrderOperations operation), Order> _allOrdersByTransactionId = [];
+	private readonly SynchronizedDictionary<(long transId, OrderOperations operation), OrderFail> _allOrdersByFailedId = [];
+	private readonly SynchronizedDictionary<long, Order> _allOrdersById = [];
+	private readonly SynchronizedDictionary<string, Order> _allOrdersByStringId = new(StringComparer.InvariantCultureIgnoreCase);
+	private readonly SynchronizedDictionary<Order, (decimal totalVolume, decimal weightedPriceSum)> _ordersAvgPrices = [];
+
+	private readonly SynchronizedDictionary<string, News> _newsById = new(StringComparer.InvariantCultureIgnoreCase);
+	private readonly SynchronizedList<News> _newsWithoutId = [];
+
+	/// <summary>
+	/// All news.
+	/// </summary>
+	public IEnumerable<News> News => [.. _newsWithoutId.SyncGet(t => t.ToArray()), .. _newsById.SyncGet(t => t.Values.ToArray())];
+
+	private int _ordersKeepCount = 1000;
+
+	/// <summary>
+	/// Maximum number of orders to keep in cache. Default is 1000.
+	/// </summary>
+	public int OrdersKeepCount
+	{
+		get => _ordersKeepCount;
+		set
+		{
+			if (_ordersKeepCount == value)
+				return;
+
+			if (value < 0)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.NegativeOrderCountStorage);
+
+			_ordersKeepCount = value;
+			RecycleOrders();
+		}
+	}
+
+	private void AddOrder(Order order)
+	{
+		if (order == null)
+			throw new ArgumentNullException(nameof(order));
+
+		if (OrdersKeepCount > 0)
+			_orders.Add(order, null);
+
+		RecycleOrders();
+	}
+
+	private readonly HashSet<long> _orderStatusTransactions = [];
+	private readonly HashSet<long> _massCancelationTransactions = [];
+
+	/// <summary>
+	/// Exchange info provider.
+	/// </summary>
+	public IExchangeInfoProvider ExchangeInfoProvider { get; } = exchangeInfoProvider ?? throw new ArgumentNullException(nameof(exchangeInfoProvider));
+
+	private readonly CachedSynchronizedDictionary<Order, IMessageAdapter> _orders = [];
+
+	/// <summary>
+	/// All orders.
+	/// </summary>
+	public IEnumerable<Order> Orders => _orders.CachedKeys;
+
+	private readonly CachedSynchronizedList<MyTrade> _myTrades = [];
+
+	/// <summary>
+	/// All own trades.
+	/// </summary>
+	public IEnumerable<MyTrade> MyTrades => _myTrades.Cache;
+
+	private readonly SynchronizedList<OrderFail> _orderRegisterFails = [];
+
+	/// <summary>
+	/// Order registration failures.
+	/// </summary>
+	public IEnumerable<OrderFail> OrderRegisterFails => _orderRegisterFails.SyncGet(c => c.ToArray());
+
+	private readonly SynchronizedList<OrderFail> _orderCancelFails = [];
+
+	/// <summary>
+	/// Order cancellation failures.
+	/// </summary>
+	public IEnumerable<OrderFail> OrderCancelFails => _orderCancelFails.SyncGet(c => c.ToArray());
+
+	private readonly SynchronizedList<OrderFail> _orderEditFails = [];
+
+	/// <summary>
+	/// Order modification failures.
+	/// </summary>
+	public IEnumerable<OrderFail> OrderEditFails => _orderEditFails.SyncGet(c => c.ToArray());
+
+	private readonly ILogReceiver _logReceiver = logReceiver ?? throw new ArgumentNullException(nameof(logReceiver));
+	private readonly IPositionProvider _positionProvider = positionProvider ?? throw new ArgumentNullException(nameof(positionProvider));
+
+	/// <summary>
+	/// Clear all cached data.
+	/// </summary>
+	public void Clear()
+	{
+		_securityData.Clear();
+
+		_allOrdersById.Clear();
+		_allOrdersByStringId.Clear();
+		_allOrdersByTransactionId.Clear();
+		_allOrdersByFailedId.Clear();
+		_orders.Clear();
+
+		_newsById.Clear();
+		_newsWithoutId.Clear();
+
+		_myTrades.Clear();
+
+		_orderStatusTransactions.Clear();
+		_massCancelationTransactions.Clear();
+
+		_orderCancelFails.Clear();
+		_orderRegisterFails.Clear();
+		_orderEditFails.Clear();
+
+		_securityValues.Clear();
+		_securityValuesById.Clear();
+		_orderBookSnapshots.Clear();
+	}
+
+	/// <summary>
+	/// Add order status transaction id.
+	/// </summary>
+	/// <param name="transactionId">Transaction id.</param>
+	public void AddOrderStatusTransactionId(long transactionId)
+	{
+		if (!_orderStatusTransactions.Add(transactionId))
+			throw new InvalidOperationException();
+	}
+
+	/// <summary>
+	/// Remove order status transaction id.
+	/// </summary>
+	/// <param name="transactionId">Transaction id.</param>
+	public void RemoveOrderStatusTransactionId(long transactionId)
+	{
+		_orderStatusTransactions.Remove(transactionId);
+	}
+
+	/// <summary>
+	/// Get orders by security and state.
+	/// </summary>
+	/// <param name="security">Security.</param>
+	/// <param name="state">Order state.</param>
+	/// <returns>Orders.</returns>
+	public IEnumerable<Order> GetOrders(Security security, OrderStates state)
+	{
+		if (security == null)
+			throw new ArgumentNullException(nameof(security));
+
+		return GetData(security).Orders.CachedValues.Select(info => info.Order).Filter(state);
+	}
+
+	/// <summary>
+	/// Try add mass cancelation transaction id.
+	/// </summary>
+	/// <param name="transactionId">Transaction id.</param>
+	public void TryAddMassCancelationId(long transactionId)
+	{
+		_massCancelationTransactions.TryAdd(transactionId);
+		//if (!_massCancelationTransactions.Add(transactionId))
+		//	throw new InvalidOperationException();
+	}
+
+	/// <summary>
+	/// Check if transaction is mass cancelation.
+	/// </summary>
+	/// <param name="transactionId">Transaction id.</param>
+	/// <returns><see langword="true"/> if mass cancelation.</returns>
+	public bool IsMassCancelation(long transactionId) => _massCancelationTransactions.Contains(transactionId);
+
+	/// <summary>
+	/// Check if transaction is order status request.
+	/// </summary>
+	/// <param name="transactionId">Transaction id.</param>
+	/// <returns><see langword="true"/> if order status request.</returns>
+	public bool IsOrderStatusRequest(long transactionId) => _orderStatusTransactions.Contains(transactionId);
+
+	/// <summary>
+	/// Add order by cancelation transaction id.
+	/// </summary>
+	/// <param name="order">Order.</param>
+	/// <param name="transactionId">Transaction id.</param>
+	public void AddOrderByCancelationId(Order order, long transactionId)
+	{
+		AddOrderByTransactionId(order, transactionId, OrderOperations.Cancel);
+	}
+
+	/// <summary>
+	/// Add order by registration transaction id.
+	/// </summary>
+	/// <param name="order">Order.</param>
+	public void AddOrderByRegistrationId(Order order)
+	{
+		AddOrder(order);
+		AddOrderByTransactionId(order, order.TransactionId, OrderOperations.Register);
+	}
+
+	/// <summary>
+	/// Add order by edition transaction id.
+	/// </summary>
+	/// <param name="order">Order.</param>
+	/// <param name="transactionId">Transaction id.</param>
+	public void AddOrderByEditionId(Order order, long transactionId)
+	{
+		AddOrderByTransactionId(order, transactionId, OrderOperations.Edit);
+	}
+
+	/// <summary>
+	/// Add order fail by transaction id.
+	/// </summary>
+	/// <param name="fail">Order fail.</param>
+	/// <param name="operation">Order operation.</param>
+	/// <param name="transactionId">Transaction id.</param>
+	public void AddOrderFailById(OrderFail fail, OrderOperations operation, long transactionId)
+	{
+		_allOrdersByFailedId.TryAdd2((transactionId, operation), fail);
+	}
+
+	private void AddOrderByTransactionId(Order order, long transactionId, OrderOperations operation)
+	{
+		if (order == null)
+			throw new ArgumentNullException(nameof(order));
+
+		GetData(order.Security).Orders.Add(CreateOrderKey(order.Type, transactionId, operation), new OrderInfo(this, order, operation == OrderOperations.Register));
+		_allOrdersByTransactionId.Add((transactionId, operation), order);
+	}
+
+	/// <summary>
+	/// Try get order by id.
+	/// </summary>
+	/// <param name="orderId">Order id.</param>
+	/// <param name="orderStringId">Order string id.</param>
+	/// <returns>Order or <see langword="null"/>.</returns>
+	public Order TryGetOrder(long? orderId, string orderStringId)
+		=> orderId != null
+			? _allOrdersById.TryGetValue(orderId.Value)
+			: (orderStringId.IsEmpty() ? null : _allOrdersByStringId.TryGetValue(orderStringId));
+
+	/// <summary>
+	/// Try get order by transaction id and operation.
+	/// </summary>
+	/// <param name="transactionId">Transaction id.</param>
+	/// <param name="operation">Operation.</param>
+	/// <returns>Order or <see langword="null"/>.</returns>
+	public Order TryGetOrder(long transactionId, OrderOperations operation)
+		=> _allOrdersByTransactionId.TryGetValue((transactionId, operation));
+
+	private void UpdateOrderIds(Order order, SecurityData securityData)
+	{
+		// так как биржевые идентифиаторы могут повторяться, то переписываем старые заявки новыми как наиболее актуальными
+
+		if (order.Id != null)
+		{
+			securityData.OrdersById[order.Id.Value] = order;
+			_allOrdersById[order.Id.Value] = order;
+		}
+
+		if (!order.StringId.IsEmpty())
+		{
+			securityData.OrdersByStringId[order.StringId] = order;
+			_allOrdersByStringId[order.StringId] = order;
+		}
+	}
+
+	/// <summary>
+	/// Try get message adapter for order.
+	/// </summary>
+	/// <param name="order">Order.</param>
+	/// <returns>Adapter or <see langword="null"/>.</returns>
+	public IMessageAdapter TryGetAdapter(Order order)
+	{
+		if (order is null)
+			throw new ArgumentNullException(nameof(order));
+
+		return _orders.TryGetValue(order);
+	}
+
+	/// <summary>
+	/// Try set message adapter for order.
+	/// </summary>
+	/// <param name="order">Order.</param>
+	/// <param name="adapter">Adapter.</param>
+	public void TrySetAdapter(Order order, IMessageAdapter adapter)
+	{
+		if (order is null)
+			throw new ArgumentNullException(nameof(order));
+
+		if (adapter is null or BasketMessageAdapter)
+			return;
+
+		_orders[order] = adapter;
+	}
+
+	/// <summary>
+	/// Process order message.
+	/// </summary>
+	/// <param name="order">Order.</param>
+	/// <param name="security">Security.</param>
+	/// <param name="message">Message.</param>
+	/// <param name="transactionId">Transaction id.</param>
+	/// <param name="getPortfolio">Function to get portfolio.</param>
+	/// <returns>Order change info.</returns>
+	public IEnumerable<OrderChangeInfo> ProcessOrderMessage(Order order, Security security, ExecutionMessage message, long transactionId, Func<string, Portfolio> getPortfolio)
+	{
+		if (security is null)
+			throw new ArgumentNullException(nameof(security));
+
+		if (message is null)
+			throw new ArgumentNullException(nameof(message));
+
+		if (getPortfolio is null)
+			throw new ArgumentNullException(nameof(getPortfolio));
+
+		if (!message.IsOk())
+			throw new ArgumentException(LocalizedStrings.MessageHasStateAndError.PutEx(message));
+
+		var securityData = GetData(security);
+
+		if (transactionId == 0 && message.OrderId == null && message.OrderStringId.IsEmpty())
+			throw new ArgumentException(LocalizedStrings.NoOrderIds);
+
+		if (transactionId == 0)
+		{
+			var info = securityData.Orders.CachedValues.FirstOrDefault(i =>
+			{
+				if (order != null)
+					return i.Order == order;
+
+				if (message.OrderId != null)
+					return i.Order.Id == message.OrderId;
+				else
+					return i.Order.StringId.EqualsIgnoreCase(message.OrderStringId);
+			});
+
+			if (info == null)
+			{
+				yield return OrderChangeInfo.NotExist;
+				//throw new InvalidOperationException(LocalizedStrings.OrderNotFound.Put(orderId.To<string>() ?? orderStringId));
 			}
 			else
 			{
-				isNew = true;
-
-				news = EntityFactory.CreateNews();
-				_cache.NewsWithoutId.Add(news);
+				foreach (var i in info.ApplyChanges(message, OrderOperations.Register, o => UpdateOrderIds(o, securityData)))
+					yield return i;
 			}
+		}
+		else
+		{
+			var cancelledInfo = securityData.TryGetOrder(message.OrderType, transactionId, OrderOperations.Cancel);
+			var registeredInfo = securityData.TryGetOrder(message.OrderType, transactionId, OrderOperations.Register);
+			var editedInfo = securityData.TryGetOrder(message.OrderType, transactionId, OrderOperations.Edit);
 
-			if (isNew)
+			// проверяем не отмененная ли заявка пришла
+			if (cancelledInfo != null) // && (cancelledOrder.Id == orderId || (!cancelledOrder.StringId.IsEmpty() && cancelledOrder.StringId.EqualsIgnoreCase(orderStringId))))
 			{
-				news.ServerTime = message.ServerTime;
-				news.LocalTime = message.LocalTime;
-			}
+				var cancellationOrder = cancelledInfo.Order;
 
-			if (!message.Source.IsEmpty())
-				news.Source = message.Source;
-
-			if (!message.Headline.IsEmpty())
-				news.Headline = message.Headline;
-
-			if (security != null)
-				news.Security = security;
-
-			if (!message.Story.IsEmpty())
-				news.Story = message.Story;
-
-			if (!message.BoardCode.IsEmpty())
-				news.Board = ExchangeBoard.GetOrCreateBoard(message.BoardCode);
-
-			if (message.Url != null)
-				news.Url = message.Url;
-
-			message.CopyExtensionInfo(news);
-
-			return Tuple.Create(news, isNew);
-		}
-
-		private static Tuple<long, bool, bool> CreateOrderKey(OrderTypes type, long transactionId, bool isCancel)
-		{
-			if (transactionId <= 0)
-				throw new ArgumentOutOfRangeException("transactionId", transactionId, LocalizedStrings.Str718);
-
-			return Tuple.Create(transactionId, type == OrderTypes.Conditional, isCancel);
-		}
-
-		public Order GetOrder(Security security, long transactionId, long? orderId, string orderStringId, OrderTypes orderType = OrderTypes.Limit, bool isCancel = false)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			if (transactionId == 0 && orderId == null && orderStringId.IsEmpty())
-				throw new ArgumentException(LocalizedStrings.Str719);
-
-			var data = _cache.GetData(security);
-
-			Order order = null;
-
-			if (transactionId != 0)
-				order = (Order)data.Orders.TryGetValue(CreateOrderKey(orderType, transactionId, isCancel));
-
-			if (order != null)
-				return order;
-
-			if (orderId != null)
-				order = data.OrdersById.TryGetValue(orderId.Value);
-
-			if (order != null)
-				return order;
-
-			return orderStringId == null ? null : data.OrdersByStringId.TryGetValue(orderStringId);
-		}
-
-		private Tuple<Order, bool, bool> GetOrderInfo(Cache.SecurityData securityData, OrderTypes type, long transactionId, long? orderId, string orderStringId, Func<long, Order> createOrder, out bool isNew, bool newOrderRaised = false)
-		{
-			if (createOrder == null)
-				throw new ArgumentNullException("createOrder");
-
-			if (transactionId == 0 && orderId == null && orderStringId.IsEmpty())
-				throw new ArgumentException(LocalizedStrings.Str719);
-
-			var isNew2 = false;
-			var orders = securityData.Orders;
-
-			OrderInfo info;
-
-			if (transactionId == 0)
-			{
-				info = orders.First(p =>
+				if (registeredInfo == null)
 				{
-					var order = p.Value.Order;
+					_logReceiver.LogDebug("Сancel '{0}': {1}", cancellationOrder.TransactionId, message);
 
-					if (orderId != null)
-						return order.Id == orderId;
-					else
-						return order.StringId.CompareIgnoreCase(orderStringId);
-				}).Value;
-			}
-			else
-			{
-				var cancelKey = CreateOrderKey(type, transactionId, true);
-				var registerKey = CreateOrderKey(type, transactionId, false);
+					foreach (var i in cancelledInfo.ApplyChanges(message, OrderOperations.Cancel, o => UpdateOrderIds(o, securityData)))
+						yield return i;
 
-				var cancelledOrder = (Order)orders.TryGetValue(cancelKey);
-
-				// проверяем не отмененная ли заявка пришла
-				if (cancelledOrder != null && (cancelledOrder.Id == orderId || (!cancelledOrder.StringId.IsEmpty() && cancelledOrder.StringId.CompareIgnoreCase(orderStringId))))
-				{
-					isNew = false;
-					return Tuple.Create(cancelledOrder, true/*, (Order)orders.TryGetValue(registerKey) != null*/, false);
+					yield break;
 				}
 
-				info = orders.SafeAdd(registerKey, key =>
+				var newOrderState = message.OrderState;
+
+				if ((newOrderState == OrderStates.Active || newOrderState == OrderStates.Done) && cancellationOrder.State != OrderStates.Done)
 				{
-					isNew2 = true;
+					_logReceiver.LogDebug("Replace-cancel '{0}': {1}", cancellationOrder.TransactionId, message);
 
-					var o = createOrder(transactionId);
+					cancellationOrder.ApplyNewState(OrderStates.Done, _logReceiver);
 
-					if (o == null)
-						throw new InvalidOperationException(LocalizedStrings.Str720Params.Put(transactionId));
+					if (message.Latency != null)
+						cancellationOrder.LatencyCancellation = message.Latency.Value;
 
-					if (o.ExtensionInfo == null)
-						o.ExtensionInfo = new Dictionary<object, object>();
+					yield return new OrderChangeInfo(cancellationOrder, false, true, false);
 
-					_cache.AddOrder(o);
+					//var isCancelOrderOnly = (message.OrderId != null && message.OrderId == cancellationOrder.Id)
+					//	|| (message.OrderStringId != null && message.OrderStringId == cancellationOrder.StringId)
+					//	|| (message.OrderBoardId != null && message.OrderBoardId == cancellationOrder.BoardId);
 
-					// с таким же идентификатором транзакции может быть заявка по другому инструменту
-					_cache.AllOrdersByTransactionId.TryAdd(Tuple.Create(transactionId, type == OrderTypes.Conditional), o);
+					//if (isCancelOrderOnly)
+					//{
+					//	_logReceiver.AddDebugLog("Replace-reg empty");
+					//	yield break;
+					//}
+				}
 
-					return new OrderInfo(o);
-				});
+				_logReceiver.LogDebug("Replace-reg '{0}': {1}", registeredInfo.Order.TransactionId, message);
+
+				foreach (var i in registeredInfo.ApplyChanges(message, OrderOperations.Register, o => UpdateOrderIds(o, securityData)))
+					yield return i;
+
+				yield break;
 			}
 
-			var raiseNewOrder = info.RaiseNewOrder;
+			if (editedInfo != null)
+			{
+				_logReceiver.LogDebug("Edit '{0}': {1}", editedInfo.Order.TransactionId, message);
 
-			if (raiseNewOrder && newOrderRaised)
-				info.RaiseNewOrder = false;
+				if (message.Latency != null)
+					editedInfo.Order.LatencyEdition = message.Latency.Value;
 
-			isNew = isNew2;
-			return Tuple.Create((Order)info, false, raiseNewOrder);
+				foreach (var i in editedInfo.ApplyChanges(message, OrderOperations.Edit, o => UpdateOrderIds(o, securityData)))
+					yield return i;
+
+				yield break;
+			}
+
+			if (registeredInfo == null)
+			{
+				// This branch builds an order nobody here has seen before, so the message is its only
+				// source of truth. Without a side there is no order to build.
+				if (message.Side is not Sides side)
+					throw new ArgumentException(LocalizedStrings.OrderSideNotSpecified, nameof(message));
+
+				var o = new Order
+				{
+					Security = security,
+					Type = message.OrderType,
+					TransactionId = transactionId,
+					Time = message.ServerTime,
+					ServerTime = message.ServerTime,
+					Price = message.OrderPrice,
+					Volume = message.OrderVolume ?? 0,
+					Side = side,
+					Comment = message.Comment,
+					ExpiryDate = message.ExpiryDate,
+					Condition = message.Condition,
+					UserOrderId = message.UserOrderId,
+					StrategyId = message.StrategyId,
+					ClientCode = message.ClientCode,
+					BrokerCode = message.BrokerCode,
+					IsMarketMaker = message.IsMarketMaker,
+					MarginMode = message.MarginMode,
+					Slippage = message.Slippage,
+					IsManual = message.IsManual,
+					MinVolume = message.MinVolume,
+					PositionEffect = message.PositionEffect,
+					PostOnly = message.PostOnly,
+					SeqNum = message.SeqNum,
+					Leverage = message.Leverage
+				};
+
+				if (message.Balance != null)
+				{
+					if (message.Balance.Value < 0)
+						_logReceiver.LogError($"Order {transactionId}: balance {message.Balance.Value} < 0");
+
+					o.Balance = message.Balance.Value;
+				}
+
+				o.Portfolio = getPortfolio(message.PortfolioName);
+
+				AddOrder(o);
+				_allOrdersByTransactionId.TryAdd2((transactionId, OrderOperations.Register), o);
+
+				registeredInfo = new OrderInfo(this, o, true);
+				securityData.Orders.Add(CreateOrderKey(o.Type, transactionId, OrderOperations.Register), registeredInfo);
+			}
+
+			foreach (var i in registeredInfo.ApplyChanges(message, OrderOperations.Register, o => UpdateOrderIds(o, securityData)))
+				yield return i;
+		}
+	}
+
+	/// <summary>
+	/// Process order fail message.
+	/// </summary>
+	/// <param name="order">Order.</param>
+	/// <param name="security">Security.</param>
+	/// <param name="message">Message.</param>
+	/// <returns>Order fails with operations.</returns>
+	public IEnumerable<(OrderFail, OrderOperations)> ProcessOrderFailMessage(Order order, Security security, ExecutionMessage message)
+	{
+		if (security == null)
+			throw new ArgumentNullException(nameof(security));
+
+		if (message == null)
+			throw new ArgumentNullException(nameof(message));
+
+		var data = GetData(security);
+
+		var orders = new List<(Order order, OrderOperations operation)>();
+
+		if (message.OriginalTransactionId == 0)
+			throw new ArgumentOutOfRangeException(nameof(message), message.OriginalTransactionId, LocalizedStrings.TransactionInvalid);
+
+		var orderType = message.OrderType;
+
+		if (order == null)
+		{
+			var cancelledOrder = data.TryGetOrder(orderType, message.OriginalTransactionId, OrderOperations.Cancel)?.Order;
+
+			if (cancelledOrder != null && orderType == null)
+				orderType = cancelledOrder.Type;
+
+			if (cancelledOrder != null /*&& order.Id == message.OrderId*/)
+				orders.Add((cancelledOrder, OrderOperations.Cancel));
+
+			var registeredOrder = data.TryGetOrder(orderType, message.OriginalTransactionId, OrderOperations.Register)?.Order;
+
+			if (registeredOrder != null)
+				orders.Add((registeredOrder, OrderOperations.Register));
+
+			var editedOrder = data.TryGetOrder(orderType, message.OriginalTransactionId, OrderOperations.Edit)?.Order;
+
+			if (editedOrder != null)
+				orders.Add((editedOrder, OrderOperations.Edit));
+
+			if (cancelledOrder == null && registeredOrder == null && editedOrder == null)
+			{
+				if (!message.OrderStringId.IsEmpty())
+				{
+					order = data.OrdersByStringId.TryGetValue(message.OrderStringId);
+
+					if (order != null)
+					{
+						var pair = data.Orders.LastOrDefault(p => p.Value.Order == order);
+
+						if (pair.Value != null)
+							orders.Add((pair.Value.Order, pair.Key.operation));
+					}
+				}
+			}
+		}
+		else
+		{
+			void TryAdd(OrderOperations operation)
+			{
+				var foundOrder = data.TryGetOrder(order.Type, message.OriginalTransactionId, operation)?.Order;
+				if (foundOrder != null)
+					orders.Add((foundOrder, operation));
+			}
+
+			TryAdd(OrderOperations.Cancel);
+			TryAdd(OrderOperations.Register);
+			TryAdd(OrderOperations.Edit);
 		}
 
-		public Tuple<Trade, bool> GetTrade(Security security, long? id, string strId, Func<long?, string, Trade> createTrade)
+		if (orders.Count == 0)
+		{
+			var fails = new List<(OrderFail, OrderOperations)>();
+
+			Order TryAddFail(OrderOperations operation)
+			{
+				using (_allOrdersByFailedId.EnterScope())
+				{
+					if (_allOrdersByFailedId.TryGetAndRemove((message.OriginalTransactionId, operation), out var fail))
+					{
+						fails.Add((fail, operation));
+						return fail.Order;
+					}
+				}
+
+				return null;
+			}
+
+			TryAddFail(OrderOperations.Edit);
+			TryAddFail(OrderOperations.Cancel);
+
+			var regOrder = TryAddFail(OrderOperations.Register);
+
+			if (regOrder != null && regOrder.State == OrderStates.None)
+			{
+				regOrder.State = OrderStates.Failed;
+
+				regOrder.ServerTime = message.ServerTime;
+				regOrder.LocalTime = message.LocalTime;
+			}
+
+			return fails;
+		}
+
+		return orders.Select(t =>
+		{
+			var o = t.order;
+			var operation = t.operation;
+
+			o.ServerTime = message.ServerTime;
+			o.LocalTime = message.LocalTime;
+
+			if (message.OrderStatus != null)
+				o.Status = message.OrderStatus;
+
+			//для ошибок снятия не надо менять состояние заявки
+			if (operation == OrderOperations.Register)
+				o.ApplyNewState(OrderStates.Failed, _logReceiver);
+
+			if (message.Commission != null)
+				o.Commission = message.Commission;
+
+			if (!message.CommissionCurrency.IsEmpty())
+				o.CommissionCurrency = message.CommissionCurrency;
+
+			var error = message.Error ?? new InvalidOperationException(operation == OrderOperations.Cancel ? LocalizedStrings.ErrorCancelling : LocalizedStrings.ErrorRegistering);
+
+			var fail = new OrderFail
+			{
+				Order = o,
+				Error = error,
+				ServerTime = message.ServerTime,
+				LocalTime = message.LocalTime,
+				SeqNum = message.SeqNum,
+				TransactionId = message.OriginalTransactionId,
+			};
+			return (fail, operation);
+		});
+	}
+
+	/// <summary>
+	/// Process own trade message.
+	/// </summary>
+	/// <param name="order">Order.</param>
+	/// <param name="security">Security.</param>
+	/// <param name="message">Message.</param>
+	/// <param name="transactionId">Transaction id.</param>
+	/// <returns>Trade and is new flag.</returns>
+	public (MyTrade trade, bool isNew) ProcessOwnTradeMessage(Order order, Security security, ExecutionMessage message, long transactionId)
+	{
+		if (security == null)
+			throw new ArgumentNullException(nameof(security));
+
+		if (message == null)
+			throw new ArgumentNullException(nameof(message));
+
+		// Validate trade price and volume to avoid downstream division by zero or invalid data
+		if (message.TradePrice == null || message.TradePrice <= 0)
+			throw new ArgumentException("Trade price must be a positive value.", nameof(message));
+
+		if (message.TradeVolume == null || message.TradeVolume <= 0)
+			throw new ArgumentException("Trade volume must be a positive value.", nameof(message));
+
+		var securityData = GetData(security);
+
+		if (transactionId == 0 && message.OrderId == null && message.OrderStringId.IsEmpty())
+			throw new ArgumentOutOfRangeException(nameof(message), transactionId, LocalizedStrings.TransactionInvalid);
+
+		var tradeKey = (transactionId, message.TradeId ?? 0, message.TradeStringId ?? string.Empty);
+		var hasTradeId = message.TradeId is not null || !message.TradeStringId.IsEmpty();
+
+		if (hasTradeId && securityData.MyTrades.TryGetValue(tradeKey, out var myTrade))
+			return (myTrade, false);
+
+		if (order == null)
 		{
 			if (security == null)
-				throw new ArgumentNullException("security");
+				throw new ArgumentNullException(nameof(security));
 
-			if (createTrade == null)
-				throw new ArgumentNullException("createTrade");
+			var orderId = message.OrderId;
+			var orderStringId = message.OrderStringId;
 
-			var isNew = false;
+			if (transactionId == 0 && orderId == null && orderStringId.IsEmpty())
+				throw new ArgumentException(LocalizedStrings.NoOrderIds);
 
-			Trade trade;
+			var data = GetData(security);
 
-			var securityData = _cache.GetData(security);
+			if (transactionId != 0)
+				order = data.TryGetOrder(OrderTypes.Limit, transactionId, OrderOperations.Register)?.Order;
 
-			if (id != null)
+			if (order == null)
 			{
-				trade = securityData.TradesById.SafeAdd(id.Value, k =>
-				{
-					isNew = true;
+				if (orderId != null)
+					order = data.OrdersById.TryGetValue(orderId.Value);
 
-					var t = createTrade(id.Value, strId);
-					_cache.AddTrade(t);
-					return t;
-				});
+				if (order == null && !orderStringId.IsEmpty())
+					order = data.OrdersByStringId.TryGetValue(orderStringId);
+
+				if (order == null)
+					return default;
 			}
-			else if (!strId.IsEmpty())
+		}
+
+		var isNew = false;
+
+		MyTrade createTrade()
+		{
+			var trade = (ITickTradeMessage)message.TypedClone();
+
+			if (message.SeqNum != default)
+				trade.SeqNum = message.SeqNum;
+
+			var t = new MyTrade { Order = order, Trade = trade };
+
+			if (message.Commission != null)
+				t.Commission = message.Commission;
+
+			if (!message.CommissionCurrency.IsEmpty())
+				t.CommissionCurrency = message.CommissionCurrency;
+
+			if (message.Slippage != null)
+				t.Slippage = message.Slippage;
+
+			if (message.PnL != null)
+				t.PnL = message.PnL;
+
+			if (message.Position != null)
+				t.Position = message.Position;
+
+			if (message.Initiator != null)
+				t.Initiator = message.Initiator;
+
+			if (message.Yield != null)
+				t.Yield = message.Yield;
+
+			_myTrades.Add(t);
+
+			if (order.AveragePrice is null)
 			{
-				trade = securityData.TradesByStrId.SafeAdd(strId, k =>
-				{
-					isNew = true;
+				var weightedPrice = trade.Price * trade.Volume;
 
-					var t = createTrade(null, strId);
-					_cache.AddTrade(t);
-					return t;
-				});
+				if (_ordersAvgPrices.TryGetValue(order, out var t1))
+				{
+					t1.totalVolume += trade.Volume;
+					t1.weightedPriceSum += weightedPrice;
+					
+					_ordersAvgPrices[order] = t1;
+				}
+				else
+				{
+					_ordersAvgPrices.Add(order, t1 = new(trade.Volume, weightedPrice));
+				}
+
+				order.AveragePrice = t1.weightedPriceSum / t1.totalVolume;
 			}
-			else
+
+			return t;
+		}
+
+		if (hasTradeId)
+		{
+			myTrade = securityData.MyTrades.SafeAdd(tradeKey, key =>
 			{
 				isNew = true;
-
-				trade = createTrade(null, null);
-				_cache.AddTrade(trade);
-				securityData.Trades.Add(trade);
-			}
-
-			return Tuple.Create(trade, isNew);
+				return createTrade();
+			});
 		}
-
-		public Tuple<Portfolio, bool, bool> ProcessPortfolio(string name, Func<Portfolio, bool> changePortfolio = null)
+		else
 		{
-			if (name.IsEmpty())
-				throw new ArgumentNullException("name");
-
-			bool isNew;
-
-			var portfolio = _portfolios.SafeAdd(name, key =>
+			using (securityData.MyTrades.EnterScope())
 			{
-				var p = EntityFactory.CreatePortfolio(key);
-
-				if (p == null)
-					throw new InvalidOperationException(LocalizedStrings.Str1104Params.Put(name));
-
-				if (p.ExtensionInfo == null)
-					p.ExtensionInfo = new Dictionary<object, object>();
-
-				return p;
-			}, out isNew);
-
-			var isChanged = false;
-			if (changePortfolio != null)
-				isChanged = changePortfolio(portfolio);
-
-			if (isNew)
-				return Tuple.Create(portfolio, true, false);
-			
-			if (changePortfolio != null && isChanged)
-				return Tuple.Create(portfolio, false, true);
-
-			return Tuple.Create(portfolio, false, false);
+				isNew = true;
+				myTrade = createTrade();
+			}
 		}
+
+		return (myTrade, isNew);
+	}
+
+	/// <summary>
+	/// Process news message.
+	/// </summary>
+	/// <param name="security">Security.</param>
+	/// <param name="message">Message.</param>
+	/// <returns>News and is new flag.</returns>
+	public (News news, bool isNew) ProcessNewsMessage(Security security, NewsMessage message)
+	{
+		if (message == null)
+			throw new ArgumentNullException(nameof(message));
+
+		var isNew = false;
+
+		News news;
+
+		if (!message.Id.IsEmpty())
+		{
+			news = _newsById.SafeAdd(message.Id, key =>
+			{
+				isNew = true;
+				return new News
+				{
+					Id = key
+				};
+			});
+		}
+		else
+		{
+			isNew = true;
+
+			news = new();
+			_newsWithoutId.Add(news);
+		}
+
+		if (isNew)
+		{
+			news.ServerTime = message.ServerTime;
+			news.LocalTime = message.LocalTime;
+		}
+
+		if (!message.Source.IsEmpty())
+			news.Source = message.Source;
+
+		if (!message.Headline.IsEmpty())
+			news.Headline = message.Headline;
+
+		if (security != null)
+			news.Security = security;
+
+		if (!message.Story.IsEmpty())
+			news.Story = message.Story;
+
+		if (!message.BoardCode.IsEmpty())
+			news.Board = ExchangeInfoProvider.GetOrCreateBoard(message.BoardCode);
+
+		if (!message.Url.IsEmpty())
+			news.Url = message.Url;
+
+		if (message.Priority != null)
+			news.Priority = message.Priority;
+
+		if (!message.Language.IsEmpty())
+			news.Language = message.Language;
+
+		if (message.ExpiryDate != null)
+			news.ExpiryDate = message.ExpiryDate;
+
+		return (news, isNew);
+	}
+
+	private static (long transId, bool conditional, OrderOperations operation) CreateOrderKey(OrderTypes? type, long transactionId, OrderOperations operation)
+	{
+		if (transactionId <= 0)
+			throw new ArgumentOutOfRangeException(nameof(transactionId), transactionId, LocalizedStrings.TransactionInvalid);
+
+		return (transactionId, type == OrderTypes.Conditional, operation);
+	}
+
+	/// <summary>
+	/// Add order fail.
+	/// </summary>
+	/// <param name="operation">Operation.</param>
+	/// <param name="fail">Fail.</param>
+	public void AddFail(OrderOperations operation, OrderFail fail)
+	{
+		switch (operation)
+		{
+			case OrderOperations.Register:
+				_orderRegisterFails.Add(fail);
+				break;
+			case OrderOperations.Cancel:
+				_orderCancelFails.Add(fail);
+				break;
+			case OrderOperations.Edit:
+				_orderEditFails.Add(fail);
+				break;
+			default:
+				throw new ArgumentOutOfRangeException(operation.ToString());
+		}
+	}
+
+	private void RecycleOrders()
+	{
+		if (OrdersKeepCount == 0)
+		{
+			_orders.Clear();
+
+			_allOrdersByTransactionId.Clear();
+			_allOrdersById.Clear();
+			_allOrdersByStringId.Clear();
+
+			_securityData.SyncDo(d => d.Values.ForEach(v =>
+			{
+				v.Orders.Clear();
+				v.OrdersById.Clear();
+				v.OrdersByStringId.Clear();
+			}));
+
+			return;
+		}
+		else if (OrdersKeepCount == int.MaxValue)
+			return;
+
+		var totalCount = _orders.Count;
+
+		if (totalCount < (1.5 * OrdersKeepCount))
+			return;
+
+		var countToRemove = totalCount - OrdersKeepCount;
+
+		using (_securityData.EnterScope())
+		{
+			var toRemove = _orders.SyncGet(d =>
+			{
+				var tmp = d.Where(o => o.Key.State.IsFinal()).Take(countToRemove).Select(p => p.Key).ToHashSet();
+
+				foreach (var order in tmp)
+					d.Remove(order);
+
+				return tmp;
+			});
+
+			_myTrades.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Order)));
+			_allOrdersByTransactionId.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value)));
+			_allOrdersById.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value)));
+			_allOrdersByStringId.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value)));
+			_ordersAvgPrices.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Key)));
+
+			foreach (var pair in _securityData)
+			{
+				pair.Value.Orders.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value.Order)));
+				pair.Value.MyTrades.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value.Order)));
+				pair.Value.OrdersById.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value)));
+				pair.Value.OrdersByStringId.SyncDo(d => d.RemoveWhere(t => toRemove.Contains(t.Value)));
+			}
+		}
+	}
+
+	/// <summary>
+	/// Level1 market data info.
+	/// </summary>
+	public class Level1Info
+	{
+		private readonly Lock _sync = new();
+		private readonly Level1ChangeMessage _snapshot;
+
+		/// <summary>
+		/// Initializes a new instance of the <see cref="Level1Info"/>.
+		/// </summary>
+		/// <param name="securityId">Security id.</param>
+		/// <param name="serverTime">Server time.</param>
+		public Level1Info(SecurityId securityId, DateTime serverTime)
+		{
+			_snapshot = new Level1ChangeMessage
+			{
+				SecurityId = securityId,
+				ServerTime = serverTime,
+			};
+		}
+
+		/// <summary>
+		/// Get snapshot copy.
+		/// </summary>
+		/// <returns>Level1 message copy.</returns>
+		public Level1ChangeMessage GetCopy()
+		{
+			using (_sync.EnterScope())
+				return _snapshot.TypedClone();
+		}
+
+		/// <summary>
+		/// Can use best quotes.
+		/// </summary>
+		public bool CanBestQuotes { get; private set; } = true;
+
+		/// <summary>
+		/// Can use last trade.
+		/// </summary>
+		public bool CanLastTrade { get; private set; } = true;
+
+		/// <summary>
+		/// Available Level1 fields.
+		/// </summary>
+		public IEnumerable<Level1Fields> Level1Fields
+		{
+			get
+			{
+				using (_sync.EnterScope())
+					return [.. _snapshot.Changes.Keys];
+			}
+		}
+
+		/// <summary>
+		/// Set field value.
+		/// </summary>
+		/// <param name="serverTime">Server time.</param>
+		/// <param name="field">Field.</param>
+		/// <param name="value">Value.</param>
+		public void SetValue(DateTime serverTime, Level1Fields field, object value)
+		{
+			using (_sync.EnterScope())
+			{
+				_snapshot.ServerTime = serverTime;
+				_snapshot.Changes[field] = value;
+			}
+		}
+
+		/// <summary>
+		/// Get field value.
+		/// </summary>
+		/// <param name="field">Field.</param>
+		/// <returns>Value.</returns>
+		public object GetValue(Level1Fields field)
+		{
+			using (_sync.EnterScope())
+				return _snapshot.TryGet(field);
+		}
+
+		private void RemoveValues(CachedSynchronizedSet<Level1Fields> fields)
+		{
+			foreach (var field in fields.Cache)
+				_snapshot.Changes.Remove(field);
+		}
+
+		/// <summary>
+		/// Clear best quotes data.
+		/// </summary>
+		/// <param name="serverTime">Server time.</param>
+		public void ClearBestQuotes(DateTime serverTime)
+		{
+			using (_sync.EnterScope())
+			{
+				if (!CanBestQuotes)
+					return;
+
+				RemoveValues(Extensions.BestBidFields);
+				RemoveValues(Extensions.BestAskFields);
+
+				_snapshot.ServerTime = serverTime;
+
+				CanBestQuotes = false;
+			}
+		}
+
+		/// <summary>
+		/// Clear last trade data.
+		/// </summary>
+		/// <param name="serverTime">Server time.</param>
+		public void ClearLastTrade(DateTime serverTime)
+		{
+			using (_sync.EnterScope())
+			{
+				if (!CanLastTrade)
+					return;
+
+				RemoveValues(Extensions.LastTradeFields);
+
+				_snapshot.ServerTime = serverTime;
+
+				CanLastTrade = false;
+			}
+		}
+
+		/// <summary>
+		/// Let the best quotes be taken from Level1 again, once the order book stream that owned them has ended.
+		/// </summary>
+		public void RestoreBestQuotes()
+		{
+			using (_sync.EnterScope())
+				CanBestQuotes = true;
+		}
+
+		/// <summary>
+		/// Let the last trade be taken from Level1 again, once the tick stream that owned it has ended.
+		/// </summary>
+		public void RestoreLastTrade()
+		{
+			using (_sync.EnterScope())
+				CanLastTrade = true;
+		}
+	}
+
+	private readonly SynchronizedDictionary<Security, Level1Info> _securityValues = [];
+
+	// The same entries by instrument id, for callers that hold a subscription rather than an instrument.
+	private readonly SynchronizedDictionary<SecurityId, Level1Info> _securityValuesById = [];
+	private readonly SynchronizedDictionary<SecurityId, QuoteChangeMessage> _orderBookSnapshots = [];
+
+	/// <summary>
+	/// Get security Level1 field value.
+	/// </summary>
+	/// <param name="security">Security.</param>
+	/// <param name="field">Field.</param>
+	/// <returns>Value.</returns>
+	public object GetSecurityValue(Security security, Level1Fields field)
+	{
+		if (security == null)
+			throw new ArgumentNullException(nameof(security));
+
+		return _securityValues.TryGetValue(security)?.GetValue(field);
+	}
+
+	/// <summary>
+	/// Get available Level1 fields for security.
+	/// </summary>
+	/// <param name="security">Security.</param>
+	/// <returns>Fields.</returns>
+	public IEnumerable<Level1Fields> GetLevel1Fields(Security security)
+	{
+		if (security == null)
+			throw new ArgumentNullException(nameof(security));
+
+		if (_securityValues.TryGetValue(security, out var info))
+			return info.Level1Fields;
+
+		return [];
+	}
+
+	/// <summary>
+	/// Check if security has Level1 info.
+	/// </summary>
+	/// <param name="security">Security.</param>
+	/// <returns><see langword="true"/> if has info.</returns>
+	public bool HasLevel1Info(Security security)
+		=> _securityValues.ContainsKey(security);
+
+	/// <summary>
+	/// Get or create Level1 info for security.
+	/// </summary>
+	/// <param name="security">Security.</param>
+	/// <param name="serverTime">Server time.</param>
+	/// <returns>Level1 info.</returns>
+	public Level1Info GetSecurityValues(Security security, DateTime serverTime)
+		=> _securityValues.SafeAdd(security, key =>
+		{
+			var securityId = security.ToSecurityId();
+			var info = new Level1Info(securityId, serverTime);
+
+			_securityValuesById[securityId] = info;
+
+			return info;
+		});
+
+	/// <summary>
+	/// Hand the Level1 fields an ended market data stream owned back to Level1. An order book owns the
+	/// best quotes and a tick stream owns the last trade only while it runs; once it is gone Level1 is
+	/// the only source left for them.
+	/// </summary>
+	/// <param name="securityId">Security the stream carried.</param>
+	/// <param name="dataType">Data type of the stream that ended.</param>
+	public void ReleaseLevel1Ownership(SecurityId securityId, DataType dataType)
+	{
+		if (dataType is null)
+			throw new ArgumentNullException(nameof(dataType));
+
+		if (!_securityValuesById.TryGetValue(securityId, out var info))
+			return;
+
+		if (dataType == DataType.MarketDepth)
+			info.RestoreBestQuotes();
+		else if (dataType == DataType.Ticks)
+			info.RestoreLastTrade();
+	}
+
+	/// <summary>
+	/// Update cached order book snapshot for a security.
+	/// </summary>
+	/// <param name="message">Order book message.</param>
+	public void UpdateOrderBookSnapshot(QuoteChangeMessage message)
+	{
+		if (message is null)
+			throw new ArgumentNullException(nameof(message));
+
+		_orderBookSnapshots[message.SecurityId] = message.TypedClone();
+	}
+
+	IEnumerable<Message> ISnapshotHolder.GetSnapshot(ISubscriptionMessage subscription)
+	{
+		if (subscription is null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		var securityId = subscription is ISecurityIdMessage secIdMsg ? secIdMsg.SecurityId : default;
+		var dataType = subscription.DataType;
+
+		if (dataType == DataType.Level1)
+		{
+			if (securityId == default)
+				return [];
+
+			if (_securityValuesById.TryGetValue(securityId, out var info))
+				return [info.GetCopy()];
+		}
+		else if (dataType == DataType.MarketDepth)
+		{
+			if (securityId != default && _orderBookSnapshots.TryGetValue(securityId, out var snapshot))
+				return [snapshot.TypedClone()];
+		}
+		else if (dataType == DataType.Transactions)
+		{
+			using (_orders.EnterScope())
+				return [.. _orders.Keys.Select(o => o.ToMessage()).Where(m => m.IsMatch(m.Type, subscription))];
+		}
+		else if (dataType == DataType.PositionChanges)
+		{
+			var positions = _positionProvider.Positions;
+
+			if (subscription is PortfolioLookupMessage lookupMsg)
+				positions = positions.Filter(lookupMsg);
+
+			return [.. positions.Select(p => p.ToChangeMessage())];
+		}
+
+		return [];
 	}
 }

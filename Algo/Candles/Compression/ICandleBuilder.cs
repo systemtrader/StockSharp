@@ -1,25 +1,20 @@
-namespace StockSharp.Algo.Candles.Compression
+namespace StockSharp.Algo.Candles.Compression;
+
+/// <summary>
+/// The candles builder interface.
+/// </summary>
+public interface ICandleBuilder : IDisposable
 {
-	using System;
+	/// <summary>
+	/// The candle type.
+	/// </summary>
+	Type CandleType { get; }
 
 	/// <summary>
-	/// Интерфейс построителя свечек.
+	/// To process the new data.
 	/// </summary>
-	public interface ICandleBuilder : ICandleManagerSource
-	{
-		/// <summary>
-		/// Тип свечи.
-		/// </summary>
-		Type CandleType { get; }
-
-		/// <summary>
-		/// Источники данных.
-		/// </summary>
-		ICandleBuilderSourceList Sources { get; }
-
-		/// <summary>
-		/// Kонтейнер данных.
-		/// </summary>
-		ICandleBuilderContainer Container { get; }
-	}
+	/// <param name="subscription">Subscription.</param>
+	/// <param name="transform">The data source transformation.</param>
+	/// <returns>A new candles changes.</returns>
+	IEnumerable<CandleMessage> Process(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform);
 }

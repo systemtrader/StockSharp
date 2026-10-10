@@ -1,29 +1,23 @@
-namespace StockSharp.Messages
-{
-	using System;
-	using System.Runtime.Serialization;
+namespace StockSharp.Messages;
 
-	using StockSharp.Localization;
+/// <summary>
+/// Option types.
+/// </summary>
+[Serializable]
+[DataContract]
+public enum OptionTypes
+{
+	/// <summary>
+	/// Call.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.CallKey)]
+	Call,
 
 	/// <summary>
-	/// Типы опционов.
+	/// Put.
 	/// </summary>
-	[Serializable]
-	[DataContract]
-	public enum OptionTypes
-	{
-		/// <summary>
-		/// Кол.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str223Key)]
-		Call,
-
-		/// <summary>
-		/// Пут.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str224Key)]
-		Put,
-	}
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.PutKey)]
+	Put,
 }

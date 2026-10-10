@@ -1,28 +1,25 @@
-namespace StockSharp.Algo.Risk
+namespace StockSharp.Algo.Risk;
+
+/// <summary>
+/// Types of actions.
+/// </summary>
+public enum RiskActions
 {
-	using StockSharp.Localization;
+	/// <summary>
+	/// Close positions.
+	/// </summary>
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.ClosePositionsKey)]
+	ClosePositions,
 
 	/// <summary>
-	/// Типы действий.
+	/// Stop trading.
 	/// </summary>
-	public enum RiskActions
-	{
-		/// <summary>
-		/// Закрыть позиции.
-		/// </summary>
-		[EnumDisplayNameLoc(LocalizedStrings.Str856Key)]
-		ClosePositions,
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.StopTradingKey)]
+	StopTrading,
 
-		/// <summary>
-		/// Остановить торговлю.
-		/// </summary>
-		[EnumDisplayNameLoc(LocalizedStrings.Str857Key)]
-		StopTrading,
-
-		/// <summary>
-		/// Отменить заявки.
-		/// </summary>
-		[EnumDisplayNameLoc(LocalizedStrings.Str858Key)]
-		CancelOrders,
-	}
+	/// <summary>
+	/// Cancel orders.
+	/// </summary>
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.CancelOrdersKey)]
+	CancelOrders,
 }

@@ -1,77 +1,165 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// A message requesting current registered orders and trades.
+/// </summary>
+[DataContract]
+[Serializable]
+public class OrderStatusMessage : OrderCancelMessage, ISubscriptionMessage, ISecurityIdsMessage
 {
-	using System;
-	using System.Runtime.Serialization;
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.FromKey,
+		Description = LocalizedStrings.StartDateDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public DateTime? From { get; set; }
 
-	using Ecng.Common;
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.UntilKey,
+		Description = LocalizedStrings.ToDateDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public DateTime? To { get; set; }
 
-	using StockSharp.Localization;
+	/// <inheritdoc />
+	[DataMember]
+	public long? Skip { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public long? Count { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public FillGapsDays? FillGaps { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public bool IsSubscribe { get; set; }
 
 	/// <summary>
-	/// Сообщение, запрашивающее текущие зарегистрированные заявки и сделки.
+	/// Request incremental updates instead of full snapshots.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public class OrderStatusMessage : Message
+	[DataMember]
+	public bool IsIncremental { get; set; }
+
+	/// <summary>
+	/// User identifier for filtering data.
+	/// If set, data is filtered by this user instead of the session.
+	/// </summary>
+	[DataMember]
+	public string UserId { get; set; }
+
+	private OrderStates[] _states = [];
+
+	/// <summary>
+	/// Filter order by the specified states.
+	/// </summary>
+	[DataMember]
+	public OrderStates[] States
 	{
-		/// <summary>
-		/// Идентификатор транзакции.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.TransactionKey)]
-		[DescriptionLoc(LocalizedStrings.TransactionIdKey, true)]
-		[MainCategory]
-		public long TransactionId { get; set; }
+		get => _states;
+		set => _states = value ?? throw new ArgumentNullException(nameof(value));
+	}
 
-		/// <summary>
-		/// Идентификатор запрашиваемой заявки.
-		/// </summary>
-		[DataMember]
-		public long? OrderId { get; set; }
+	private SecurityId[] _securityIds = [];
 
-		/// <summary>
-		/// Идентификатор запрашиваемой заявки (ввиде строки, если электронная площадка не использует числовое представление идентификатора заявки).
-		/// </summary>
-		[DataMember]
-		public string OrderStringId { get; set; }
+	/// <summary>
+	/// Security identifiers for filtering.
+	/// </summary>
+	[DataMember]
+	public SecurityId[] SecurityIds
+	{
+		get => _securityIds;
+		set => _securityIds = value ?? throw new ArgumentNullException(nameof(value));
+	}
 
-		/// <summary>
-		/// Идентификатор транзакции запрашиваемой заявки.
-		/// </summary>
-		[DataMember]
-		public long? OrderTransactionId { get; set; }
+	bool ISubscriptionMessage.FilterEnabled
+		=>
+		States.Length != 0 || SecurityId != default || SecurityIds.Length != 0 ||
+		!PortfolioName.IsEmpty() || Side != null || Volume != null;
 
-		/// <summary>
-		/// Создать <see cref="OrderStatusMessage"/>.
-		/// </summary>
-		public OrderStatusMessage()
-			: base(MessageTypes.OrderStatus)
-		{
-		}
+	bool ISubscriptionMessage.SpecificItemRequest => this.HasOrderId();
 
-		/// <summary>
-		/// Создать копию объекта <see cref="OrderStatusMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			return new OrderStatusMessage
-			{
-				LocalTime = LocalTime,
-				TransactionId = TransactionId,
-				OrderId = OrderId,
-				OrderStringId = OrderStringId,
-				OrderTransactionId = OrderTransactionId
-			};
-		}
+	/// <summary>
+	/// Initializes a new instance of the <see cref="OrderStatusMessage"/>.
+	/// </summary>
+	public OrderStatusMessage()
+		: base(MessageTypes.OrderStatus)
+	{
+	}
 
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",TransId={0}".Put(TransactionId);
-		}
+	DataType IDataTypeMessage.DataType => DataType.Transactions;
+
+	/// <summary>
+	/// Copy the message into the <paramref name="destination" />.
+	/// </summary>
+	/// <param name="destination">The object, to which copied information.</param>
+	protected void CopyTo(OrderStatusMessage destination)
+	{
+		base.CopyTo(destination);
+
+		destination.From = From;
+		destination.To = To;
+		destination.Skip = Skip;
+		destination.Count = Count;
+		destination.FillGaps = FillGaps;
+		destination.IsSubscribe = IsSubscribe;
+		destination.IsIncremental = IsIncremental;
+		destination.UserId = UserId;
+		destination.States = [.. States];
+		destination.SecurityIds = [.. SecurityIds];
+	}
+
+	/// <summary>
+	/// Create a copy of <see cref="OrderStatusMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone()
+	{
+		var clone = new OrderStatusMessage();
+		CopyTo(clone);
+		return clone;
+	}
+
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		var str = base.ToString();
+
+		str += $",IsSubscribe={IsSubscribe}";
+
+		if (IsIncremental)
+			str += ",IsIncremental=True";
+
+		if (!UserId.IsEmpty())
+			str += $",UserId={UserId}";
+
+		if (From != default)
+			str += $",From={From}";
+
+		if (To != default)
+			str += $",To={To}";
+
+		if (Skip != default)
+			str += $",Skip={Skip}";
+
+		if (Count != default)
+			str += $",Count={Count}";
+
+		if (FillGaps != default)
+			str += $",Gaps={FillGaps}";
+
+		if (States.Length > 0)
+			str += $",States={States.Select(s => s.To<string>()).JoinComma()}";
+
+		if (SecurityIds.Length > 0)
+			str += $",SecurityIds={SecurityIds.Select(id => id.ToString()).JoinComma()}";
+
+		return str;
 	}
 }

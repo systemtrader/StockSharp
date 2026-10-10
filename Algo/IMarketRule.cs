@@ -1,466 +1,393 @@
-namespace StockSharp.Algo
+namespace StockSharp.Algo;
+
+/// <summary>
+/// The interface of the rule, activating action at occurrence of market condition.
+/// </summary>
+public interface IMarketRule : IDisposable
 {
-	using System;
-    
-	using StockSharp.Logging;
-
-	using Ecng.Collections;
-	using Ecng.Common;
-	using StockSharp.Localization;
+	/// <summary>
+	/// The name of the rule.
+	/// </summary>
+	string Name { get; set; }
 
 	/// <summary>
-	/// Интерфейс правила, активизирующее действие при наступлении рыночного условия.
+	/// The rules container.
 	/// </summary>
-	public interface IMarketRule : IDisposable
+	IMarketRuleContainer Container { get; set; }
+
+	/// <summary>
+	/// The level to perform this rule logging.
+	/// </summary>
+	LogLevels LogLevel { get; set; }
+
+	/// <summary>
+	/// Is the rule suspended.
+	/// </summary>
+	bool IsSuspended { get; set; }
+
+	/// <summary>
+	/// Is the rule formed.
+	/// </summary>
+	bool IsReady { get; }
+
+	/// <summary>
+	/// Is the rule currently activated.
+	/// </summary>
+	bool IsActive { get; set; }
+
+	/// <summary>
+	/// Token-rules, it is associated with (for example, for rule <see cref="MarketRuleHelper.WhenRegistered"/> the order will be a token). If rule is not associated with anything, <see langword="null" /> will be returned.
+	/// </summary>
+	object Token { get; }
+
+	/// <summary>
+	/// Rules, opposite to given rule. They are deleted automatically at activation of this rule.
+	/// </summary>
+	ISynchronizedCollection<IMarketRule> ExclusiveRules { get; }
+
+	/// <summary>
+	/// To make the rule periodical (will be called until <paramref name="canFinish" /> returns <see langword="true" />).
+	/// </summary>
+	/// <param name="canFinish">The criteria for end of periodicity.</param>
+	/// <returns>Rule.</returns>
+	IMarketRule Until(Func<bool> canFinish);
+
+	/// <summary>
+	/// To add the action, activated at occurrence of condition.
+	/// </summary>
+	/// <param name="action">Action.</param>
+	/// <returns>Rule.</returns>
+	IMarketRule Do(Action action);
+
+	/// <summary>
+	/// To add the action, activated at occurrence of condition.
+	/// </summary>
+	/// <param name="action">The action, taking a value.</param>
+	/// <returns>Rule.</returns>
+	IMarketRule Do(Action<object> action);
+
+	/// <summary>
+	/// To add the action, returning result, activated at occurrence of condition.
+	/// </summary>
+	/// <typeparam name="TResult">The type of returned result.</typeparam>
+	/// <param name="action">The action, returning a result.</param>
+	/// <returns>Rule.</returns>
+	IMarketRule Do<TResult>(Func<TResult> action);
+
+	/// <summary>
+	/// Can the rule be ended.
+	/// </summary>
+	/// <returns><see langword="true" />, if rule is not required any more. Otherwise, <see langword="false" />.</returns>
+	bool CanFinish();
+}
+
+/// <summary>
+/// The rule, activating action at market condition occurrence.
+/// </summary>
+/// <typeparam name="TToken">The type of token.</typeparam>
+/// <typeparam name="TArg">The type of accepted argument.</typeparam>
+public abstract class MarketRule<TToken, TArg> : BaseLogReceiver, IMarketRule
+{
+	private Func<TArg, object> _action = a => a;
+	private Action<object> _activatedHandler;
+	private Action<TArg> _actionVoid;
+	private Func<bool> _process;
+
+	private TArg _arg;
+
+	private Func<bool> _canFinish;
+
+	/// <summary>
+	/// Initialize <see cref="MarketRule{T1,T2}"/>.
+	/// </summary>
+	/// <param name="token">Token rules.</param>
+	protected MarketRule(TToken token)
 	{
-		/// <summary>
-		/// Имя правила.
-		/// </summary>
-		string Name { get; set; }
+		_token = token;
+		Name = GetType().Name;
 
-		/// <summary>
-		/// Контейнер правил.
-		/// </summary>
-		IMarketRuleContainer Container { get; set; }
-
-		/// <summary>
-		/// Уровень, на котором осуществлять логирование данного правила.
-		/// </summary>
-		LogLevels LogLevel { get; set; }
-
-		/// <summary>
-		/// Приостановлено ли правило.
-		/// </summary>
-		bool IsSuspended { get; set; }
-
-		/// <summary>
-		/// Сформировано ли правило.
-		/// </summary>
-		bool IsReady { get; }
-
-		/// <summary>
-		/// Активировано ли правило в данный момент.
-		/// </summary>
-		bool IsActive { get; set; }
-
-		/// <summary>
-		/// Токен правила, с которым он ассоциирован (например, для правила <see cref="MarketRuleHelper.WhenRegistered"/> токеном будет являтся заявка).
-		/// Если правильно ни с чем не ассоциировано, то будет возвращено null.
-		/// </summary>
-		object Token { get; }
-
-		/// <summary>
-		/// Правила, которые противоположны данному. Удалаются автоматически при активации данного правила.
-		/// </summary>
-		ISynchronizedCollection<IMarketRule> ExclusiveRules { get; }
-
-		/// <summary>
-		/// Сделать правило периодичным (будет вызываться до тех пор, пока <paramref name="canFinish"/> не вернет true).
-		/// </summary>
-		/// <param name="canFinish">Критерий окончания периодичности.</param>
-		/// <returns>Правило.</returns>
-		IMarketRule Until(Func<bool> canFinish);
-
-		/// <summary>
-		/// Добавить действие, активизирующееся при наступлении условия.
-		/// </summary>
-		/// <param name="action">Действие.</param>
-		/// <returns>Правило.</returns>
-		IMarketRule Do(Action action);
-
-		/// <summary>
-		/// Добавить действие, активизирующееся при наступлении условия.
-		/// </summary>
-		/// <param name="action">Действие, принимающее значение.</param>
-		/// <returns>Правило.</returns>
-		IMarketRule Do(Action<object> action);
-
-		/// <summary>
-		/// Добавить действие, возвращающее результат, активизирующееся при наступлении условия.
-		/// </summary>
-		/// <typeparam name="TResult">Тип возвращаемого результата.</typeparam>
-		/// <param name="action">Действие, возвращающее результат.</param>
-		/// <returns>Правило.</returns>
-		IMarketRule Do<TResult>(Func<TResult> action);
-
-		/// <summary>
-		/// Можно ли закончить правило.
-		/// </summary>
-		/// <returns><see langword="true"/>, если правило больше не нужно. Иначе, <see langword="false"/>.</returns>
-		bool CanFinish();
+		Until(CanFinish);
 	}
 
-	class Holder
+	/// <summary>
+	/// Can the rule be ended.
+	/// </summary>
+	/// <returns><see langword="true" />, if rule is not required any more. Otherwise, <see langword="false" />.</returns>
+	protected virtual bool CanFinish()
 	{
-		public static readonly MemoryStatisticsValue<IMarketRule> RuleStat = new MemoryStatisticsValue<IMarketRule>(LocalizedStrings.Str1088);
+		return _container is null || _container.ProcessState != ProcessStates.Started;
+	}
 
-		static Holder()
+	private bool _isSuspended;
+
+	/// <inheritdoc />
+	public virtual bool IsSuspended
+	{
+		get => _isSuspended;
+		set
 		{
-			MemoryStatistics.Instance.Values.Add(RuleStat);
+			_isSuspended = value;
+
+			_container?.AddRuleLog(LogLevels.Info, this, value ? LocalizedStrings.Suspended : LocalizedStrings.Resumed);
+		}
+	}
+
+	private readonly TToken _token;
+	object IMarketRule.Token => _token;
+
+	private readonly SynchronizedSet<IMarketRule> _exclusiveRules = [];
+
+	/// <inheritdoc />
+	public virtual ISynchronizedCollection<IMarketRule> ExclusiveRules => _exclusiveRules;
+
+	private IMarketRuleContainer _container;
+
+	/// <inheritdoc />
+	public IMarketRuleContainer Container
+	{
+		get => _container;
+		set
+		{
+			if (_container != null)
+				throw new ArgumentException(LocalizedStrings.RuleAlreadyExistInContainer.Put(this, _container));
+
+			_container = value ?? throw new ArgumentNullException(nameof(value));
 		}
 	}
 
 	/// <summary>
-	/// Правило, активизирующее действие при наступлении рыночного условия.
+	/// To make the rule periodical (will be called until <paramref name="canFinish" /> returns <see langword="true" />).
 	/// </summary>
-	/// <typeparam name="TToken">Тип токена.</typeparam>
-	/// <typeparam name="TArg">Тип принимаемого аргумента.</typeparam>
-	public abstract class MarketRule<TToken, TArg> : Disposable, IMarketRule
+	/// <param name="canFinish">The criteria for end of periodicity.</param>
+	/// <returns>Rule.</returns>
+	public MarketRule<TToken, TArg> Until(Func<bool> canFinish)
 	{
-		private Func<TArg, object> _action = a => a;
-		private Action<object> _activatedHandler;
-		private Action<TArg> _actionVoid;
-		private Func<bool> _process;
+		_canFinish = canFinish ?? throw new ArgumentNullException(nameof(canFinish));
+		return this;
+	}
 
-		private TArg _arg;
+	/// <summary>
+	/// To add the action, activated at occurrence of condition.
+	/// </summary>
+	/// <param name="action">Action.</param>
+	/// <returns>Rule.</returns>
+	public MarketRule<TToken, TArg> Do(Action<TArg> action)
+	{
+		//return Do((r, a) => action(a));
 
-		private Func<bool> _canFinish;
+		_process = ProcessRuleVoid;
+		_actionVoid = action ?? throw new ArgumentNullException(nameof(action));
 
-		/// <summary>
-		/// Инициализировать <see cref="MarketRule{TToken, TArg}"/>.
-		/// </summary>
-		/// <param name="token">Токен правила.</param>
-		protected MarketRule(TToken token)
+		return this;
+	}
+
+	/// <summary>
+	/// To add the action, activated at occurrence of condition.
+	/// </summary>
+	/// <param name="action">Action.</param>
+	/// <returns>Rule.</returns>
+	public MarketRule<TToken, TArg> Do(Action<MarketRule<TToken, TArg>, TArg> action)
+	{
+		if (action == null)
+			throw new ArgumentNullException(nameof(action));
+
+		return Do<object>((r, a) =>
 		{
-			_token = token;
-			Name = GetType().Name;
+			action(this, a);
+			return null;
+		});
+	}
 
-			Until(CanFinish);
+	/// <summary>
+	/// To add the action, returning result, activated at occurrence of condition.
+	/// </summary>
+	/// <typeparam name="TResult">The type of returned result.</typeparam>
+	/// <param name="action">The action, returning a result.</param>
+	/// <returns>Rule.</returns>
+	public MarketRule<TToken, TArg> Do<TResult>(Func<TArg, TResult> action)
+	{
+		if (action == null)
+			throw new ArgumentNullException(nameof(action));
 
-			Holder.RuleStat.Add(this);
-		}
+		return Do((r, a) => action(a));
+	}
 
-		/// <summary>
-		/// Можно ли закончить правило.
-		/// </summary>
-		/// <returns><see langword="true"/>, если правило больше не нужно. Иначе, <see langword="false"/>.</returns>
-		protected virtual bool CanFinish()
-		{
-			return ReferenceEquals(_container, null) || _container.ProcessState != ProcessStates.Started;
-		}
+	/// <summary>
+	/// To add the action, returning result, activated at occurrence of condition.
+	/// </summary>
+	/// <typeparam name="TResult">The type of returned result.</typeparam>
+	/// <param name="action">The action, returning a result.</param>
+	/// <returns>Rule.</returns>
+	public MarketRule<TToken, TArg> Do<TResult>(Func<MarketRule<TToken, TArg>, TArg, TResult> action)
+	{
+		if (action == null)
+			throw new ArgumentNullException(nameof(action));
 
-		private string _name;
+		_action = a => action(this, a);
+		_process = ProcessRule;
 
-		/// <summary>
-		/// Имя правила.
-		/// </summary>
-		public string Name
-		{
-			get { return _name; }
-			set
-			{
-				if (value.IsEmpty())
-					throw new ArgumentNullException("value");
+		return this;
+	}
 
-				_name = value;
-			}
-		}
+	/// <summary>
+	/// To add the action, activated at occurrence of condition.
+	/// </summary>
+	/// <param name="action">Action.</param>
+	/// <returns>Rule.</returns>
+	public MarketRule<TToken, TArg> Do(Action action)
+	{
+		if (action == null)
+			throw new ArgumentNullException(nameof(action));
 
-		private LogLevels _logLevel = LogLevels.Inherit;
+		return Do(a => action());
+	}
 
-		/// <summary>
-		/// Уровень, на котором осуществлять логирование данного правила. По-умолчанию, <see cref="LogLevels.Inherit"/>.
-		/// </summary>
-		public virtual LogLevels LogLevel
-		{
-			get { return _logLevel; } 
-			set { _logLevel = value; } 
-		}
+	/// <summary>
+	/// To add the action, returning result, activated at occurrence of condition.
+	/// </summary>
+	/// <typeparam name="TResult">The type of returned result.</typeparam>
+	/// <param name="action">The action, returning a result.</param>
+	/// <returns>Rule.</returns>
+	public MarketRule<TToken, TArg> Do<TResult>(Func<TResult> action)
+	{
+		if (action == null)
+			throw new ArgumentNullException(nameof(action));
 
-		private bool _isSuspended;
+		return Do(a => action());
+	}
 
-		/// <summary>
-		/// Приостановлено ли правило.
-		/// </summary>
-		public virtual bool IsSuspended
-		{
-			get { return _isSuspended; }
-			set
-			{
-				_isSuspended = value;
+	/// <summary>
+	/// To add the processor, which will be called at action activation.
+	/// </summary>
+	/// <param name="handler">The handler.</param>
+	/// <returns>Rule.</returns>
+	public MarketRule<TToken, TArg> Activated(Action handler)
+	{
+		if (handler == null)
+			throw new ArgumentNullException(nameof(handler));
 
-				if (_container != null)
-					_container.AddRuleLog(LogLevels.Info, this, value ? LocalizedStrings.Str1089 : LocalizedStrings.Str1090);
-			}
-		}
+		return Activated<object>(arg => handler());
+	}
 
-		private readonly TToken _token;
+	/// <summary>
+	/// To add the processor, accepting argument from <see cref="Do{TResult}(Func{TResult})"/>, which will be called at action activation.
+	/// </summary>
+	/// <typeparam name="TResult">The type of result, returned from the processor.</typeparam>
+	/// <param name="handler">The handler.</param>
+	/// <returns>Rule.</returns>
+	public MarketRule<TToken, TArg> Activated<TResult>(Action<TResult> handler)
+	{
+		if (handler == null)
+			throw new ArgumentNullException(nameof(handler));
 
-		/// <summary>
-		/// Токен правила, с которым он ассоциирован (например, для правила <see cref="MarketRuleHelper.WhenRegistered"/> токеном будет являтся заявка).
-		/// Если правильно ни с чем не ассоциировано, то будет возвращено null.
-		/// </summary>
-		public virtual object Token
-		{
-			get { return _token; }
-		}
+		_activatedHandler = arg => handler((TResult)arg);
+		return this;
+	}
 
-		private readonly SynchronizedSet<IMarketRule> _exclusiveRules = new SynchronizedSet<IMarketRule>();
+	/// <summary>
+	/// To activate the rule.
+	/// </summary>
+	protected void Activate()
+	{
+		Activate(default);
+	}
 
-		/// <summary>
-		/// Правила, которые противоположны данному. Удалаются автоматически при активации данного правила.
-		/// </summary>
-		public virtual ISynchronizedCollection<IMarketRule> ExclusiveRules
-		{
-			get { return _exclusiveRules; }
-		}
+	/// <summary>
+	/// To activate the rule.
+	/// </summary>
+	/// <param name="arg">The value, which will be sent to processor, registered through <see cref="Do(Action{TArg})"/>.</param>
+	protected virtual void Activate(TArg arg)
+	{
+		CheckOnReady();
 
-		private IMarketRuleContainer _container;
+		// Asked before the container: a rule a stopping container turned away is suspended and simply
+		// does not act, while a rule nobody ever applied is a mistake worth reporting.
+		if (IsSuspended)
+			return;
 
-		/// <summary>
-		/// Контейнер правил.
-		/// </summary>
-		public virtual IMarketRuleContainer Container
-		{
-			get { return _container; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
+		if (Container is null)
+			throw new InvalidOperationException($"Rule '{Name}' no container.");
 
-				if (Container != null)
-					throw new ArgumentException(LocalizedStrings.Str1091Params.Put(Name, Container));
+		_arg = arg;
+		_container.ActivateRule(this, _process);
+	}
 
-				_container = value;
+	private bool ProcessRule()
+	{
+		var result = _action(_arg);
 
-				//_container.AddRuleLog(LogLevels.Info, this, "Добавлено.");
-			}
-		}
+		_activatedHandler?.Invoke(result);
 
-		/// <summary>
-		/// Сделать правило периодичным (будет вызываться до тех пор, пока <paramref name="canFinish"/> не вернет true).
-		/// </summary>
-		/// <param name="canFinish">Критерий окончания периодичности.</param>
-		/// <returns>Правило.</returns>
-		public MarketRule<TToken, TArg> Until(Func<bool> canFinish)
-		{
-			if (canFinish == null)
-				throw new ArgumentNullException("canFinish");
+		return _canFinish();
+	}
 
-			_canFinish = canFinish;
-			return this;
-		}
+	private bool ProcessRuleVoid()
+	{
+		_actionVoid(_arg);
 
-		/// <summary>
-		/// Добавить действие, активизирующееся при наступлении условия.
-		/// </summary>
-		/// <param name="action">Действие.</param>
-		/// <returns>Правило.</returns>
-		public MarketRule<TToken, TArg> Do(Action<TArg> action)
-		{
-			if (action == null)
-				throw new ArgumentNullException("action");
+		_activatedHandler?.Invoke(null);
 
-			//return Do((r, a) => action(a));
+		return _canFinish();
+	}
 
-			_process = ProcessRuleVoid;
-			_actionVoid = action;
+	/// <inheritdoc />
+	public override string ToString() => $"{Name} (0x{GetHashCode():X})";
 
-			return this;
-		}
+	/// <summary>
+	/// Release resources.
+	/// </summary>
+	protected override void DisposeManaged()
+	{
+		_container = null;
 
-		/// <summary>
-		/// Добавить действие, активизирующееся при наступлении условия.
-		/// </summary>
-		/// <param name="action">Действие.</param>
-		/// <returns>Правило.</returns>
-		public MarketRule<TToken, TArg> Do(Action<MarketRule<TToken, TArg>, TArg> action)
-		{
-			if (action == null)
-				throw new ArgumentNullException("action");
+		base.DisposeManaged();
+	}
 
-			return Do<object>((r, a) =>
-			{
-				action(this, a);
-				return null;
-			});
-		}
+	bool IMarketRule.CanFinish()
+	{
+		if (IsDisposed)
+			return true;
 
-		/// <summary>
-		/// Добавить действие, возвращающее результат, активизирующееся при наступлении условия.
-		/// </summary>
-		/// <typeparam name="TResult">Тип возвращаемого результата.</typeparam>
-		/// <param name="action">Действие, возвращающее результат.</param>
-		/// <returns>Правило.</returns>
-		public MarketRule<TToken, TArg> Do<TResult>(Func<TArg, TResult> action)
-		{
-			if (action == null)
-				throw new ArgumentNullException("action");
+		return !IsActive && IsReady && _canFinish();
+	}
 
-			return Do((r, a) => action(a));
-		}
+	private void CheckOnReady()
+	{
+		if (IsDisposed)
+			throw new ObjectDisposedException(Name);
+	}
 
-		/// <summary>
-		/// Добавить действие, возвращающее результат, активизирующееся при наступлении условия.
-		/// </summary>
-		/// <typeparam name="TResult">Тип возвращаемого результата.</typeparam>
-		/// <param name="action">Действие, возвращающее результат.</param>
-		/// <returns>Правило.</returns>
-		public MarketRule<TToken, TArg> Do<TResult>(Func<MarketRule<TToken, TArg>, TArg, TResult> action)
-		{
-			if (action == null)
-				throw new ArgumentNullException("action");
+	/// <inheritdoc />
+	public bool IsReady => !IsDisposed && _container is not null;
 
-			_action = a => action(this, a);
-			_process = ProcessRule;
+	/// <inheritdoc />
+	public bool IsActive { get; set; }
 
-			return this;
-		}
+	IMarketRule IMarketRule.Until(Func<bool> canFinish)
+	{
+		CheckOnReady();
+		return Until(canFinish);
+	}
 
-		/// <summary>
-		/// Добавить действие, активизирующееся при наступлении условия.
-		/// </summary>
-		/// <param name="action">Действие.</param>
-		/// <returns>Правило.</returns>
-		public MarketRule<TToken, TArg> Do(Action action)
-		{
-			if (action == null)
-				throw new ArgumentNullException("action");
+	IMarketRule IMarketRule.Do(Action action)
+	{
+		CheckOnReady();
+		return Do(action);
+	}
 
-			return Do(a => action());
-		}
+	IMarketRule IMarketRule.Do(Action<object> action)
+	{
+		if (action == null)
+			throw new ArgumentNullException(nameof(action));
 
-		/// <summary>
-		/// Добавить действие, возвращающее результат, активизирующееся при наступлении условия.
-		/// </summary>
-		/// <typeparam name="TResult">Тип возвращаемого результата.</typeparam>
-		/// <param name="action">Действие, возвращающее результат.</param>
-		/// <returns>Правило.</returns>
-		public MarketRule<TToken, TArg> Do<TResult>(Func<TResult> action)
-		{
-			if (action == null)
-				throw new ArgumentNullException("action");
+		CheckOnReady();
 
-			return Do(a => action());
-		}
+		return Do(arg => action(arg));
+	}
 
-		/// <summary>
-		/// Добавить обработчик, который будет вызван при активации действия.
-		/// </summary>
-		/// <param name="handler">Обработчик.</param>
-		/// <returns>Правило.</returns>
-		public MarketRule<TToken, TArg> Activated(Action handler)
-		{
-			if (handler == null)
-				throw new ArgumentNullException("handler");
-
-			return Activated<object>(arg => handler());
-		}
-
-		/// <summary>
-		/// Добавить обработчик, принимающий аргумент из <see cref="Do{TResult}(System.Func{TResult})"/>, который будет вызван при активации действия.
-		/// </summary>
-		/// <typeparam name="TResult">Тип возвращаемого результата из обработчика правила.</typeparam>
-		/// <param name="handler">Обработчик.</param>
-		/// <returns>Правило.</returns>
-		public MarketRule<TToken, TArg> Activated<TResult>(Action<TResult> handler)
-		{
-			if (handler == null)
-				throw new ArgumentNullException("handler");
-
-			_activatedHandler = arg => handler((TResult)arg);
-			return this;
-		}
-
-		/// <summary>
-		/// Активировать правило.
-		/// </summary>
-		protected void Activate()
-		{
-			Activate(default(TArg));
-		}
-
-		/// <summary>
-		/// Активировать правило.
-		/// </summary>
-		/// <param name="arg">Значение, которое будет передано в обработчик, зарегистрированный через <see cref="Do(System.Action{TArg})"/>.</param>
-		protected virtual void Activate(TArg arg)
-		{
-			if (!IsReady || IsSuspended)
-				return;
-
-			_arg = arg;
-			_container.ActivateRule(this, _process);
-		}
-
-		private bool ProcessRule()
-		{
-			var result = _action(_arg);
-
-			var ah = _activatedHandler;
-			if (ah != null)
-				ah(result);
-
-			return _canFinish();
-		}
-
-		private bool ProcessRuleVoid()
-		{
-			_actionVoid(_arg);
-			return _canFinish();
-		}
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return "{0} (0x{1:X})".Put(Name, GetHashCode());
-		}
-
-		/// <summary>
-		/// Освободить занятые ресурсы.
-		/// </summary>
-		protected override void DisposeManaged()
-		{
-			_container.AddRuleLog(LogLevels.Debug, this, LocalizedStrings.Str1092);
-			_container = null;
-
-			base.DisposeManaged();
-
-			Holder.RuleStat.Remove(this);
-		}
-
-		bool IMarketRule.CanFinish()
-		{
-			return !IsActive && IsReady && _canFinish();
-		}
-
-		/// <summary>
-		/// Сформировано ли правило.
-		/// </summary>
-		public bool IsReady
-		{
-			get { return !IsDisposed && !ReferenceEquals(_container, null); }
-		}
-
-		/// <summary>
-		/// Активировано ли правило в данный момент.
-		/// </summary>
-		public bool IsActive { get; set; }
-
-		IMarketRule IMarketRule.Until(Func<bool> canFinish)
-		{
-			return Until(canFinish);
-		}
-
-		IMarketRule IMarketRule.Do(Action action)
-		{
-			return Do(action);
-		}
-
-		IMarketRule IMarketRule.Do(Action<object> action)
-		{
-			if (action == null)
-				throw new ArgumentNullException("action");
-
-			return Do(arg => action(arg));
-		}
-
-		IMarketRule IMarketRule.Do<TResult>(Func<TResult> action)
-		{
-			return Do(action);
-		}
+	IMarketRule IMarketRule.Do<TResult>(Func<TResult> action)
+	{
+		CheckOnReady();
+		return Do(action);
 	}
 }

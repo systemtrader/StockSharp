@@ -1,27 +1,31 @@
-﻿namespace StockSharp.Algo.Slippage
+namespace StockSharp.Algo.Slippage;
+
+/// <summary>
+/// The interface for the slippage calculation manager.
+/// </summary>
+public interface ISlippageManager : IAsyncPersistable
 {
-	using StockSharp.Messages;
+	/// <summary>
+	/// Create a copy of the manager.
+	/// </summary>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Copy.</returns>
+	ValueTask<ISlippageManager> CloneAsync(CancellationToken cancellationToken);
 
 	/// <summary>
-	/// Интерфейс для менеджера расчета проскальзывания.
+	/// Total slippage.
 	/// </summary>
-	public interface ISlippageManager
-	{
-		/// <summary>
-		/// Суммарное значение проскальзывания.
-		/// </summary>
-		decimal Slippage { get; }
+	decimal Slippage { get; }
 
-		/// <summary>
-		/// Сбросить состояние.
-		/// </summary>
-		void Reset();
+	/// <summary>
+	/// To reset the state.
+	/// </summary>
+	void Reset();
 
-		/// <summary>
-		/// Рассчитать проскальзывание.
-		/// </summary>
-		/// <param name="message">Сообщение.</param>
-		/// <returns>Проскальзывание. Если проскальзывание рассчитать невозможно, то будет возвращено <see langword="null"/>.</returns>
-		decimal? ProcessMessage(Message message);
-	}
+	/// <summary>
+	/// To calculate slippage.
+	/// </summary>
+	/// <param name="message">Message.</param>
+	/// <returns>The slippage. If it is impossible to calculate slippage, <see langword="null" /> will be returned.</returns>
+	decimal? ProcessMessage(Message message);
 }

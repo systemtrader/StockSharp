@@ -1,151 +1,126 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// Portfolio states.
+/// </summary>
+[DataContract]
+[Serializable]
+public enum PortfolioStates
 {
-	using System;
-	using System.Runtime.Serialization;
+	/// <summary>
+	/// Active.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.ActiveKey)]
+	Active,
+	
+	/// <summary>
+	/// Blocked.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.BlockedKey)]
+	Blocked,
+}
 
-	using Ecng.Common;
-
-	using StockSharp.Localization;
+/// <summary>
+/// The message contains information about portfolio.
+/// </summary>
+[DataContract]
+[Serializable]
+public class PortfolioMessage : BaseSubscriptionIdMessage<PortfolioMessage>, IPortfolioNameMessage, IClientCodeMessage, IOwnerMessage
+{
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.NameKey,
+		Description = LocalizedStrings.PortfolioNameKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string PortfolioName { get; set; }
 
 	/// <summary>
-	/// Состояния портфеля.
+	/// Portfolio currency.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public enum PortfolioStates
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CurrencyKey,
+		Description = LocalizedStrings.PortfolioCurrencyKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public CurrencyTypes? Currency { get; set; }
+
+	/// <summary>
+	/// Electronic board code.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.BoardKey,
+		Description = LocalizedStrings.BoardCodeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string BoardCode { get; set; }
+
+	/// <summary>
+	/// Client code assigned by the broker.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ClientCodeKey,
+		Description = LocalizedStrings.ClientCodeDescKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string ClientCode { get; set; }
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="PortfolioMessage"/>.
+	/// </summary>
+	public PortfolioMessage()
+		: base(MessageTypes.Portfolio)
 	{
-		/// <summary>
-		/// Активен.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str248Key)]
-		Active,
-		
-		/// <summary>
-		/// Заблокирован.
-		/// </summary>
-		[EnumMember]
-		[EnumDisplayNameLoc(LocalizedStrings.Str249Key)]
-		Blocked,
 	}
 
 	/// <summary>
-	/// Сообщение, содержащее данные о портфеле.
+	/// Initialize <see cref="PortfolioMessage"/>.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public class PortfolioMessage : Message
+	/// <param name="type">Message type.</param>
+	protected PortfolioMessage(MessageTypes type)
+		: base(type)
 	{
-		/// <summary>
-		/// Кодовое название портфеля.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.NameKey)]
-		[DescriptionLoc(LocalizedStrings.Str247Key)]
-		[MainCategory]
-		public string PortfolioName { get; set; }
+	}
 
-		/// <summary>
-		/// Валюта портфеля.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str250Key)]
-		[DescriptionLoc(LocalizedStrings.Str251Key)]
-		[MainCategory]
-		public CurrencyTypes? Currency { get; set; }
+	/// <inheritdoc />
+	public override DataType DataType => PortfolioName.Portfolio();
 
-		/// <summary>
-		/// Код электронной площадки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.BoardKey)]
-		[DescriptionLoc(LocalizedStrings.BoardCodeKey)]
-		[MainCategory]
-		public string BoardCode { get; set; }
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		var str = base.ToString() + $",Name={PortfolioName}";
 
-		/// <summary>
-		/// Состояние портфеля.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.StateKey)]
-		[DescriptionLoc(LocalizedStrings.Str252Key)]
-		[MainCategory]
-		public PortfolioStates? State { get; set; }
+		if (Currency != default)
+			str += $",Curr={Currency}";
 
-		/// <summary>
-		/// Идентификатор первоначального сообщения <see cref="PortfolioMessage.TransactionId"/>,
-		/// для которого данное сообщение является ответом.
-		/// </summary>
-		[DataMember]
-		public long OriginalTransactionId { get; set; }
+		if (!BoardCode.IsEmpty())
+			str += $",Board={BoardCode}";
 
-		/// <summary>
-		/// Идентификатор транзакции подписки или отписки на изменения портфеля.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.TransactionKey)]
-		[DescriptionLoc(LocalizedStrings.TransactionIdKey, true)]
-		[MainCategory]
-		public long TransactionId { get; set; }
+		return str;
+	}
 
-		/// <summary>
-		/// Является ли сообщение подпиской на изменения портфеля.
-		/// </summary>
-		[DataMember]
-		public bool IsSubscribe { get; set; }
+	/// <inheritdoc />
+	public long OwnerUserId { get; set; }
 
-		/// <summary>
-		/// Создать <see cref="PortfolioMessage"/>.
-		/// </summary>
-		public PortfolioMessage()
-			: base(MessageTypes.Portfolio)
-		{
-		}
+	/// <inheritdoc />
+	public long OwnerPortfolioId { get; set; }
 
-		/// <summary>
-		/// Инициализировать <see cref="PortfolioMessage"/>.
-		/// </summary>
-		/// <param name="type">Тип сообщения.</param>
-		protected PortfolioMessage(MessageTypes type)
-			: base(type)
-		{
-		}
+	/// <inheritdoc />
+	public override void CopyTo(PortfolioMessage destination)
+	{
+		base.CopyTo(destination);
 
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",Name={0}".Put(PortfolioName);
-		}
-
-		/// <summary>
-		/// Создать копию объекта <see cref="PortfolioMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			return CopyTo(new PortfolioMessage());
-		}
-
-		/// <summary>
-		/// Скопировать данные сообщения в <paramref name="destination"/>.
-		/// </summary>
-		/// <param name="destination">Объект, в который копируется информация.</param>
-		protected PortfolioMessage CopyTo(PortfolioMessage destination)
-		{
-			destination.PortfolioName = PortfolioName;
-			destination.Currency = Currency;
-			destination.BoardCode = BoardCode;
-			destination.OriginalTransactionId = OriginalTransactionId;
-			destination.IsSubscribe = IsSubscribe;
-			destination.State = State;
-			destination.TransactionId = TransactionId;
-
-			this.CopyExtensionInfo(destination);
-
-			return destination;
-		}
+		destination.PortfolioName = PortfolioName;
+		destination.Currency = Currency;
+		destination.BoardCode = BoardCode;
+		destination.ClientCode = ClientCode;
+		destination.OwnerUserId = OwnerUserId;
+		destination.OwnerPortfolioId = OwnerPortfolioId;
 	}
 }

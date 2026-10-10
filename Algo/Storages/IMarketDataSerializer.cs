@@ -1,68 +1,57 @@
-namespace StockSharp.Algo.Storages
+namespace StockSharp.Algo.Storages;
+
+/// <summary>
+/// The serializer.
+/// </summary>
+public interface IMarketDataSerializer
 {
-	using System;
-	using System.Collections;
-	using System.Collections.Generic;
-	using System.IO;
-
-	using Ecng.Collections;
+	/// <summary>
+	/// Storage format.
+	/// </summary>
+	StorageFormats Format { get; }
 
 	/// <summary>
-	/// Сериализатор.
+	/// Time precision.
 	/// </summary>
-	public interface IMarketDataSerializer
-	{
-		/// <summary>
-		/// Создать пустую мета-информацию.
-		/// </summary>
-		/// <param name="date">Дата.</param>
-		/// <returns>Мета-информация о данных за один день.</returns>
-		IMarketDataMetaInfo CreateMetaInfo(DateTime date);
-
-		/// <summary>
-		/// Преобразовать данные в поток байтов.
-		/// </summary>
-		/// <param name="data">Данные.</param>
-		/// <param name="metaInfo">Мета-информация о данных за один день.</param>
-		/// <returns>Поток байтов.</returns>
-		byte[] Serialize(IEnumerable data, IMarketDataMetaInfo metaInfo);
-
-		/// <summary>
-		/// Загрузить данные из потока.
-		/// </summary>
-		/// <param name="stream">Потока.</param>
-		/// <param name="metaInfo">Мета-информация о данных за один день.</param>
-		/// <returns>Данные.</returns>
-		IEnumerableEx Deserialize(Stream stream, IMarketDataMetaInfo metaInfo);
-	}
+	TimeSpan TimePrecision { get; }
 
 	/// <summary>
-	/// Сериализатор.
+	/// To create empty meta-information.
 	/// </summary>
-	/// <typeparam name="TData">Тип данных.</typeparam>
-	public interface IMarketDataSerializer<TData> : IMarketDataSerializer
-	{
-		/// <summary>
-		/// Преобразовать данные в поток байтов.
-		/// </summary>
-		/// <param name="data">Данные.</param>
-		/// <param name="metaInfo">Мета-информация о данных за один день.</param>
-		/// <returns>Поток байт.</returns>
-		byte[] Serialize(IEnumerable<TData> data, IMarketDataMetaInfo metaInfo);
+	/// <param name="date">Date.</param>
+	/// <returns>Meta-information on data for one day.</returns>
+	IMarketDataMetaInfo CreateMetaInfo(DateTime date);
 
-		/// <summary>
-		/// Загрузить данные из потока.
-		/// </summary>
-		/// <param name="stream">Поток.</param>
-		/// <param name="metaInfo">Мета-информация о данных за один день.</param>
-		/// <returns>Данные.</returns>
-		new IEnumerableEx<TData> Deserialize(Stream stream, IMarketDataMetaInfo metaInfo);
+	/// <summary>
+	/// Save data into stream.
+	/// </summary>
+	/// <param name="stream">Data stream.</param>
+	/// <param name="data">Data.</param>
+	/// <param name="metaInfo">Meta-information on data for one day.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	ValueTask SerializeAsync(Stream stream, IEnumerable data, IMarketDataMetaInfo metaInfo, CancellationToken cancellationToken);
+}
 
-		/// <summary>
-		/// Загрузить данные из потока.
-		/// </summary>
-		/// <param name="reader">Считыватель данных.</param>
-		/// <returns>Данные.</returns>
-		IEnumerableEx<TData> Deserialize(IDataStorageReader<TData> reader);
-	}
+/// <summary>
+/// The serializer.
+/// </summary>
+/// <typeparam name="TData">Data type.</typeparam>
+public interface IMarketDataSerializer<TData> : IMarketDataSerializer
+{
+	/// <summary>
+	/// Save data into stream.
+	/// </summary>
+	/// <param name="stream">Data stream.</param>
+	/// <param name="data">Data.</param>
+	/// <param name="metaInfo">Meta-information on data for one day.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	ValueTask SerializeAsync(Stream stream, IEnumerable<TData> data, IMarketDataMetaInfo metaInfo, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// To load data from the stream.
+	/// </summary>
+	/// <param name="stream">The stream.</param>
+	/// <param name="metaInfo">Meta-information on data for one day.</param>
+	/// <returns>Data.</returns>
+	IAsyncEnumerable<TData> DeserializeAsync(Stream stream, IMarketDataMetaInfo metaInfo);
 }

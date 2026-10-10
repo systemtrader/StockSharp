@@ -1,146 +1,127 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// The message contains information about the electronic board.
+/// </summary>
+[DataContract]
+[Serializable]
+[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.BoardsKey)]
+public class BoardMessage : BaseSubscriptionIdMessage<BoardMessage>
 {
-	using System;
-	using System.Runtime.Serialization;
-
-	using Ecng.Common;
-
-	using StockSharp.Localization;
+	/// <summary>
+	/// Exchange code, which owns the board. Maybe be the same <see cref="Code"/>.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ExchangeInfoKey,
+		Description = LocalizedStrings.BoardExchangeCodeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string ExchangeCode { get; set; }
 
 	/// <summary>
-	/// Сообщение, содержащее данные об электронной площадке.
+	/// Board code.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public class BoardMessage : Message
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CodeKey,
+		Description = LocalizedStrings.BoardCodeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string Code { get; set; }
+
+	/// <summary>
+	/// Securities expiration times.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ExpiryDateKey,
+		Description = LocalizedStrings.SecExpirationTimeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public TimeSpan ExpiryTime { get; set; }
+
+	private WorkingTime _workingTime = new();
+
+	/// <summary>
+	/// Board working hours.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.WorkingTimeKey,
+		Description = LocalizedStrings.WorkingHoursKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public WorkingTime WorkingTime
 	{
-		/// <summary>
-		/// Код биржи, которой принадлежит прощадка. Может совпадать с <see cref="Code"/>, если площадка и биржа является одним целым.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.StockExchangeKey)]
-		[DescriptionLoc(LocalizedStrings.Str56Key)]
-		[MainCategory]
-		public string ExchangeCode { get; set; }
-
-		/// <summary>
-		/// Код площадки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.CodeKey)]
-		[DescriptionLoc(LocalizedStrings.BoardCodeKey)]
-		[MainCategory]
-		public string Code { get; set; }
-
-		/// <summary>
-		/// Поддерживается ли перерегистрация заявок через <see cref="OrderReplaceMessage"/> в виде одной транзакции.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.ReregisteringKey)]
-		[DescriptionLoc(LocalizedStrings.Str60Key)]
-		[MainCategory]
-		public bool IsSupportAtomicReRegister { get; set; }
-
-		/// <summary>
-		/// Поддерживается ли рыночный тип заявок <see cref="OrderTypes.Market"/>.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.MarketOrdersKey)]
-		[DescriptionLoc(LocalizedStrings.MarketOrdersSupportedKey)]
-		[MainCategory]
-		public bool IsSupportMarketOrders { get; set; }
-
-		/// <summary>
-		/// Время экспирации инструментов.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.ExpiryDateKey)]
-		[DescriptionLoc(LocalizedStrings.Str64Key)]
-		[MainCategory]
-		public TimeSpan ExpiryTime { get; set; }
-
-		private WorkingTime _workingTime = new WorkingTime();
-
-		/// <summary>
-		/// Время работы площадки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.WorkingTimeKey)]
-		[DescriptionLoc(LocalizedStrings.WorkingHoursKey)]
-		[MainCategory]
-		public WorkingTime WorkingTime
+		get => _workingTime;
+		set
 		{
-			get { return _workingTime; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
+			if (value == null)
+				throw new ArgumentNullException(nameof(value));
 
-				if (WorkingTime == value)
-					return;
+			if (WorkingTime == value)
+				return;
 
-				_workingTime = value;
-			}
+			_workingTime = value;
 		}
+	}
 
-		[field: NonSerialized]
-		private TimeZoneInfo _timeZoneInfo = TimeZoneInfo.Utc;
+	[field: NonSerialized]
+	private TimeZoneInfo _timeZone = TimeZoneInfo.Utc;
 
-		/// <summary>
-		/// Информация о временной зоне, где находится биржа.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.TimeZoneKey)]
-		[DescriptionLoc(LocalizedStrings.Str68Key)]
-		[MainCategory]
-		public TimeZoneInfo TimeZoneInfo
+	/// <summary>
+	/// Information about the time zone where the exchange is located.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TimeZoneKey,
+		Description = LocalizedStrings.BoardTimeZoneKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	[XmlIgnore]
+	//[Ecng.Serialization.TimeZoneInfo]
+	public TimeZoneInfo TimeZone
+	{
+		get => _timeZone;
+		set
 		{
-			get { return _timeZoneInfo; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
+			if (value == null)
+				throw new ArgumentNullException(nameof(value));
 
-				if (TimeZoneInfo == value)
-					return;
+			if (TimeZone == value)
+				return;
 
-				_timeZoneInfo = value;
-			}
+			_timeZone = value;
 		}
+	}
 
-		/// <summary>
-		/// Создать <see cref="BoardMessage"/>.
-		/// </summary>
-		public BoardMessage()
-			: base(MessageTypes.Board)
-		{
-		}
+	/// <inheritdoc />
+	public override DataType DataType => DataType.Board;
 
-		/// <summary>
-		/// Создать копию объекта <see cref="BoardMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			return new BoardMessage
-			{
-				Code = Code,
-				ExchangeCode = ExchangeCode,
-				ExpiryTime = ExpiryTime,
-				IsSupportAtomicReRegister = IsSupportAtomicReRegister,
-				IsSupportMarketOrders = IsSupportMarketOrders,
-				WorkingTime = WorkingTime.Clone(),
-				TimeZoneInfo = TimeZoneInfo,
-			};
-		}
+	/// <summary>
+	/// Initializes a new instance of the <see cref="BoardMessage"/>.
+	/// </summary>
+	public BoardMessage()
+		: base(MessageTypes.Board)
+	{
+	}
 
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",Code={0},Ex={1}".Put(Code, ExchangeCode);
-		}
+	/// <inheritdoc />
+	public override void CopyTo(BoardMessage destination)
+	{
+		base.CopyTo(destination);
+
+		destination.Code = Code;
+		destination.ExchangeCode = ExchangeCode;
+		destination.ExpiryTime = ExpiryTime;
+		destination.WorkingTime = WorkingTime.Clone();
+		destination.TimeZone = TimeZone;
+	}
+
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		return base.ToString() + $",Code={Code},Ex={ExchangeCode}";
 	}
 }

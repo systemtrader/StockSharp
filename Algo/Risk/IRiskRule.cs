@@ -1,34 +1,29 @@
-﻿namespace StockSharp.Algo.Risk
-{
-	using Ecng.Serialization;
+namespace StockSharp.Algo.Risk;
 
-	using StockSharp.Messages;
+/// <summary>
+/// The interface, describing risk-rule.
+/// </summary>
+public interface IRiskRule : IAsyncPersistable
+{
+	/// <summary>
+	/// Header.
+	/// </summary>
+	string Title { get; }
 
 	/// <summary>
-	/// Интерфейс, описывающий риск-правило.
+	/// Action.
 	/// </summary>
-	public interface IRiskRule : IPersistable
-	{
-		/// <summary>
-		/// Заголовок.
-		/// </summary>
-		string Title { get; }
+	RiskActions Action { get; set; }
 
-		/// <summary>
-		/// Действие.
-		/// </summary>
-		RiskActions Action { get; set; }
+	/// <summary>
+	/// To reset the state.
+	/// </summary>
+	void Reset();
 
-		/// <summary>
-		/// Сбросить состояние.
-		/// </summary>
-		void Reset();
-
-		/// <summary>
-		/// Обработать торговое сообщение.
-		/// </summary>
-		/// <param name="message">Торговое сообщение.</param>
-		/// <returns><see langword="true"/>, если правило активировалось, иначе, <see langword="false"/>.</returns>
-		bool ProcessMessage(Message message);
-	}
+	/// <summary>
+	/// To process the trade message.
+	/// </summary>
+	/// <param name="message">The trade message.</param>
+	/// <returns><see langword="true" />, if the rule is activated, otherwise, <see langword="false" />.</returns>
+	bool ProcessMessage(Message message);
 }

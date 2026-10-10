@@ -1,144 +1,160 @@
-namespace StockSharp.Algo.Storages
+namespace StockSharp.Algo.Storages;
+
+/// <summary>
+/// The interface, describing the storage, associated with <see cref="IMarketDataStorage"/>.
+/// </summary>
+public interface IMarketDataStorageDrive
 {
-	using System;
-	using System.Collections.Generic;
-	using System.IO;
-
-	using Ecng.Common;
-	using Ecng.Serialization;
-
-	using StockSharp.Messages;
+	/// <summary>
+	/// The storage (database, file etc.).
+	/// </summary>
+	IMarketDataDrive Drive { get; }
 
 	/// <summary>
-	/// Интерфейс, описывающий хранилище, ассоциированное с <see cref="IMarketDataStorage"/>.
+	/// To get all the dates for which market data are recorded.
 	/// </summary>
-	public interface IMarketDataStorageDrive
+	/// <returns>Available dates.</returns>
+	IAsyncEnumerable<DateTime> GetDatesAsync();
+
+	/// <summary>
+	/// To delete cache-files, containing information on available time ranges.
+	/// </summary>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="ValueTask"/></returns>
+	ValueTask ClearDatesCacheAsync(CancellationToken cancellationToken);
+
+	/// <summary>
+	/// To remove market data on specified date from the storage.
+	/// </summary>
+	/// <param name="date">Date, for which all data shall be deleted.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="ValueTask"/></returns>
+	ValueTask DeleteAsync(DateTime date, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// To save data in the format of StockSharp storage.
+	/// </summary>
+	/// <param name="date">The date, for which data shall be saved.</param>
+	/// <param name="stream">Data in the format of StockSharp storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="ValueTask"/></returns>
+	ValueTask SaveStreamAsync(DateTime date, Stream stream, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// To load data in the format of StockSharp storage.
+	/// </summary>
+	/// <param name="date">Date, for which data shall be loaded.</param>
+	/// <param name="readOnly">Get stream in read mode only.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Data in the format of StockSharp storage. If no data exists, <see cref="Stream.Null"/> will be returned.</returns>
+	ValueTask<Stream> LoadStreamAsync(DateTime date, bool readOnly, CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// The interface, describing the storage (database, file etc.).
+/// </summary>
+public interface IMarketDataDrive : IAsyncPersistable, IDisposable
+{
+	/// <summary>
+	/// Path to market data.
+	/// </summary>
+	string Path { get; }
+
+	/// <summary>
+	/// Get all available instruments.
+	/// </summary>
+	/// <returns>Available instruments.</returns>
+	IAsyncEnumerable<SecurityId> GetAvailableSecuritiesAsync();
+
+	/// <summary>
+	/// Get all available data types.
+	/// </summary>
+	/// <param name="securityId">Instrument identifier.</param>
+	/// <param name="format">Format type.</param>
+	/// <returns>Data types.</returns>
+	IAsyncEnumerable<DataType> GetAvailableDataTypesAsync(SecurityId securityId, StorageFormats format);
+
+	/// <summary>
+	/// To get the storage for <see cref="IMarketDataStorage"/>.
+	/// </summary>
+	/// <param name="securityId">Security ID.</param>
+	/// <param name="dataType">Data type info.</param>
+	/// <param name="format">Format type.</param>
+	/// <returns>Storage for <see cref="IMarketDataStorage"/>.</returns>
+	IMarketDataStorageDrive GetStorageDrive(SecurityId securityId, DataType dataType, StorageFormats format);
+
+	/// <summary>
+	/// Verify settings.
+	/// </summary>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="ValueTask"/></returns>
+	ValueTask VerifyAsync(CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Download securities by the specified criteria.
+	/// </summary>
+	/// <param name="criteria">Message security lookup for specified criteria.</param>
+	/// <param name="securityProvider">The provider of information about instruments.</param>
+	/// <returns>The sequence of found instruments.</returns>
+	IAsyncEnumerable<SecurityMessage> LookupSecuritiesAsync(SecurityLookupMessage criteria, ISecurityProvider securityProvider);
+}
+
+/// <summary>
+/// The base implementation <see cref="IMarketDataDrive"/>.
+/// </summary>
+public abstract class BaseMarketDataDrive : Disposable, IMarketDataDrive
+{
+	/// <summary>
+	/// Initialize <see cref="BaseMarketDataDrive"/>.
+	/// </summary>
+	protected BaseMarketDataDrive()
 	{
-		/// <summary>
-		/// Хранилище (база данных, файл и т.д.).
-		/// </summary>
-		IMarketDataDrive Drive { get; }
+	}
 
-		/// <summary>
-		/// Получить все даты, для которых записаны маркет-данные.
-		/// </summary>
-		IEnumerable<DateTime> Dates { get; }
+	/// <inheritdoc />
+	public abstract string Path { get; set; }
 
-		/// <summary>
-		/// Удалить кэш-файлы, хранящие в себе информацию о доступных диапазонах времени.
-		/// </summary>
-		void ClearDatesCache();
+	/// <inheritdoc />
+	public abstract IAsyncEnumerable<SecurityId> GetAvailableSecuritiesAsync();
 
-		/// <summary>
-		/// Удалить маркет-данные из хранилища за указанную дату.
-		/// </summary>
-		/// <param name="date">Дата, для которой необходимо удалить все данные.</param>
-		void Delete(DateTime date);
+	/// <inheritdoc />
+	public abstract IAsyncEnumerable<DataType> GetAvailableDataTypesAsync(SecurityId securityId, StorageFormats format);
 
-		/// <summary>
-		/// Сохранить данные в формате хранилища StockSharp.
-		/// </summary>
-		/// <param name="date">Дата, для которой необходимо сохранить данные.</param>
-		/// <param name="stream">Данные в формате хранилища StockSharp.</param>
-		void SaveStream(DateTime date, Stream stream);
+	/// <inheritdoc />
+	public abstract IMarketDataStorageDrive GetStorageDrive(SecurityId securityId, DataType dataType, StorageFormats format);
 
-		/// <summary>
-		/// Загрузить данные в формате хранилища StockSharp.
-		/// </summary>
-		/// <param name="date">Дата, для которой необходимо загрузить данные.</param>
-		/// <returns>Данные в формате хранилища StockSharp. Если данных не существует, то будет возвращено <see cref="Stream.Null"/>.</returns>
-		Stream LoadStream(DateTime date);
+	/// <inheritdoc />
+	public abstract ValueTask VerifyAsync(CancellationToken cancellationToken);
+
+	/// <inheritdoc />
+	public abstract IAsyncEnumerable<SecurityMessage> LookupSecuritiesAsync(SecurityLookupMessage criteria, ISecurityProvider securityProvider);
+
+	/// <summary>
+	/// Load settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public virtual Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		Path = storage.GetValue<string>(nameof(Path));
+
+		return Task.CompletedTask;
 	}
 
 	/// <summary>
-	/// Интерфейс, описывающий хранилище (база данных, файл и т.д.).
+	/// Save settings.
 	/// </summary>
-	public interface IMarketDataDrive : IPersistable, IDisposable
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public virtual Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
 	{
-		/// <summary>
-		/// Путь к данными.
-		/// </summary>
-		string Path { get; }
+		storage.SetValue(nameof(Path), Path);
 
-		/// <summary>
-		/// Получить для инструмента доступные типы свечек с параметрами.
-		/// </summary>
-		/// <param name="securityId">Идентификатор инструмента.</param>
-		/// <param name="format">Тип формата.</param>
-		/// <returns>Доступные типы свечек с параметрами.</returns>
-		IEnumerable<Tuple<Type, object[]>> GetCandleTypes(SecurityId securityId, StorageFormats format);
-
-		/// <summary>
-		/// Получить хранилище для <see cref="IMarketDataStorage"/>.
-		/// </summary>
-		/// <param name="securityId">Идентификатор инструмента.</param>
-		/// <param name="dataType">Тип маркет-данных.</param>
-		/// <param name="arg">Параметр, ассоциированный с типом <paramref name="dataType"/>. Например, <see cref="CandleMessage.Arg"/>.</param>
-		/// <param name="format">Тип формата.</param>
-		/// <returns>Хранилище для <see cref="IMarketDataStorage"/>.</returns>
-		IMarketDataStorageDrive GetStorageDrive(SecurityId securityId, Type dataType, object arg, StorageFormats format);
+		return Task.CompletedTask;
 	}
 
-	/// <summary>
-	/// Базовая реализация <see cref="IMarketDataDrive"/>.
-	/// </summary>
-	public abstract class BaseMarketDataDrive : Disposable, IMarketDataDrive
-	{
-		/// <summary>
-		/// Инициализировать <see cref="BaseMarketDataDrive"/>.
-		/// </summary>
-		protected BaseMarketDataDrive()
-		{
-		}
-
-		/// <summary>
-		/// Путь к данными.
-		/// </summary>
-		public abstract string Path { get; set; }
-
-		/// <summary>
-		/// Получить для инструмента доступные типы свечек с параметрами.
-		/// </summary>
-		/// <param name="securityId">Идентификатор инструмента.</param>
-		/// <param name="format">Тип формата.</param>
-		/// <returns>Доступные типы свечек с параметрами.</returns>
-		public abstract IEnumerable<Tuple<Type, object[]>> GetCandleTypes(SecurityId securityId, StorageFormats format);
-
-		/// <summary>
-		/// Создать хранилище для <see cref="IMarketDataStorage"/>.
-		/// </summary>
-		/// <param name="securityId">Идентификатор инструмента.</param>
-		/// <param name="dataType">Тип маркет-данных.</param>
-		/// <param name="arg">Параметр, ассоциированный с типом <paramref name="dataType"/>. Например, <see cref="CandleMessage.Arg"/>.</param>
-		/// <param name="format">Тип формата.</param>
-		/// <returns>Хранилище для <see cref="IMarketDataStorage"/>.</returns>
-		public abstract IMarketDataStorageDrive GetStorageDrive(SecurityId securityId, Type dataType, object arg, StorageFormats format);
-
-		/// <summary>
-		/// Загрузить настройки.
-		/// </summary>
-		/// <param name="storage">Хранилище настроек.</param>
-		public virtual void Load(SettingsStorage storage)
-		{
-			Path = storage.GetValue<string>("Path");
-		}
-
-		/// <summary>
-		/// Сохранить настройки.
-		/// </summary>
-		/// <param name="storage">Хранилище настроек.</param>
-		public virtual void Save(SettingsStorage storage)
-		{
-			storage.SetValue("Path", Path);
-		}
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return Path;
-		}
-	}
+	/// <inheritdoc />
+	public override string ToString() => Path;
 }

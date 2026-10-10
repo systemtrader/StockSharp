@@ -1,203 +1,166 @@
-﻿namespace StockSharp.Algo.Statistics
+namespace StockSharp.Algo.Statistics;
+
+using StockSharp.Algo.PnL;
+
+/// <summary>
+/// The statistics manager.
+/// </summary>
+public class StatisticManager : Disposable, IStatisticManager
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Linq;
+	private class EquityParameterList : CachedSynchronizedSet<IStatisticParameter>
+	{
+		private IPnLStatisticParameter[] _pnlParams;
 
-	using Ecng.Common;
-	using Ecng.Collections;
+		public IPnLStatisticParameter[] PnLParams
+		{
+			get
+			{
+				using (EnterScope())
+					return _pnlParams ??= [.. this.OfType<IPnLStatisticParameter>()];
+			}
+		}
 
-	using MoreLinq;
+		private ITradeStatisticParameter[] _tradeParams;
 
-	using StockSharp.Algo.PnL;
-	using StockSharp.BusinessEntities;
+		public ITradeStatisticParameter[] TradeParams
+		{
+			get
+			{
+				using (EnterScope())
+					return _tradeParams ??= [.. this.OfType<ITradeStatisticParameter>()];
+			}
+		}
+
+		private IPositionStatisticParameter[] _positionParams;
+
+		public IPositionStatisticParameter[] PositionParams
+		{
+			get
+			{
+				using (EnterScope())
+					return _positionParams ??= [.. this.OfType<IPositionStatisticParameter>()];
+			}
+		}
+
+		private IOrderStatisticParameter[] _orderParams;
+
+		public IOrderStatisticParameter[] OrderParams
+		{
+			get
+			{
+				using (EnterScope())
+					return _orderParams ??= [.. this.OfType<IOrderStatisticParameter>()];
+			}
+		}
+
+		private readonly Dictionary<StatisticParameterTypes, IStatisticParameter> _dict = [];
+
+		public bool TryGetValue(StatisticParameterTypes type, out IStatisticParameter parameter)
+		{
+			using (EnterScope())
+				return _dict.TryGetValue(type, out parameter);
+		}
+
+		protected override bool OnAdding(IStatisticParameter item)
+		{
+			_dict.Add(item.Type, item);
+			return base.OnAdding(item);
+		}
+
+		protected override bool OnRemoving(IStatisticParameter item)
+		{
+			_dict.Remove(item.Type);
+			return base.OnRemoving(item);
+		}
+
+		protected override bool OnClearing()
+		{
+			_dict.Clear();
+			return true;
+		}
+
+		protected override void OnChanged()
+		{
+			_pnlParams = null;
+			_orderParams = null;
+			_positionParams = null;
+			_tradeParams = null;
+
+			base.OnChanged();
+		}
+	}
 
 	/// <summary>
-	/// Менеджер статистики.
+	/// Initializes a new instance of the <see cref="StatisticManager"/>.
 	/// </summary>
-	public class StatisticManager
+	public StatisticManager()
 	{
-		private sealed class EquityParameterList : CachedSynchronizedSet<IStatisticParameter>
+		_parameters.AddRange(StatisticParameterRegistry.CreateAll());
+	}
+
+	private readonly EquityParameterList _parameters = [];
+
+	/// <inheritdoc />
+	public IStatisticParameter[] Parameters => _parameters.Cache;
+
+	void IStatisticManager.AddPnL(DateTime time, decimal pnl, decimal? commission)
+		=> _parameters.PnLParams.ForEach(p => p.Add(time, pnl, commission));
+
+	void IStatisticManager.AddPosition(DateTime time, decimal position)
+		=> _parameters.PositionParams.ForEach(p => p.Add(time, position));
+
+	void IStatisticManager.AddMyTrade(PnLInfo info)
+		=> _parameters.TradeParams.ForEach(p => p.Add(info));
+
+	void IStatisticManager.AddNewOrder(Order order)
+		=> _parameters.OrderParams.ForEach(p => p.New(order));
+
+	void IStatisticManager.AddChangedOrder(Order order)
+		=> _parameters.OrderParams.ForEach(p => p.Changed(order));
+
+	void IStatisticManager.AddRegisterFailedOrder(OrderFail fail)
+		=> _parameters.OrderParams.ForEach(p => p.RegisterFailed(fail));
+
+	void IStatisticManager.AddFailedOrderCancel(OrderFail fail)
+		=> _parameters.OrderParams.ForEach(p => p.CancelFailed(fail));
+
+	void IStatisticManager.Reset()
+		=> _parameters.Cache.ForEach(p => p.Reset());
+
+	async Task IAsyncPersistable.LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		foreach (var ps in storage.GetValue<IEnumerable<SettingsStorage>>(nameof(Parameters)))
 		{
-			private IPnLStatisticParameter[] _pnlParams;
+			var type = ps.GetValue<StatisticParameterTypes?>(nameof(IStatisticParameter.Type));
 
-			public IEnumerable<IPnLStatisticParameter> PnLParams
-			{
-				get
-				{
-					lock (SyncRoot)
-						return _pnlParams ?? (_pnlParams = this.OfType<IPnLStatisticParameter>().ToArray());
-				}
-			}
+			if (type is null)
+				continue;
 
-			private ITradeStatisticParameter[] _tradeParams;
+			if (_parameters.TryGetValue(type.Value, out var p))
+				await p.LoadAsync(ps, cancellationToken);
+		}
+	}
 
-			public IEnumerable<ITradeStatisticParameter> TradeParams
-			{
-				get
-				{
-					lock (SyncRoot)
-						return _tradeParams ?? (_tradeParams = this.OfType<ITradeStatisticParameter>().ToArray());
-				}
-			}
+	async Task IAsyncPersistable.SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		var parameters = new List<SettingsStorage>();
 
-			private IPositionStatisticParameter[] _positionParams;
-
-			public IEnumerable<IPositionStatisticParameter> PositionParams
-			{
-				get
-				{
-					lock (SyncRoot)
-						return _positionParams ?? (_positionParams = this.OfType<IPositionStatisticParameter>().ToArray());
-				}
-			}
-
-			private IOrderStatisticParameter[] _orderParams;
-
-			public IEnumerable<IOrderStatisticParameter> OrderParams
-			{
-				get
-				{
-					lock (SyncRoot)
-						return _orderParams ?? (_orderParams = this.OfType<IOrderStatisticParameter>().ToArray());
-				}
-			}
-
-			protected override bool OnRemoving(IStatisticParameter item)
-			{
-				item.DoDispose();
-				return base.OnRemoving(item);
-			}
-
-			protected override bool OnClearing()
-			{
-				foreach (var item in ToArray())
-					Remove(item);
-
-				return true;
-			}
-
-			protected override void OnChanged()
-			{
-				_pnlParams = null;
-				_orderParams = null;
-				_positionParams = null;
-				_tradeParams = null;
-
-				base.OnChanged();
-			}
+		foreach (var p in Parameters)
+		{
+			var s = await p.SaveAsync(cancellationToken);
+			s.Set(nameof(p.Type), (int)p.Type);
+			parameters.Add(s);
 		}
 
-		/// <summary>
-		/// Создать <see cref="StatisticManager"/>.
-		/// </summary>
-		public StatisticManager()
-		{
-			Parameters.Add(new MaxProfitParameter());
-			Parameters.Add(new MaxDrawdownParameter());
-			Parameters.Add(new MaxRelativeDrawdownParameter());
-			Parameters.Add(new ReturnParameter());
-			Parameters.Add(new RecoveryFactorParameter());
-			Parameters.Add(new NetProfitParameter());
-			Parameters.Add(new WinningTradesParameter());
-			Parameters.Add(new AverageWinTradeParameter());
-			Parameters.Add(new LossingTradesParameter());
-			Parameters.Add(new AverageLossTradeParameter());
-			Parameters.Add(new RoundtripCountParameter());
-			Parameters.Add(new AverageTradeParameter());
-			Parameters.Add(new TradeCountParameter());
-			Parameters.Add(new MaxLongPositionParameter());
-			Parameters.Add(new MaxShortPositionParameter());
-			Parameters.Add(new MaxLatencyRegistrationParameter());
-			Parameters.Add(new MinLatencyRegistrationParameter());
-			Parameters.Add(new MaxLatencyCancellationParameter());
-			Parameters.Add(new MinLatencyCancellationParameter());
-			Parameters.Add(new OrderCountParameter());
-			//Parameters.Add(new MaxSlippageParameter());
-			//Parameters.Add(new MinSlippageParameter());
-		}
+		storage.Set(nameof(Parameters), parameters.ToArray());
+	}
 
-		private readonly EquityParameterList _parameters = new EquityParameterList();
+	/// <inheritdoc />
+	protected override void DisposeManaged()
+	{
+		foreach (var parameter in Parameters)
+			parameter.Dispose();
 
-		/// <summary>
-		/// Вычисляемые параметры.
-		/// </summary>
-		public ISynchronizedCollection<IStatisticParameter> Parameters
-		{
-			get { return _parameters; }
-		}
-
-		/// <summary>
-		/// Добавить новое значение прибыли-убытка.
-		/// </summary>
-		/// <param name="time">Время изменения <paramref name="pnl"/>.</param>
-		/// <param name="pnl">Новое значение прибыли-убытка.</param>
-		public virtual void AddPnL(DateTimeOffset time, decimal pnl)
-		{
-			_parameters.PnLParams.ForEach(p => p.Add(time, pnl));
-		}
-
-		/// <summary>
-		/// Добавить новое значение позиции.
-		/// </summary>
-		/// <param name="time">Время изменения <paramref name="position"/>.</param>
-		/// <param name="position">Новое значение позиции.</param>
-		public virtual void AddPosition(DateTimeOffset time, decimal position)
-		{
-			_parameters.PositionParams.ForEach(p => p.Add(time, position));
-		}
-
-		/// <summary>
-		/// Добавить информацию о новой сделке.
-		/// </summary>
-		/// <param name="info">Информация о новой сделке.</param>
-		public virtual void AddMyTrade(PnLInfo info)
-		{
-			_parameters.TradeParams.ForEach(p => p.Add(info));
-		}
-
-		/// <summary>
-		/// Добавить новую заявку.
-		/// </summary>
-		/// <param name="order">Новая заявка.</param>
-		public virtual void AddNewOrder(Order order)
-		{
-			_parameters.OrderParams.ForEach(p => p.New(order));
-		}
-
-		/// <summary>
-		/// Добавить измененную заявку.
-		/// </summary>
-		/// <param name="order">Измененная заявка.</param>
-		public virtual void AddChangedOrder(Order order)
-		{
-			_parameters.OrderParams.ForEach(p => p.Changed(order));
-		}
-
-		/// <summary>
-		/// Добавить ошибку регистрации заявки.
-		/// </summary>
-		/// <param name="fail">Ошибка регистрации заявки.</param>
-		public virtual void AddRegisterFailedOrder(OrderFail fail)
-		{
-			_parameters.OrderParams.ForEach(p => p.RegisterFailed(fail));
-		}
-
-		/// <summary>
-		/// Добавить ошибку отмены заявки.
-		/// </summary>
-		/// <param name="fail">Ошибка заявки.</param>
-		public virtual void AddFailedOrderCancel(OrderFail fail)
-		{
-			_parameters.OrderParams.ForEach(p => p.CancelFailed(fail));
-		}
-
-		/// <summary>
-		/// Очистить данные по эквити.
-		/// </summary>
-		public virtual void Reset()
-		{
-			_parameters.SyncDo(c => c.ForEach(p => p.Reset()));
-		}
+		base.DisposeManaged();
 	}
 }

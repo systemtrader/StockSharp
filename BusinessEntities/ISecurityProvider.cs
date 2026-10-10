@@ -1,24 +1,42 @@
-﻿namespace StockSharp.BusinessEntities
+namespace StockSharp.BusinessEntities;
+
+/// <summary>
+/// The interface for access to provider of information about instruments.
+/// </summary>
+public interface ISecurityProvider : ISecurityMessageProvider
 {
-	using System.Collections.Generic;
+	/// <summary>
+	/// Gets the number of instruments contained in the <see cref="ISecurityProvider"/>.
+	/// </summary>
+	int Count { get; }
 
 	/// <summary>
-	/// Интерфейс для доступа к поставщику информации об инструментах.
+	/// New instruments added.
 	/// </summary>
-	public interface ISecurityProvider
-	{
-		/// <summary>
-		/// Найти инструменты, соответствующие фильтру <paramref name="criteria"/>.
-		/// </summary>
-		/// <param name="criteria">Инструмент, поля которого будут использоваться в качестве фильтра.</param>
-		/// <returns>Найденные инструменты.</returns>
-		IEnumerable<Security> Lookup(Security criteria);
+	event Action<IEnumerable<Security>> Added;
 
-		/// <summary>
-		/// Получить внутренний идентификатор торговой системы.
-		/// </summary>
-		/// <param name="security">Инструмент.</param>
-		/// <returns>Внутренний идентификатор торговой системы.</returns>
-		object GetNativeId(Security security);
-	}
+	/// <summary>
+	/// Instruments removed.
+	/// </summary>
+	event Action<IEnumerable<Security>> Removed;
+
+	/// <summary>
+	/// The storage was cleared.
+	/// </summary>
+	event Action Cleared;
+
+	/// <summary>
+	/// To get the instrument by the identifier.
+	/// </summary>
+	/// <param name="id">Security ID.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The got instrument. If there is no instrument by given criteria, <see langword="null" /> is returned.</returns>
+	ValueTask<Security> LookupByIdAsync(SecurityId id, CancellationToken cancellationToken);
+
+	/// <summary>
+	/// Lookup securities by criteria <paramref name="criteria" />.
+	/// </summary>
+	/// <param name="criteria">Message security lookup for specified criteria.</param>
+	/// <returns>Found instruments.</returns>
+	IAsyncEnumerable<Security> LookupAsync(SecurityLookupMessage criteria);
 }

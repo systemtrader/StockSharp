@@ -1,860 +1,1116 @@
-namespace StockSharp.Algo.Derivatives
+namespace StockSharp.Algo.Derivatives;
+
+using System.Globalization;
+using System.Text.RegularExpressions;
+
+using MathNet.Numerics.Distributions;
+
+/// <summary>
+/// Extension class for derivatives.
+/// </summary>
+public static class DerivativesHelper
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Globalization;
-	using System.Linq;
-	using System.Text.RegularExpressions;
+	private static readonly Regex _futureNameRegex = new(@"(?<code>[A-Z,a-z]+)-(?<expiryMonth>[0-9]{1,2})\.(?<expiryYear>[0-9]{1,2})", RegexOptions.Compiled);
+	private static readonly Regex _optionNameRegex = new(@"(?<code>\w+-[0-9]{1,2}\.[0-9]{1,2})(?<isMargin>[M_])(?<expiryDate>[0-9]{6,6})(?<optionType>[CP])(?<region>\w)\s(?<strike>\d*\.*\d*)", RegexOptions.Compiled);
+	private static readonly Regex _optionCodeRegex = new(@"(?<code>[A-Z,a-z]+)(?<strike>\d*\.*\d*)(?<optionType>[BA])(?<expiryMonth>[A-X]{1})(?<expiryYear>[0-9]{1})", RegexOptions.Compiled);
 
-	using Ecng.Collections;
-	using Ecng.Common;
+	private static readonly SynchronizedPairSet<int, char> _futureMonthCodes = [];
+	private static readonly SynchronizedPairSet<int, char> _optionCallMonthCodes = [];
+	private static readonly SynchronizedPairSet<int, char> _optionPutMonthCodes = [];
 
-	using MathNet.Numerics.Distributions;
+	static DerivativesHelper()
+	{
+		// http://www.rts.ru/s193
+		_futureMonthCodes.Add(1, 'F');
+		_futureMonthCodes.Add(2, 'G');
+		_futureMonthCodes.Add(3, 'H');
+		_futureMonthCodes.Add(4, 'J');
+		_futureMonthCodes.Add(5, 'K');
+		_futureMonthCodes.Add(6, 'M');
+		_futureMonthCodes.Add(7, 'N');
+		_futureMonthCodes.Add(8, 'Q');
+		_futureMonthCodes.Add(9, 'U');
+		_futureMonthCodes.Add(10, 'V');
+		_futureMonthCodes.Add(11, 'X');
+		_futureMonthCodes.Add(12, 'Z');
 
-	using StockSharp.BusinessEntities;
-	using StockSharp.Messages;
-	using StockSharp.Localization;
+		_optionCallMonthCodes.Add(1, 'A');
+		_optionCallMonthCodes.Add(2, 'B');
+		_optionCallMonthCodes.Add(3, 'C');
+		_optionCallMonthCodes.Add(4, 'D');
+		_optionCallMonthCodes.Add(5, 'E');
+		_optionCallMonthCodes.Add(6, 'F');
+		_optionCallMonthCodes.Add(7, 'G');
+		_optionCallMonthCodes.Add(8, 'H');
+		_optionCallMonthCodes.Add(9, 'I');
+		_optionCallMonthCodes.Add(10, 'J');
+		_optionCallMonthCodes.Add(11, 'K');
+		_optionCallMonthCodes.Add(12, 'L');
+
+		_optionPutMonthCodes.Add(1, 'M');
+		_optionPutMonthCodes.Add(2, 'N');
+		_optionPutMonthCodes.Add(3, 'O');
+		_optionPutMonthCodes.Add(4, 'P');
+		_optionPutMonthCodes.Add(5, 'Q');
+		_optionPutMonthCodes.Add(6, 'R');
+		_optionPutMonthCodes.Add(7, 'S');
+		_optionPutMonthCodes.Add(8, 'T');
+		_optionPutMonthCodes.Add(9, 'U');
+		_optionPutMonthCodes.Add(10, 'V');
+		_optionPutMonthCodes.Add(11, 'W');
+		_optionPutMonthCodes.Add(12, 'X');
+	}
+
+	private static readonly SynchronizedDictionary<Security, Security> _underlyingSecurities = [];
 
 	/// <summary>
-	/// Вспомогательный класс для работы с производными финансовыми инструментами (деривативами).
+	/// To get the underlying asset by the derivative.
 	/// </summary>
-	public static class DerivativesHelper
+	/// <param name="derivative">The derivative.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <returns>Underlying asset.</returns>
+	[Obsolete("Use GetUnderlyingAssetAsync method instead.")]
+	public static Security GetUnderlyingAsset(this Security derivative, ISecurityProvider provider)
+		=> AsyncHelper.Run(() => derivative.GetUnderlyingAssetAsync(provider, default));
+
+	/// <summary>
+	/// To get the underlying asset by the derivative.
+	/// </summary>
+	/// <param name="derivative">The derivative.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Underlying asset.</returns>
+	public static async ValueTask<Security> GetUnderlyingAssetAsync(this Security derivative, ISecurityProvider provider, CancellationToken cancellationToken)
 	{
-		private static readonly Regex _futureNameRegex = new Regex(@"(?<code>[A-Z,a-z]+)-(?<expiryMonth>[0-9]{1,2})\.(?<expiryYear>[0-9]{1,2})", RegexOptions.Compiled);
-		private static readonly Regex _optionNameRegex = new Regex(@"(?<code>\w+-[0-9]{1,2}\.[0-9]{1,2})(?<isMargin>[M_])(?<expiryDate>[0-9]{6,6})(?<optionType>[CP])(?<region>\w)\s(?<strike>\d*\.*\d*)", RegexOptions.Compiled);
-		private static readonly Regex _optionCodeRegex = new Regex(@"(?<code>[A-Z,a-z]+)(?<strike>\d*\.*\d*)(?<optionType>[BA])(?<expiryMonth>[A-X]{1})(?<expiryYear>[0-9]{1})", RegexOptions.Compiled);
+		if (derivative == null)
+			throw new ArgumentNullException(nameof(derivative));
 
-		private static readonly SynchronizedPairSet<int, char> _futureMonthCodes = new SynchronizedPairSet<int, char>();
-		private static readonly SynchronizedPairSet<int, char> _optionCallMonthCodes = new SynchronizedPairSet<int, char>();
-		private static readonly SynchronizedPairSet<int, char> _optionPutMonthCodes = new SynchronizedPairSet<int, char>();
-		private static readonly Normal _normalDistribution = new Normal();
+		if (provider == null)
+			throw new ArgumentNullException(nameof(provider));
 
-		static DerivativesHelper()
+		var underlyingId = derivative.UnderlyingSecurityId.ToSecurityId();
+
+		if (derivative.Type != SecurityTypes.Option)
+			return await provider.LookupByIdAsync(underlyingId, cancellationToken);
+
+		derivative.CheckOption();
+
+		if (_underlyingSecurities.TryGetValue(derivative, out var cached))
+			return cached;
+
+		var underlying = await provider.LookupByIdAsync(underlyingId, cancellationToken)
+			?? throw new InvalidOperationException(LocalizedStrings.SecurityNoFound.Put(derivative.UnderlyingSecurityId));
+
+		return _underlyingSecurities.SafeAdd(derivative, _ => underlying);
+	}
+
+	/// <summary>
+	/// To filter options by the strike <see cref="Security.Strike"/>.
+	/// </summary>
+	/// <param name="options">Options to be filtered.</param>
+	/// <param name="strike">The strike price.</param>
+	/// <returns>Filtered options.</returns>
+	public static IEnumerable<Security> Filter(this IEnumerable<Security> options, decimal strike)
+	{
+		return options.Where(o => o.Strike == strike);
+	}
+
+	/// <summary>
+	/// To filter options by type <see cref="Security.OptionType"/>.
+	/// </summary>
+	/// <param name="options">Options to be filtered.</param>
+	/// <param name="type">Option type.</param>
+	/// <returns>Filtered options.</returns>
+	public static IEnumerable<Security> Filter(this IEnumerable<Security> options, OptionTypes type)
+	{
+		return options.Where(o => o.OptionType == type);
+	}
+
+	/// <summary>
+	/// To filter instruments by the underlying asset.
+	/// </summary>
+	/// <param name="securities">Instruments to be filtered.</param>
+	/// <param name="asset">Underlying asset.</param>
+	/// <returns>Instruments filtered.</returns>
+	public static IEnumerable<Security> FilterByUnderlying(this IEnumerable<Security> securities, Security asset)
+	{
+		if (asset == null)
+			throw new ArgumentNullException(nameof(asset));
+
+		return securities.Where(s => s.UnderlyingSecurityId == asset.Id);
+	}
+
+	/// <summary>
+	/// To filter instruments by the expiration date <see cref="Security.ExpiryDate"/>.
+	/// </summary>
+	/// <param name="securities">Instruments to be filtered.</param>
+	/// <param name="expirationDate">The expiration date.</param>
+	/// <returns>Instruments filtered.</returns>
+	public static IEnumerable<Security> Filter(this IEnumerable<Security> securities, DateTime? expirationDate)
+	{
+		if (expirationDate == null)
+			return securities;
+
+		return securities.Where(s => s.ExpiryDate == expirationDate);
+	}
+
+	/// <summary>
+	/// To get derivatives by the underlying asset.
+	/// </summary>
+	/// <param name="asset">Underlying asset.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="expirationDate">The expiration date.</param>
+	/// <returns>The list of derivatives.</returns>
+	/// <remarks>
+	/// It returns an empty list if derivatives are not found.
+	/// </remarks>
+	[Obsolete("Use GetDerivativesAsync method instead.")]
+	public static IEnumerable<Security> GetDerivatives(this Security asset, ISecurityProvider provider, DateTime? expirationDate = null)
+		=> asset.GetDerivativesAsync(provider, expirationDate).ToBlockingEnumerable();
+
+	/// <summary>
+	/// To get derivatives by the underlying asset.
+	/// </summary>
+	/// <param name="asset">Underlying asset.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="expirationDate">The expiration date.</param>
+	/// <returns>The derivatives, or none when there are none.</returns>
+	public static IAsyncEnumerable<Security> GetDerivativesAsync(this Security asset, ISecurityProvider provider, DateTime? expirationDate)
+	{
+		if (asset == null)
+			throw new ArgumentNullException(nameof(asset));
+
+		if (provider == null)
+			throw new ArgumentNullException(nameof(provider));
+
+		return provider.LookupAsync(new Security
 		{
-			// http://www.rts.ru/s193
-			_futureMonthCodes.Add(1, 'F');
-			_futureMonthCodes.Add(2, 'G');
-			_futureMonthCodes.Add(3, 'H');
-			_futureMonthCodes.Add(4, 'J');
-			_futureMonthCodes.Add(5, 'K');
-			_futureMonthCodes.Add(6, 'M');
-			_futureMonthCodes.Add(7, 'N');
-			_futureMonthCodes.Add(8, 'Q');
-			_futureMonthCodes.Add(9, 'U');
-			_futureMonthCodes.Add(10, 'V');
-			_futureMonthCodes.Add(11, 'X');
-			_futureMonthCodes.Add(12, 'Z');
+			UnderlyingSecurityId = asset.Id,
+			ExpiryDate = expirationDate,
+		});
+	}
 
-			_optionCallMonthCodes.Add(1, 'A');
-			_optionCallMonthCodes.Add(2, 'B');
-			_optionCallMonthCodes.Add(3, 'C');
-			_optionCallMonthCodes.Add(4, 'D');
-			_optionCallMonthCodes.Add(5, 'E');
-			_optionCallMonthCodes.Add(6, 'F');
-			_optionCallMonthCodes.Add(7, 'G');
-			_optionCallMonthCodes.Add(8, 'H');
-			_optionCallMonthCodes.Add(9, 'I');
-			_optionCallMonthCodes.Add(10, 'J');
-			_optionCallMonthCodes.Add(11, 'K');
-			_optionCallMonthCodes.Add(12, 'L');
+	/// <summary>
+	/// To get the underlying asset.
+	/// </summary>
+	/// <param name="derivative">The derivative.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <returns>Underlying asset.</returns>
+	[Obsolete("Use GetAssetAsync method instead.")]
+	public static Security GetAsset(this Security derivative, ISecurityProvider provider)
+		=> AsyncHelper.Run(() => derivative.GetAssetAsync(provider, default));
 
-			_optionPutMonthCodes.Add(1, 'M');
-			_optionPutMonthCodes.Add(2, 'N');
-			_optionPutMonthCodes.Add(3, 'O');
-			_optionPutMonthCodes.Add(4, 'P');
-			_optionPutMonthCodes.Add(5, 'Q');
-			_optionPutMonthCodes.Add(6, 'R');
-			_optionPutMonthCodes.Add(7, 'S');
-			_optionPutMonthCodes.Add(8, 'T');
-			_optionPutMonthCodes.Add(9, 'U');
-			_optionPutMonthCodes.Add(10, 'V');
-			_optionPutMonthCodes.Add(11, 'W');
-			_optionPutMonthCodes.Add(12, 'X');
-		}
+	/// <summary>
+	/// To get the underlying asset.
+	/// </summary>
+	/// <param name="derivative">The derivative.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Underlying asset.</returns>
+	public static async ValueTask<Security> GetAssetAsync(this Security derivative, ISecurityProvider provider, CancellationToken cancellationToken)
+	{
+		if (derivative == null)
+			throw new ArgumentNullException(nameof(derivative));
 
-		private static readonly SynchronizedDictionary<Security, Security> _underlyingSecurities = new SynchronizedDictionary<Security, Security>();
+		if (provider == null)
+			throw new ArgumentNullException(nameof(provider));
 
-		/// <summary>
-		/// Получить базовый актив по деривативу.
-		/// </summary>
-		/// <param name="derivative">Дериватив.</param>
-		/// <param name="provider">Поставщик информации об инструментах.</param>
-		/// <returns>Базовый актив.</returns>
-		public static Security GetUnderlyingAsset(this Security derivative, ISecurityProvider provider)
-		{
-			if (derivative == null)
-				throw new ArgumentNullException("derivative");
+		var asset = await provider.LookupByIdAsync(derivative.UnderlyingSecurityId.ToSecurityId(), cancellationToken);
 
-			if (provider == null)
-				throw new ArgumentNullException("provider");
+		return asset ?? throw new ArgumentException(LocalizedStrings.UnderlyingAssentNotFound.Put(derivative));
+	}
 
-			if (derivative.Type == SecurityTypes.Option)
+	/// <summary>
+	/// To change the option type for opposite.
+	/// </summary>
+	/// <param name="type">The initial value.</param>
+	/// <returns>The opposite value.</returns>
+	public static OptionTypes Invert(this OptionTypes type)
+	{
+		return type == OptionTypes.Call ? OptionTypes.Put : OptionTypes.Call;
+	}
+
+	/// <summary>
+	/// To get opposite option (for Call to get Put, for Put to get Call).
+	/// </summary>
+	/// <param name="option">Options contract.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <returns>The opposite option.</returns>
+	[Obsolete("Use GetOppositeOptionAsync method instead.")]
+	public static Security GetOppositeOption(this Security option, ISecurityProvider provider)
+		=> AsyncHelper.Run(() => option.GetOppositeOptionAsync(provider, default));
+
+	/// <summary>
+	/// To get opposite option (for Call to get Put, for Put to get Call).
+	/// </summary>
+	/// <param name="option">Options contract.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The opposite option.</returns>
+	public static async ValueTask<Security> GetOppositeOptionAsync(this Security option, ISecurityProvider provider, CancellationToken cancellationToken)
+	{
+		if (provider == null)
+			throw new ArgumentNullException(nameof(provider));
+
+		option.CheckOption();
+
+		var oppositeOption = await provider
+			.LookupAsync(new Security
 			{
-				derivative.CheckOption();
+				OptionType = option.OptionType == OptionTypes.Call ? OptionTypes.Put : OptionTypes.Call,
+				Strike = option.Strike,
+				ExpiryDate = option.ExpiryDate,
+				UnderlyingSecurityId = option.UnderlyingSecurityId,
+			})
+			.FirstOrDefaultAsync(cancellationToken);
 
-				return _underlyingSecurities.SafeAdd(derivative, key =>
-				{
-					var underlyingSecurity = provider.LookupById(key.UnderlyingSecurityId);
+		return oppositeOption ?? throw new ArgumentException(LocalizedStrings.OppositeOptionNotFound.Put(option.Id), nameof(option));
+	}
 
-					if (underlyingSecurity == null)
-						throw new InvalidOperationException(LocalizedStrings.Str704Params.Put(key.UnderlyingSecurityId));
+	/// <summary>
+	/// To get Call for the underlying futures.
+	/// </summary>
+	/// <param name="future">Underlying futures.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="strike">Strike.</param>
+	/// <param name="expirationDate">The date of the option expiration.</param>
+	/// <returns>The Call option.</returns>
+	[Obsolete("Use GetCallAsync method instead.")]
+	public static Security GetCall(this Security future, ISecurityProvider provider, decimal strike, DateTime expirationDate)
+		=> AsyncHelper.Run(() => future.GetCallAsync(provider, strike, expirationDate, default));
 
-					return underlyingSecurity;
-				});
-			}
-			else
+	/// <summary>
+	/// To get Call for the underlying futures.
+	/// </summary>
+	/// <param name="future">Underlying futures.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="strike">Strike.</param>
+	/// <param name="expirationDate">The date of the option expiration.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The Call option.</returns>
+	public static ValueTask<Security> GetCallAsync(this Security future, ISecurityProvider provider, decimal strike, DateTime expirationDate, CancellationToken cancellationToken)
+		=> future.GetOptionAsync(provider, strike, expirationDate, OptionTypes.Call, cancellationToken);
+
+	/// <summary>
+	/// To get Put for the underlying futures.
+	/// </summary>
+	/// <param name="future">Underlying futures.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="strike">Strike.</param>
+	/// <param name="expirationDate">The date of the option expiration.</param>
+	/// <returns>The Put option.</returns>
+	[Obsolete("Use GetPutAsync method instead.")]
+	public static Security GetPut(this Security future, ISecurityProvider provider, decimal strike, DateTime expirationDate)
+		=> AsyncHelper.Run(() => future.GetPutAsync(provider, strike, expirationDate, default));
+
+	/// <summary>
+	/// To get Put for the underlying futures.
+	/// </summary>
+	/// <param name="future">Underlying futures.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="strike">Strike.</param>
+	/// <param name="expirationDate">The date of the option expiration.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The Put option.</returns>
+	public static ValueTask<Security> GetPutAsync(this Security future, ISecurityProvider provider, decimal strike, DateTime expirationDate, CancellationToken cancellationToken)
+		=> future.GetOptionAsync(provider, strike, expirationDate, OptionTypes.Put, cancellationToken);
+
+	/// <summary>
+	/// To get an option for the underlying futures.
+	/// </summary>
+	/// <param name="future">Underlying futures.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="strike">Strike.</param>
+	/// <param name="expirationDate">The options expiration date.</param>
+	/// <param name="optionType">Option type.</param>
+	/// <returns>Options contract.</returns>
+	[Obsolete("Use GetOptionAsync method instead.")]
+	public static Security GetOption(this Security future, ISecurityProvider provider, decimal strike, DateTime expirationDate, OptionTypes optionType)
+		=> AsyncHelper.Run(() => future.GetOptionAsync(provider, strike, expirationDate, optionType, default));
+
+	/// <summary>
+	/// To get an option for the underlying futures.
+	/// </summary>
+	/// <param name="future">Underlying futures.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="strike">Strike.</param>
+	/// <param name="expirationDate">The options expiration date.</param>
+	/// <param name="optionType">Option type.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Options contract.</returns>
+	public static async ValueTask<Security> GetOptionAsync(this Security future, ISecurityProvider provider, decimal strike, DateTime expirationDate, OptionTypes optionType, CancellationToken cancellationToken)
+	{
+		if (future == null)
+			throw new ArgumentNullException(nameof(future));
+
+		if (provider == null)
+			throw new ArgumentNullException(nameof(provider));
+
+		var option = await provider
+			.LookupAsync(new Security
 			{
-				return provider.LookupById(derivative.UnderlyingSecurityId);
-			}
-		}
-
-		/// <summary>
-		/// Отфильтровать опционы по страйку <see cref="Security.Strike"/>.
-		/// </summary>
-		/// <param name="options">Опционы, которые необходимо отфильтровать.</param>
-		/// <param name="strike">Цена страйка.</param>
-		/// <returns>Отфильтрованные опционы.</returns>
-		public static IEnumerable<Security> Filter(this IEnumerable<Security> options, decimal strike)
-		{
-			return options.Where(o => o.Strike == strike);
-		}
-
-		/// <summary>
-		/// Отфильтровать опционы по типу <see cref="Security.OptionType"/>.
-		/// </summary>
-		/// <param name="options">Опционы, которые необходимо отфильтровать.</param>
-		/// <param name="type">Тип опциона.</param>
-		/// <returns>Отфильтрованные опционы.</returns>
-		public static IEnumerable<Security> Filter(this IEnumerable<Security> options, OptionTypes type)
-		{
-			return options.Where(o => o.OptionType == type);
-		}
-
-		/// <summary>
-		/// Отфильтровать инструменты по базовому активу.
-		/// </summary>
-		/// <param name="securities">Инструменты, которые необходимо отфильтровать.</param>
-		/// <param name="asset">Базовый актив.</param>
-		/// <returns>Отфильтрованные инструменты.</returns>
-		public static IEnumerable<Security> FilterByUnderlying(this IEnumerable<Security> securities, Security asset)
-		{
-			if (asset == null)
-				throw new ArgumentNullException("asset");
-
-			return securities.Where(s => s.UnderlyingSecurityId == asset.Id);
-		}
-
-		/// <summary>
-		/// Отфильтровать инструменты по дате экспирации <see cref="Security.ExpiryDate"/>.
-		/// </summary>
-		/// <param name="securities">Инструменты, которые необходимо отфильтровать.</param>
-		/// <param name="expirationDate">Дата экспирации.</param>
-		/// <returns>Отфильтрованные инструменты.</returns>
-		public static IEnumerable<Security> Filter(this IEnumerable<Security> securities, DateTime? expirationDate)
-		{
-			if (expirationDate == null)
-				return securities;
-
-			return securities.Where(s => s.ExpiryDate == expirationDate);
-		}
-
-		/// <summary>
-		/// Получить деривативы по базовому активу.
-		/// </summary>
-		/// <param name="asset">Базовый актив.</param>
-		/// <param name="provider">Поставщик информации об инструментах.</param>
-		/// <param name="expirationDate">Дата экспирации.</param>
-		/// <returns>Список из деривативов.</returns>
-		/// <remarks>Возвращает пустой список, если деривативов не найдено.</remarks>
-		public static IEnumerable<Security> GetDerivatives(this Security asset, ISecurityProvider provider, DateTimeOffset? expirationDate = null)
-		{
-			return provider.Lookup(new Security
-			{
-				UnderlyingSecurityId = asset.Id,
+				Strike = strike,
+				OptionType = optionType,
 				ExpiryDate = expirationDate,
-			});
-		}
+				UnderlyingSecurityId = future.Id
+			})
+			.FirstOrDefaultAsync(cancellationToken);
 
-		/// <summary>
-		/// Получить базовый актив.
-		/// </summary>
-		/// <param name="derivative">Дериватив.</param>
-		/// <param name="provider">Поставщик информации об инструментах.</param>
-		/// <returns>Базовый актив.</returns>
-		public static Security GetAsset(this Security derivative, ISecurityProvider provider)
-		{
-			var asset = provider.LookupById(derivative.UnderlyingSecurityId);
+		return option ?? throw new ArgumentException(LocalizedStrings.OptionNotFound.Put(future.Id), nameof(future));
+	}
 
-			if (asset == null)
-				throw new ArgumentException(LocalizedStrings.Str705Params.Put(derivative));
+	/// <summary>
+	/// To get the main strike.
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="securityProvider">The provider of information about instruments.</param>
+	/// <param name="expirationDate">The options expiration date.</param>
+	/// <param name="optionType">Option type.</param>
+	/// <param name="assetPrice">The current market price of the asset. It is used to calculate the main strike.</param>
+	/// <returns>The main strike.</returns>
+	[Obsolete("Use GetCentralStrikeAsync method instead.")]
+	public static Security GetCentralStrike(this Security underlyingAsset, ISecurityProvider securityProvider, DateTime expirationDate, OptionTypes optionType, decimal assetPrice)
+		=> AsyncHelper.Run(() => underlyingAsset.GetCentralStrikeAsync(securityProvider, expirationDate, optionType, assetPrice, default));
 
-			return asset;
-		}
+	/// <summary>
+	/// To get the main strike.
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="securityProvider">The provider of information about instruments.</param>
+	/// <param name="expirationDate">The options expiration date.</param>
+	/// <param name="optionType">Option type.</param>
+	/// <param name="assetPrice">The asset price.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The main strike.</returns>
+	public static async ValueTask<Security> GetCentralStrikeAsync(this Security underlyingAsset, ISecurityProvider securityProvider, DateTime expirationDate, OptionTypes optionType, decimal assetPrice, CancellationToken cancellationToken)
+	{
+		var derivatives = await underlyingAsset.GetDerivativesAsync(securityProvider, expirationDate).ToArrayAsync(cancellationToken);
 
-		/// <summary>
-		/// Поменять тип опциона на противоположное.
-		/// </summary>
-		/// <param name="type">Первоначальное значение.</param>
-		/// <returns>Противоположное значение.</returns>
-		public static OptionTypes Invert(this OptionTypes type)
-		{
-			return type == OptionTypes.Call ? OptionTypes.Put : OptionTypes.Call;
-		}
+		return derivatives.Filter(optionType).GetCentralStrike(assetPrice);
+	}
 
-		/// <summary>
-		/// Получить противоположный опцион (для Call получить Put, для Put получить Call).
-		/// </summary>
-		/// <param name="option">Опцион.</param>
-		/// <param name="provider">Поставщик информации об инструментах.</param>
-		/// <returns>Противоположный опцион.</returns>
-		public static Security GetOppositeOption(this Security option, ISecurityProvider provider)
-		{
-			if (provider == null)
-				throw new ArgumentNullException("provider");
-
-			option.CheckOption();
-
-			var oppositeOption = provider
-				.Lookup(new Security
-				{
-					OptionType = option.OptionType == OptionTypes.Call ? OptionTypes.Put : OptionTypes.Call,
-					Strike = option.Strike,
-					ExpiryDate = option.ExpiryDate,
-					UnderlyingSecurityId = option.UnderlyingSecurityId,
-				})
+	/// <summary>
+	/// To get the main strike.
+	/// </summary>
+	/// <param name="allStrikes">All strikes.</param>
+	/// <param name="assetPrice">The current market price of the asset. It is used to calculate the main strike.</param>
+	/// <returns>The main strike. If it is impossible to get the current market price of the asset then the <see langword="null" /> will be returned.</returns>
+	public static Security GetCentralStrike(this IEnumerable<Security> allStrikes, decimal assetPrice)
+	{
+		return allStrikes
+				.Where(s => s.Strike != null)
+				.OrderBy(s => (s.Strike.Value - assetPrice).Abs())
 				.FirstOrDefault();
+	}
 
-			if (oppositeOption == null)
-				throw new ArgumentException(LocalizedStrings.Str706Params.Put(option.Id), "option");
+	/// <summary>
+	/// To get the strike step size.
+	/// </summary>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="expirationDate">The options expiration date (to specify a particular series).</param>
+	/// <returns>The strike step size.</returns>
+	[Obsolete("Use GetStrikeStepAsync method instead.")]
+	public static decimal GetStrikeStep(this Security underlyingAsset, ISecurityProvider provider, DateTime? expirationDate = null)
+		=> AsyncHelper.Run(() => underlyingAsset.GetStrikeStepAsync(provider, expirationDate, default));
 
-			return oppositeOption;
+	/// <summary>
+	/// To get the strike step size.
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="provider">The provider of information about instruments.</param>
+	/// <param name="expirationDate">The options expiration date (to specify a particular series).</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The strike step size.</returns>
+	public static async ValueTask<decimal> GetStrikeStepAsync(this Security underlyingAsset, ISecurityProvider provider, DateTime? expirationDate, CancellationToken cancellationToken)
+	{
+		var derivatives = await underlyingAsset.GetDerivativesAsync(provider, expirationDate).ToArrayAsync(cancellationToken);
+
+		return derivatives.GetStrikeStep();
+	}
+
+	/// <summary>
+	/// To get the strike step size.
+	/// </summary>
+	/// <param name="derivatives">Derivatives of the underlying asset.</param>
+	/// <returns>The strike step size.</returns>
+	public static decimal GetStrikeStep(this IEnumerable<Security> derivatives)
+	{
+		var group = derivatives
+			.Filter(OptionTypes.Call)
+			.Where(s => s.Strike != null)
+			.GroupBy(s => s.ExpiryDate)
+			.FirstOrDefault()
+		?? throw new InvalidOperationException(LocalizedStrings.CannotCalcStrikeStep);
+
+		var orderedStrikes = group.OrderBy(s => s.Strike).Take(2).ToArray();
+
+		if (orderedStrikes.Length < 2)
+			throw new InvalidOperationException(LocalizedStrings.CannotCalcStrikeStep);
+
+		return orderedStrikes[1].Strike.Value - orderedStrikes[0].Strike.Value;
+	}
+
+	/// <summary>
+	/// To get out of the money options (OTM).
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="securityProvider">The provider of information about instruments.</param>
+	/// <param name="assetPrice">The asset price.</param>
+	/// <returns>Out of the money options.</returns>
+	[Obsolete("Use GetOutOfTheMoneyAsync method instead.")]
+	public static IEnumerable<Security> GetOutOfTheMoney(this Security underlyingAsset, ISecurityProvider securityProvider, decimal assetPrice)
+		=> AsyncHelper.Run(() => underlyingAsset.GetOutOfTheMoneyAsync(securityProvider, assetPrice, default));
+
+	/// <summary>
+	/// To get out of the money options (OTM).
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="securityProvider">The provider of information about instruments.</param>
+	/// <param name="assetPrice">The asset price.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Out of the money options.</returns>
+	public static async ValueTask<IEnumerable<Security>> GetOutOfTheMoneyAsync(this Security underlyingAsset, ISecurityProvider securityProvider, decimal assetPrice, CancellationToken cancellationToken)
+		=> underlyingAsset.GetOutOfTheMoney(await underlyingAsset.GetDerivativesAsync(securityProvider, null).ToArrayAsync(cancellationToken), assetPrice);
+
+	/// <summary>
+	/// To get out of the money options (OTM).
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="allStrikes">All strikes.</param>
+	/// <param name="assetPrice">The asset price.</param>
+	/// <returns>Out of the money options.</returns>
+	public static IEnumerable<Security> GetOutOfTheMoney(this Security underlyingAsset, IEnumerable<Security> allStrikes, decimal assetPrice)
+	{
+		if (underlyingAsset == null)
+			throw new ArgumentNullException(nameof(underlyingAsset));
+
+		allStrikes = [.. allStrikes];
+
+		var cs = allStrikes.GetCentralStrike(assetPrice);
+
+		if (cs == null)
+			return [];
+
+		return allStrikes.Where(s => s.Strike != null && (s.OptionType == OptionTypes.Call ? s.Strike > cs.Strike : s.Strike < cs.Strike));
+	}
+
+	/// <summary>
+	/// To get in the money options (ITM).
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="securityProvider">The provider of information about instruments.</param>
+	/// <param name="assetPrice">The asset price.</param>
+	/// <returns>In the money options.</returns>
+	[Obsolete("Use GetInTheMoneyAsync method instead.")]
+	public static IEnumerable<Security> GetInTheMoney(this Security underlyingAsset, ISecurityProvider securityProvider, decimal assetPrice)
+		=> AsyncHelper.Run(() => underlyingAsset.GetInTheMoneyAsync(securityProvider, assetPrice, default));
+
+	/// <summary>
+	/// To get in the money options (ITM).
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="securityProvider">The provider of information about instruments.</param>
+	/// <param name="assetPrice">The asset price.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>In the money options.</returns>
+	public static async ValueTask<IEnumerable<Security>> GetInTheMoneyAsync(this Security underlyingAsset, ISecurityProvider securityProvider, decimal assetPrice, CancellationToken cancellationToken)
+		=> underlyingAsset.GetInTheMoney(await underlyingAsset.GetDerivativesAsync(securityProvider, null).ToArrayAsync(cancellationToken), assetPrice);
+
+	/// <summary>
+	/// To get in the money options (ITM).
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="allStrikes">All strikes.</param>
+	/// <param name="assetPrice">The asset price.</param>
+	/// <returns>In the money options.</returns>
+	public static IEnumerable<Security> GetInTheMoney(this Security underlyingAsset, IEnumerable<Security> allStrikes, decimal assetPrice)
+	{
+		if (underlyingAsset == null)
+			throw new ArgumentNullException(nameof(underlyingAsset));
+
+		allStrikes = [.. allStrikes];
+
+		var cs = allStrikes.GetCentralStrike(assetPrice);
+
+		if (cs == null)
+			return [];
+
+		return allStrikes.Where(s => s.Strike != null && (s.OptionType == OptionTypes.Call ? s.Strike < cs.Strike : s.Strike > cs.Strike));
+	}
+
+	/// <summary>
+	/// To get at the money options (ATM).
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="securityProvider">The provider of information about instruments.</param>
+	/// <param name="assetPrice">The asset price.</param>
+	/// <returns>At the money options.</returns>
+	[Obsolete("Use GetAtTheMoneyAsync method instead.")]
+	public static IEnumerable<Security> GetAtTheMoney(this Security underlyingAsset, ISecurityProvider securityProvider, decimal assetPrice)
+		=> AsyncHelper.Run(() => underlyingAsset.GetAtTheMoneyAsync(securityProvider, assetPrice, default));
+
+	/// <summary>
+	/// To get at the money options (ATM).
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="securityProvider">The provider of information about instruments.</param>
+	/// <param name="assetPrice">The asset price.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>At the money options.</returns>
+	public static async ValueTask<IEnumerable<Security>> GetAtTheMoneyAsync(this Security underlyingAsset, ISecurityProvider securityProvider, decimal assetPrice, CancellationToken cancellationToken)
+		=> underlyingAsset.GetAtTheMoney(await underlyingAsset.GetDerivativesAsync(securityProvider, null).ToArrayAsync(cancellationToken), assetPrice);
+
+	/// <summary>
+	/// To get at the money options (ATM).
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="allStrikes">All strikes.</param>
+	/// <param name="assetPrice">The asset price.</param>
+	/// <returns>At the money options.</returns>
+	public static IEnumerable<Security> GetAtTheMoney(this Security underlyingAsset, IEnumerable<Security> allStrikes, decimal assetPrice)
+	{
+		if (underlyingAsset == null)
+			throw new ArgumentNullException(nameof(underlyingAsset));
+
+		allStrikes = [.. allStrikes];
+
+		var centralStrikes = new List<Security>();
+
+		var cs = allStrikes.Filter(OptionTypes.Call).GetCentralStrike(assetPrice);
+
+		if (cs != null)
+			centralStrikes.Add(cs);
+
+		cs = allStrikes.Filter(OptionTypes.Put).GetCentralStrike(assetPrice);
+
+		if (cs != null)
+			centralStrikes.Add(cs);
+
+		return centralStrikes;
+	}
+
+	/// <summary>
+	/// To get the internal option value.
+	/// </summary>
+	/// <param name="option">Options contract.</param>
+	/// <param name="assetPrice">The underlying asset price.</param>
+	/// <returns>The internal value. If it is impossible to get the current market price of the asset then the <see langword="null" /> will be returned.</returns>
+	public static decimal GetIntrinsicValue(this Security option, decimal assetPrice)
+	{
+		option.CheckOption();
+
+		if (option.Strike is not decimal strike)
+			throw new ArgumentException(LocalizedStrings.InvalidValue, nameof(option));
+
+		return (option.OptionType == OptionTypes.Call ? assetPrice - strike : strike - assetPrice).Max(0);
+	}
+
+	/// <summary>
+	/// To get the timed option value.
+	/// </summary>
+	/// <param name="option">Options contract.</param>
+	/// <param name="currentPrice">The contract price.</param>
+	/// <param name="assetPrice">The underlying asset price.</param>
+	/// <returns>The timed value.</returns>
+	public static decimal GetTimeValue(Security option, decimal currentPrice, decimal assetPrice)
+	{
+		option.CheckOption();
+
+		return currentPrice - option.GetIntrinsicValue(assetPrice);
+	}
+
+	internal static DateTime GetExpirationTime(this Security security, IExchangeInfoProvider provider)
+	{
+		if (security == null)
+			throw new ArgumentNullException(nameof(security));
+
+		if (provider == null)
+			throw new ArgumentNullException(nameof(provider));
+
+		if (security.ExpiryDate == null)
+			throw new ArgumentException(LocalizedStrings.NoExpirationDate.Put(security.Id), nameof(security));
+
+		var expDate = security.ExpiryDate.Value;
+
+		if (expDate.TimeOfDay == TimeSpan.Zero)
+		{
+			var board = provider.GetOrCreateBoard(security.ToSecurityId().BoardCode);
+			expDate += board.ExpiryTime;
 		}
 
-		/// <summary>
-		/// Получить Call для базового фьючерса.
-		/// </summary>
-		/// <param name="future">Базовый фьючерс.</param>
-		/// <param name="provider">Поставщик информации об инструментах.</param>
-		/// <param name="strike">Страйк.</param>
-		/// <param name="expirationDate">Дата экспирации опциона.</param>
-		/// <returns>Опцион Call.</returns>
-		public static Security GetCall(this Security future, ISecurityProvider provider, decimal strike, DateTimeOffset expirationDate)
-		{
-			return future.GetOption(provider, strike, expirationDate, OptionTypes.Call);
-		}
+		return expDate;
+	}
 
-		/// <summary>
-		/// Получить Put для базового фьючерса.
-		/// </summary>
-		/// <param name="future">Базовый фьючерс.</param>
-		/// <param name="provider">Поставщик информации об инструментах.</param>
-		/// <param name="strike">Страйк.</param>
-		/// <param name="expirationDate">Дата экспирации опциона.</param>
-		/// <returns>Опцион Put.</returns>
-		public static Security GetPut(this Security future, ISecurityProvider provider, decimal strike, DateTimeOffset expirationDate)
-		{
-			return future.GetOption(provider, strike, expirationDate, OptionTypes.Put);
-		}
+	/// <summary>
+	/// To check whether the instrument has finished the action.
+	/// </summary>
+	/// <param name="security">Security.</param>
+	/// <param name="exchangeInfoProvider">Exchanges and trading boards provider.</param>
+	/// <param name="currentTime">The current time.</param>
+	/// <returns><see langword="true" /> if the instrument has finished its action.</returns>
+	public static bool IsExpired(this Security security, IExchangeInfoProvider exchangeInfoProvider, DateTime currentTime)
+	{
+		return security.GetExpirationTime(exchangeInfoProvider) <= currentTime;
+	}
 
-		/// <summary>
-		/// Получить опцион для базового фьючерса.
-		/// </summary>
-		/// <param name="future">Базовый фьючерс.</param>
-		/// <param name="provider">Поставщик информации об инструментах.</param>
-		/// <param name="strike">Страйк.</param>
-		/// <param name="expirationDate">Дата экспирации опционов.</param>
-		/// <param name="optionType">Тип опциона.</param>
-		/// <returns>Опцион.</returns>
-		public static Security GetOption(this Security future, ISecurityProvider provider, decimal strike, DateTimeOffset expirationDate, OptionTypes optionType)
-		{
-			if (future == null)
-				throw new ArgumentNullException("future");
+	/// <summary>
+	/// To get the information about the option from its name (underlying asset, strike, expiration date, etc.).
+	/// </summary>
+	/// <param name="optionName">The option name.</param>
+	/// <param name="board">Board info.</param>
+	/// <returns>Information about the option.</returns>
+	public static Security GetOptionInfo(this string optionName, ExchangeBoard board)
+	{
+		if (board == null)
+			throw new ArgumentNullException(nameof(board));
 
-			if (provider == null)
-				throw new ArgumentNullException("provider");
+		if (optionName.IsEmpty())
+			throw new ArgumentNullException(nameof(optionName));
 
-			var option = provider
-				.Lookup(new Security
-				{
-					Strike = strike,
-					OptionType = optionType,
-					ExpiryDate = expirationDate,
-					UnderlyingSecurityId = future.Id
-				})
-				.FirstOrDefault();
+		var matches = _optionNameRegex.Matches(optionName);
 
-			if (option == null)
-				throw new ArgumentException(LocalizedStrings.Str707Params.Put(future.Id), "future");
-
-			return option;
-		}
-
-		/// <summary>
-		/// Получить центральный страйк.
-		/// </summary>
-		/// <param name="underlyingAsset">Базовый актив.</param>
-		/// <param name="securityProvider">Поставщик информации об инструментах.</param>
-		/// <param name="dataProvider">Поставщик маркет-данных.</param>
-		/// <param name="expirationDate">Дата экспирации опционов.</param>
-		/// <param name="optionType">Тип опциона.</param>
-		/// <returns>Центральный страйк.</returns>
-		public static Security GetCentralStrike(this Security underlyingAsset, ISecurityProvider securityProvider, IMarketDataProvider dataProvider, DateTime expirationDate, OptionTypes optionType)
-		{
-			return underlyingAsset.GetCentralStrike(dataProvider, underlyingAsset.GetDerivatives(securityProvider, expirationDate).Filter(optionType));
-		}
-
-		/// <summary>
-		/// Получить центральный страйк.
-		/// </summary>
-		/// <param name="underlyingAsset">Базовый актив.</param>
-		/// <param name="provider">Поставщик маркет-данных.</param>
-		/// <param name="allStrikes">Все страйки.</param>
-		/// <returns>Центральный страйк. Если невозможно получить текущую рыночную цену актива, то будет возвращено <see langword="null"/>.</returns>
-		public static Security GetCentralStrike(this Security underlyingAsset, IMarketDataProvider provider, IEnumerable<Security> allStrikes)
-		{
-			var assetPrice = underlyingAsset.GetCurrentPrice(provider);
-
-			return assetPrice == null
-				? null
-				: allStrikes.OrderBy(s => Math.Abs((decimal)(s.Strike - assetPrice))).FirstOrDefault();
-		}
-
-		/// <summary>
-		/// Получить размер шага страйка.
-		/// </summary>
-		/// <param name="provider">Поставщик информации об инструментах.</param>
-		/// <param name="underlyingAsset">Базовый актив.</param>
-		/// <param name="expirationDate">Дата экспирации опционов (для указания конкретной серии).</param>
-		/// <returns>Размер шага страйка.</returns>
-		public static decimal GetStrikeStep(this Security underlyingAsset, ISecurityProvider provider, DateTimeOffset? expirationDate = null)
-		{
-			var group = underlyingAsset
-				.GetDerivatives(provider, expirationDate)
-				.Filter(OptionTypes.Call)
-				.GroupBy(s => s.ExpiryDate)
-				.FirstOrDefault();
-
-			if (group == null)
-				throw new InvalidOperationException(LocalizedStrings.Str708);
-
-			var orderedStrikes = group.OrderBy(s => s.Strike).Take(2).ToArray();
-			return (decimal)(orderedStrikes[1].Strike - orderedStrikes[0].Strike);
-		}
-
-		/// <summary>
-		/// Получить опционы вне денег (OTM).
-		/// </summary>
-		/// <param name="underlyingAsset">Базовый актив.</param>
-		/// <param name="securityProvider">Поставщик информации об инструментах.</param>
-		/// <param name="dataProvider">Поставщик маркет-данных.</param>
-		/// <returns>Опционы вне денег.</returns>
-		public static IEnumerable<Security> GetOutOfTheMoney(this Security underlyingAsset, ISecurityProvider securityProvider, IMarketDataProvider dataProvider)
-		{
-			return underlyingAsset.GetOutOfTheMoney(dataProvider, underlyingAsset.GetDerivatives(securityProvider));
-		}
-
-		/// <summary>
-		/// Получить опционы вне денег (OTM).
-		/// </summary>
-		/// <param name="underlyingAsset">Базовый актив.</param>
-		/// <param name="provider">Поставщик маркет-данных.</param>
-		/// <param name="allStrikes">Все страйки.</param>
-		/// <returns>Опционы вне денег.</returns>
-		public static IEnumerable<Security> GetOutOfTheMoney(this Security underlyingAsset, IMarketDataProvider provider, IEnumerable<Security> allStrikes)
-		{
-			if (underlyingAsset == null)
-				throw new ArgumentNullException("underlyingAsset");
-
-			var cs = underlyingAsset.GetCentralStrike(provider, allStrikes);
-
-			return allStrikes.Where(s => s.OptionType == OptionTypes.Call ? s.Strike < cs.Strike : s.Strike > cs.Strike);
-		}
-
-		/// <summary>
-		/// Получить опционы в деньгах (ITM).
-		/// </summary>
-		/// <param name="underlyingAsset">Базовый актив.</param>
-		/// <param name="securityProvider">Поставщик информации об инструментах.</param>
-		/// <param name="dataProvider">Поставщик маркет-данных.</param>
-		/// <returns>Опционы в деньгах.</returns>
-		public static IEnumerable<Security> GetInTheMoney(this Security underlyingAsset, ISecurityProvider securityProvider, IMarketDataProvider dataProvider)
-		{
-			return underlyingAsset.GetInTheMoney(dataProvider, underlyingAsset.GetDerivatives(securityProvider));
-		}
-
-		/// <summary>
-		/// Получить опционы в деньгах (ITM).
-		/// </summary>
-		/// <param name="underlyingAsset">Базовый актив.</param>
-		/// <param name="provider">Поставщик маркет-данных.</param>
-		/// <param name="allStrikes">Все страйки.</param>
-		/// <returns>Опционы в деньгах.</returns>
-		public static IEnumerable<Security> GetInTheMoney(this Security underlyingAsset, IMarketDataProvider provider, IEnumerable<Security> allStrikes)
-		{
-			if (underlyingAsset == null)
-				throw new ArgumentNullException("underlyingAsset");
-
-			var cs = underlyingAsset.GetCentralStrike(provider, allStrikes);
-
-			return allStrikes.Where(s => s.OptionType == OptionTypes.Call ? s.Strike > cs.Strike : s.Strike < cs.Strike);
-		}
-
-		/// <summary>
-		/// Получить опционы на деньгах (ATM).
-		/// </summary>
-		/// <param name="underlyingAsset">Базовый актив.</param>
-		/// <param name="securityProvider">Поставщик информации об инструментах.</param>
-		/// <param name="dataProvider">Поставщик маркет-данных.</param>
-		/// <returns>Опционы на деньгах.</returns>
-		public static IEnumerable<Security> GetAtTheMoney(this Security underlyingAsset, ISecurityProvider securityProvider, IMarketDataProvider dataProvider)
-		{
-			return underlyingAsset.GetAtTheMoney(dataProvider, underlyingAsset.GetDerivatives(securityProvider));
-		}
-
-		/// <summary>
-		/// Получить опционы на деньгах (ATM).
-		/// </summary>
-		/// <param name="underlyingAsset">Базовый актив.</param>
-		/// <param name="provider">Поставщик маркет-данных.</param>
-		/// <param name="allStrikes">Все страйки.</param>
-		/// <returns>Опционы на деньгах.</returns>
-		public static IEnumerable<Security> GetAtTheMoney(this Security underlyingAsset, IMarketDataProvider provider, IEnumerable<Security> allStrikes)
-		{
-			if (underlyingAsset == null)
-				throw new ArgumentNullException("underlyingAsset");
-
-			var centralStrikes = new List<Security>();
-
-			var cs = underlyingAsset.GetCentralStrike(provider, allStrikes.Filter(OptionTypes.Call));
-
-			if (cs != null)
-				centralStrikes.Add(cs);
-
-			cs = underlyingAsset.GetCentralStrike(provider, allStrikes.Filter(OptionTypes.Put));
-
-			if (cs != null)
-				centralStrikes.Add(cs);
-
-			return centralStrikes;
-		}
-
-		/// <summary>
-		/// Получить внутреннюю стоимость опциона.
-		/// </summary>
-		/// <param name="option">Опцион.</param>
-		/// <param name="securityProvider">Поставщик информации об инструментах.</param>
-		/// <param name="dataProvider">Поставщик маркет-данных.</param>
-		/// <returns>Внутренняя стоимость. Если невозможно получить текущую рыночную цену актива, то будет возвращено <see langword="null"/>.</returns>
-		public static decimal? GetIntrinsicValue(this Security option, ISecurityProvider securityProvider, IMarketDataProvider dataProvider)
-		{
-			if (securityProvider == null)
-				throw new ArgumentNullException("securityProvider");
-			
-			option.CheckOption();
-
-			var assetPrice = option.GetUnderlyingAsset(securityProvider).GetCurrentPrice(dataProvider);
-
-			if (assetPrice == null)
-				return null;
-
-			return ((decimal)((option.OptionType == OptionTypes.Call) ? assetPrice - option.Strike : option.Strike - assetPrice)).Max(0);
-		}
-
-		/// <summary>
-		/// Получить временную стоимость опциона.
-		/// </summary>
-		/// <param name="option">Опцион.</param>
-		/// <param name="securityProvider">Поставщик информации об инструментах.</param>
-		/// <param name="dataProvider">Поставщик маркет-данных.</param>
-		/// <returns>Временная стоимость. Если невозможно получить текущую рыночную цену актива, то будет возвращено <see langword="null"/>.</returns>
-		public static decimal? GetTimeValue(this Security option, ISecurityProvider securityProvider, IMarketDataProvider dataProvider)
-		{
-			if (securityProvider == null)
-				throw new ArgumentNullException("securityProvider");
-
-			option.CheckOption();
-
-			var price = option.GetCurrentPrice(dataProvider);
-			var intrinsic = option.GetIntrinsicValue(securityProvider, dataProvider);
-
-			if (price == null || intrinsic == null)
-				return null;
-
-			return (decimal)(price - intrinsic);
-		}
-
-		internal static DateTimeOffset GetExpirationTime(this Security security)
-		{
-			if (security.ExpiryDate == null)
-				throw new ArgumentException(LocalizedStrings.Str709Params.Put(security.Id), "security");
-
-			var expDate = security.ExpiryDate.Value;
-
-			if (expDate.TimeOfDay == TimeSpan.Zero)
-				expDate += security.CheckExchangeBoard().ExpiryTime;
-
-			return expDate;
-		}
-
-		/// <summary>
-		/// Проверить, закончил ли действие инструмент.
-		/// </summary>
-		/// <param name="security">Инструмент.</param>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <returns><see langword="true"/>, если инструмент закончил свое действие.</returns>
-		public static bool IsExpired(this Security security, DateTime currentTime)
-		{
-			return security.GetExpirationTime() >= currentTime;
-		}
-
-		/// <summary>
-		/// Получить из названия опциона его информацию (базовый актив, страйк, дата экспирации и т.д.).
-		/// </summary>
-		/// <param name="optionName">Название опциона.</param>
-		/// <returns>Информация об опционе.</returns>
-		public static Security GetOptionInfo(this string optionName)
-		{
-			if (optionName.IsEmpty())
-				throw new ArgumentNullException("optionName");
-
-			var matches = _optionNameRegex.Matches(optionName);
-
-			if (matches.Count == 1)
-			{
-				var groups = matches[0].Groups;
-
-				if (groups.Count == 7)
-				{
-					return new Security
-					{
-						UnderlyingSecurityId = groups["code"].Value,
-						ExpiryDate = groups["expiryDate"].Value.ToDateTime("ddMMyy"),
-						OptionType = groups["optionType"].Value == "C" ? OptionTypes.Call : OptionTypes.Put,
-						Strike = decimal.Parse(groups["strike"].Value, CultureInfo.InvariantCulture),
-					};
-				}
-			}
-
+		if (matches.Count != 1)
 			return null;
-		}
 
-		/// <summary>
-		/// Получить из названия фьючерса его информацию (базовый актив, дата экспирации и т.д.).
-		/// </summary>
-		/// <param name="futureName">Название фьючерса.</param>
-		/// <param name="optionCode">Код опциона.</param>
-		/// <returns>Информация о фьючерсе.</returns>
-		public static SecurityMessage GetFutureInfo(this string futureName, string optionCode)
+		var groups = matches[0].Groups;
+
+		if (groups.Count == 7)
 		{
-			if (futureName.IsEmpty())
-				throw new ArgumentNullException("futureName");
-
-			if (optionCode.IsEmpty())
-				throw new ArgumentNullException("optionCode");
-
-			var matches = _futureNameRegex.Matches(futureName);
-
-			if (matches.Count != 1)
-				return null;
-
-			var groups = matches[0].Groups;
-
-			if (groups.Count != 4)
-				return null;
-
-			var yearStr = groups["expiryYear"].Value;
-			var month = groups["expiryMonth"].Value.To<int>();
-
-			var optionMatch = _optionCodeRegex.Match(optionCode);
-
-			return new SecurityMessage
+			return new Security
 			{
-				//Name = groups["code"].Value,
-				SecurityId = new SecurityId
-				{
-					SecurityCode = optionMatch.Groups["code"].Value + _futureMonthCodes[month] + yearStr.Last(),
-				},
-				ExpiryDate = new DateTime(2000 + yearStr.To<int>(), month, 1),
-				Name = futureName,
+				UnderlyingSecurityId = groups["code"].Value,
+				ExpiryDate = groups["expiryDate"].Value.ToDateTime("ddMMyy").UtcKind(),
+				OptionType = groups["optionType"].Value == "C" ? OptionTypes.Call : OptionTypes.Put,
+				Strike = decimal.Parse(groups["strike"].Value, CultureInfo.InvariantCulture),
 			};
 		}
 
-		/// <summary>
-		/// Создать стакан волатильности из обычного стакана.
-		/// </summary>
-		/// <param name="depth">Стакан, котировки которого будут переведены в котировки с волатильностью.</param>
-		/// <param name="securityProvider">Поставщик информации об инструментах.</param>
-		/// <param name="dataProvider">Поставщик маркет-данных.</param>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="riskFree">Безрисковая процентная ставка.</param>
-		/// <param name="dividend">Размер дивиденда по акциям.</param>
-		/// <returns>Стакан волатильности.</returns>
-		public static MarketDepth ImpliedVolatility(this MarketDepth depth, ISecurityProvider securityProvider, IMarketDataProvider dataProvider, DateTime currentTime, decimal riskFree = 0, decimal dividend = 0)
+		return null;
+	}
+
+	/// <summary>
+	/// To get the information about the futures from its name (underlying asset, expiration date, etc.).
+	/// </summary>
+	/// <param name="futureName">The futures name.</param>
+	/// <param name="optionCode">The option code.</param>
+	/// <param name="board">Board info.</param>
+	/// <returns>Information about futures.</returns>
+	public static SecurityMessage GetFutureInfo(this string futureName, string optionCode, ExchangeBoard board)
+	{
+		if (board == null)
+			throw new ArgumentNullException(nameof(board));
+
+		if (futureName.IsEmpty())
+			throw new ArgumentNullException(nameof(futureName));
+
+		if (optionCode.IsEmpty())
+			throw new ArgumentNullException(nameof(optionCode));
+
+		var matches = _futureNameRegex.Matches(futureName);
+
+		if (matches.Count != 1)
+			return null;
+
+		var groups = matches[0].Groups;
+
+		if (groups.Count != 4)
+			return null;
+
+		var yearStr = groups["expiryYear"].Value;
+		var month = groups["expiryMonth"].Value.To<int>();
+
+		var optionMatch = _optionCodeRegex.Match(optionCode);
+
+		if (!optionMatch.Success)
+			return null;
+
+		return new SecurityMessage
 		{
-			if (depth == null)
-				throw new ArgumentNullException("depth");
-
-			return depth.ImpliedVolatility(new BlackScholes(depth.Security, securityProvider, dataProvider) { RiskFree = riskFree, Dividend = dividend }, currentTime);
-		}
-
-		/// <summary>
-		/// Создать стакан волатильности из обычного стакана.
-		/// </summary>
-		/// <param name="depth">Стакан, котировки которого будут переведены в котировки с волатильностью.</param>
-		/// <param name="model">Модель расчета значений "греков" по формуле Блэка-Шоулза.</param>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <returns>Стакан волатильности.</returns>
-		public static MarketDepth ImpliedVolatility(this MarketDepth depth, BlackScholes model, DateTimeOffset currentTime)
-		{
-			if (depth == null)
-				throw new ArgumentNullException("depth");
-
-			if (model == null)
-				throw new ArgumentNullException("model");
-
-			Func<Quote, Quote> convert = quote =>
+			//Name = groups["code"].Value,
+			SecurityId = new()
 			{
-				quote = quote.Clone();
-				quote.Price = model.ImpliedVolatility(currentTime, quote.Price);
-				return quote;
-			};
+				SecurityCode = optionMatch.Groups["code"].Value + _futureMonthCodes[month] + yearStr.Last(),
+			},
+			ExpiryDate = new DateTime(2000 + yearStr.To<int>(), month, 1).UtcKind(),
+			Name = futureName,
+		};
+	}
 
-			return new MarketDepth(depth.Security).Update(depth.Bids.Select(convert), depth.Asks.Select(convert), true, depth.LastChangeTime);
-		}
+	/// <summary>
+	/// To create the volatility order book from usual order book.
+	/// </summary>
+	/// <param name="depth">The order book quotes of which will be changed to volatility quotes.</param>
+	/// <param name="securityProvider">The provider of information about instruments.</param>
+	/// <param name="dataProvider">The market data provider.</param>
+	/// <param name="currentTime">The current time.</param>
+	/// <param name="riskFree">The risk free interest rate.</param>
+	/// <param name="dividend">The dividend amount on shares.</param>
+	/// <returns>The order book volatility.</returns>
+	[Obsolete("Use ImpliedVolatilityAsync method instead.")]
+	public static QuoteChangeMessage ImpliedVolatility(this IOrderBookMessage depth, ISecurityProvider securityProvider, IMarketDataProvider dataProvider, DateTime currentTime, decimal riskFree = 0, decimal dividend = 0)
+		=> AsyncHelper.Run(() => depth.ImpliedVolatilityAsync(securityProvider, dataProvider, currentTime, riskFree, dividend, default));
 
-		/// <summary>
-		/// Получить период опциона до экспирации.
-		/// </summary>
-		/// <param name="expirationTime">Время экспирации опциона.</param>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <returns>Период опциона до экспирации.</returns>
-		public static double GetExpirationTimeLine(DateTimeOffset expirationTime, DateTimeOffset currentTime)
+	/// <summary>
+	/// To create the volatility order book from usual order book.
+	/// </summary>
+	/// <param name="depth">The order book quotes of which will be changed to volatility quotes.</param>
+	/// <param name="securityProvider">The provider of information about instruments.</param>
+	/// <param name="dataProvider">The market data provider.</param>
+	/// <param name="currentTime">The current time.</param>
+	/// <param name="riskFree">The risk free interest rate.</param>
+	/// <param name="dividend">The dividend amount on shares.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>The order book volatility.</returns>
+	public static async ValueTask<QuoteChangeMessage> ImpliedVolatilityAsync(this IOrderBookMessage depth, ISecurityProvider securityProvider, IMarketDataProvider dataProvider, DateTime currentTime, decimal riskFree, decimal dividend, CancellationToken cancellationToken)
+	{
+		if (depth == null)
+			throw new ArgumentNullException(nameof(depth));
+
+		if (securityProvider == null)
+			throw new ArgumentNullException(nameof(securityProvider));
+
+		var option = await securityProvider.LookupByIdAsync(depth.SecurityId, cancellationToken);
+		var underlying = option is null ? null : await option.GetUnderlyingAssetAsync(securityProvider, cancellationToken);
+
+		var model = new BlackScholes(option, underlying, dataProvider)
 		{
-			return GetExpirationTimeLine(expirationTime, currentTime, TimeSpan.FromDays(365));
-		}
+			RiskFree = riskFree,
+			Dividend = dividend,
+		};
 
-		/// <summary>
-		/// Получить период опциона до экспирации.
-		/// </summary>
-		/// <param name="expirationTime">Время экспирации опциона.</param>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="timeLine">Длина общего периода.</param>
-		/// <returns>Период опциона до экспирации.</returns>
-		public static double GetExpirationTimeLine(DateTimeOffset expirationTime, DateTimeOffset currentTime, TimeSpan timeLine)
+		return depth.ImpliedVolatility(model, currentTime);
+	}
+
+	/// <summary>
+	/// To create the volatility order book from usual order book.
+	/// </summary>
+	/// <param name="depth">The order book quotes of which will be changed to volatility quotes.</param>
+	/// <param name="model">The model for calculating Greeks values by the Black-Scholes formula.</param>
+	/// <param name="currentTime">The current time.</param>
+	/// <returns>The order book volatility.</returns>
+	public static QuoteChangeMessage ImpliedVolatility(this IOrderBookMessage depth, IBlackScholes model, DateTime currentTime)
+	{
+		if (depth == null)
+			throw new ArgumentNullException(nameof(depth));
+
+		if (model == null)
+			throw new ArgumentNullException(nameof(model));
+
+		QuoteChange Convert(QuoteChange quote)
 		{
-			var retVal = expirationTime - currentTime;
-
-			if (retVal <= TimeSpan.Zero)
-				throw new InvalidOperationException(LocalizedStrings.Str710Params.Put(expirationTime, currentTime));
-
-			return (double)retVal.Ticks / timeLine.Ticks;
+			quote.Price = model.ImpliedVolatility(currentTime, quote.Price) ?? 0;
+			return quote;
 		}
 
-		//private const int _dayInYear = 365; // Количество дней в году (расчет временного распада)
-
-		private static double InvertD1(double d1)
+		return new()
 		{
-			// http://ru.wikipedia.org/wiki/Нормальное_распределение (сигма=1 и мю=0)
-			return Math.Exp(-d1 * d1 / 2.0) / Math.Sqrt(2 * Math.PI);
-		}
+			ServerTime = depth.ServerTime,
+			SecurityId = depth.SecurityId,
+			Bids = [.. depth.Bids.Select(Convert)],
+			Asks = [.. depth.Asks.Select(Convert)],
+		};
+	}
 
-		/// <summary>
-		/// Рассчитать временную экспоненту.
-		/// </summary>
-		/// <param name="riskFree">Безрисковая процентная ставка.</param>
-		/// <param name="timeToExp">Период опциона до экспирации.</param>
-		/// <returns>Временная экспонента.</returns>
-		public static double ExpRate(decimal riskFree, double timeToExp)
+	/// <summary>
+	/// To get the option period before expiration.
+	/// </summary>
+	/// <param name="expirationTime">The option expiration time.</param>
+	/// <param name="currentTime">The current time.</param>
+	/// <returns>The option period before expiration. If the value is equal to <see langword="null" />, then the value calculation currently is impossible.</returns>
+	public static double? GetExpirationTimeLine(DateTime expirationTime, DateTime currentTime)
+	{
+		return GetExpirationTimeLine(expirationTime, currentTime, TimeSpan.FromDays(365));
+	}
+
+	/// <summary>
+	/// To get the option period before expiration.
+	/// </summary>
+	/// <param name="expirationTime">The option expiration time.</param>
+	/// <param name="currentTime">The current time.</param>
+	/// <param name="timeLine">The length of the total period.</param>
+	/// <returns>The option period before expiration. If the value is equal to <see langword="null" />, then the value calculation currently is impossible.</returns>
+	public static double? GetExpirationTimeLine(DateTime expirationTime, DateTime currentTime, TimeSpan timeLine)
+	{
+		var retVal = expirationTime - currentTime;
+
+		if (retVal <= TimeSpan.Zero)
+			return null;
+
+		return (double)retVal.Ticks / timeLine.Ticks;
+	}
+
+	//private const int _dayInYear = 365; // Количество дней в году (расчет временного распада)
+
+	private static double InvertD1(double d1)
+	{
+		// http://ru.wikipedia.org/wiki/Нормальное_распределение (сигма=1 и мю=0)
+		return Math.Exp(-d1 * d1 / 2.0) / Math.Sqrt(2 * Math.PI);
+	}
+
+	/// <summary>
+	/// To calculate the time exhibitor.
+	/// </summary>
+	/// <param name="riskFree">The risk free interest rate.</param>
+	/// <param name="timeToExp">The option period before the expiration.</param>
+	/// <returns>The time exhibitor.</returns>
+	public static double ExpRate(decimal riskFree, double timeToExp)
+	{
+		return riskFree == 0 ? 1 : Math.Exp(-(double)riskFree * timeToExp);
+	}
+
+	/// <summary>
+	/// To calculate the d1 parameter of the option fulfilment probability estimating.
+	/// </summary>
+	/// <param name="assetPrice">Underlying asset price.</param>
+	/// <param name="strike">The strike price.</param>
+	/// <param name="riskFree">The risk free interest rate.</param>
+	/// <param name="dividend">The dividend amount on shares.</param>
+	/// <param name="deviation">Standard deviation.</param>
+	/// <param name="timeToExp">The option period before the expiration.</param>
+	/// <returns>The d1 parameter of the option fulfilment probability estimating.</returns>
+	public static double D1(decimal assetPrice, decimal strike, decimal riskFree, decimal dividend, decimal deviation, double timeToExp)
+	{
+		if (deviation < 0)
+			throw new ArgumentOutOfRangeException(nameof(deviation), deviation, LocalizedStrings.InvalidValue);
+
+		var divisor = (double)deviation * timeToExp.Sqrt();
+		if (divisor == 0)
+			return 0;
+
+		return ((double)(assetPrice / strike).Log() +
+			(double)(riskFree - dividend + deviation * deviation / 2.0m) * timeToExp) / divisor;
+	}
+
+	/// <summary>
+	/// To calculate the d2 parameter of the option fulfilment probability estimating.
+	/// </summary>
+	/// <param name="d1">The d1 parameter of the option fulfilment probability estimating.</param>
+	/// <param name="deviation">Standard deviation.</param>
+	/// <param name="timeToExp">The option period before the expiration.</param>
+	/// <returns>The d2 parameter of the option fulfilment probability estimating.</returns>
+	public static double D2(double d1, decimal deviation, double timeToExp)
+	{
+		return d1 - (double)deviation * timeToExp.Sqrt();
+	}
+
+	/// <summary>
+	/// To calculate the option premium.
+	/// </summary>
+	/// <param name="optionType">Option type.</param>
+	/// <param name="strike">The strike price.</param>
+	/// <param name="assetPrice">Underlying asset price.</param>
+	/// <param name="riskFree">The risk free interest rate.</param>
+	/// <param name="dividend">The dividend amount on shares.</param>
+	/// <param name="deviation">Standard deviation.</param>
+	/// <param name="timeToExp">The option period before the expiration.</param>
+	/// <param name="d1">The d1 parameter of the option fulfilment probability estimating.</param>
+	/// <returns>The option premium.</returns>
+	public static decimal Premium(OptionTypes optionType, decimal strike, decimal assetPrice, decimal riskFree, decimal dividend, decimal deviation, double timeToExp, double d1)
+	{
+		var sign = (optionType == OptionTypes.Call) ? 1 : -1;
+
+		var expDiv = ExpRate(dividend, timeToExp);
+		var expRate = ExpRate(riskFree, timeToExp);
+
+		// Without volatility, or with no time left, the forward is already known: the option either
+		// finishes in the money or it does not, so the premium is the discounted intrinsic value.
+		if ((double)deviation * timeToExp.Sqrt() == 0)
+			return (sign * (assetPrice * (decimal)expDiv - strike * (decimal)expRate)).Max(0);
+
+		return (assetPrice * (decimal)(expDiv * NormalDistr(d1 * sign)) -
+				strike * (decimal)(expRate * NormalDistr(D2(d1, deviation, timeToExp) * sign))) * sign;
+	}
+
+	/// <summary>
+	/// To calculate the option delta.
+	/// </summary>
+	/// <param name="optionType">Option type.</param>
+	/// <param name="assetPrice">Underlying asset price.</param>
+	/// <param name="d1">The d1 parameter of the option fulfilment probability estimating.</param>
+	/// <returns>Option delta.</returns>
+	public static decimal Delta(OptionTypes optionType, decimal assetPrice, double d1)
+	{
+		var delta = (decimal)NormalDistr(d1);
+
+		if (optionType == OptionTypes.Put)
+			delta -= 1;
+
+		return delta;
+	}
+
+	/// <summary>
+	/// To calculate the option gamma.
+	/// </summary>
+	/// <param name="assetPrice">Underlying asset price.</param>
+	/// <param name="deviation">Standard deviation.</param>
+	/// <param name="timeToExp">The option period before the expiration.</param>
+	/// <param name="d1">The d1 parameter of the option fulfilment probability estimating.</param>
+	/// <returns>Option gamma.</returns>
+	public static decimal Gamma(decimal assetPrice, decimal deviation, double timeToExp, double d1)
+	{
+		if (deviation == 0)
+			return 0;
+		//throw new ArgumentOutOfRangeException(nameof(deviation), deviation, "Стандартное отклонение имеет недопустимое значение.");
+
+		if (assetPrice == 0)
+			return 0;
+
+		return (decimal)InvertD1(d1) / (assetPrice * deviation * (decimal)timeToExp.Sqrt());
+	}
+
+	/// <summary>
+	/// To calculate the option vega.
+	/// </summary>
+	/// <param name="assetPrice">Underlying asset price.</param>
+	/// <param name="timeToExp">The option period before the expiration.</param>
+	/// <param name="d1">The d1 parameter of the option fulfilment probability estimating.</param>
+	/// <returns>Option vega.</returns>
+	public static decimal Vega(decimal assetPrice, double timeToExp, double d1)
+	{
+		return assetPrice * (decimal)(0.01 * InvertD1(d1) * timeToExp.Sqrt());
+	}
+
+	/// <summary>
+	/// To calculate the option theta.
+	/// </summary>
+	/// <param name="optionType">Option type.</param>
+	/// <param name="strike">The strike price.</param>
+	/// <param name="assetPrice">Underlying asset price.</param>
+	/// <param name="riskFree">The risk free interest rate.</param>
+	/// <param name="deviation">Standard deviation.</param>
+	/// <param name="timeToExp">The option period before the expiration.</param>
+	/// <param name="d1">The d1 parameter of the option fulfilment probability estimating.</param>
+	/// <param name="daysInYear">Days per year.</param>
+	/// <returns>Option theta.</returns>
+	public static decimal Theta(OptionTypes optionType, decimal strike, decimal assetPrice, decimal riskFree, decimal deviation, double timeToExp, double d1, decimal daysInYear = 365)
+		=> Theta(optionType, strike, assetPrice, riskFree, 0, deviation, timeToExp, d1, daysInYear);
+
+	/// <summary>
+	/// To calculate the option theta with a continuous dividend yield.
+	/// </summary>
+	/// <param name="optionType">Option type.</param>
+	/// <param name="strike">The strike price.</param>
+	/// <param name="assetPrice">Underlying asset price.</param>
+	/// <param name="riskFree">The risk free interest rate.</param>
+	/// <param name="dividend">The continuous dividend yield.</param>
+	/// <param name="deviation">Standard deviation.</param>
+	/// <param name="timeToExp">The option period before the expiration.</param>
+	/// <param name="d1">The d1 parameter of the option fulfilment probability estimating.</param>
+	/// <param name="daysInYear">Days per year.</param>
+	/// <returns>Option theta.</returns>
+	public static decimal Theta(OptionTypes optionType, decimal strike, decimal assetPrice, decimal riskFree, decimal dividend, decimal deviation, double timeToExp, double d1, decimal daysInYear = 365)
+	{
+		var nd1 = InvertD1(d1);
+
+		var expRate = ExpRate(riskFree, timeToExp);
+		var expDiv = ExpRate(dividend, timeToExp);
+
+		var sign = optionType == OptionTypes.Call ? 1 : -1;
+
+		return
+			(-(assetPrice * (decimal)expDiv * deviation * (decimal)nd1) / (2 * (decimal)timeToExp.Sqrt()) -
+			sign * (strike * riskFree * (decimal)(expRate * NormalDistr(sign * D2(d1, deviation, timeToExp)))) +
+			sign * (assetPrice * dividend * (decimal)(expDiv * NormalDistr(sign * d1)))) / daysInYear;
+	}
+
+	/// <summary>
+	/// To calculate the option rho.
+	/// </summary>
+	/// <param name="optionType">Option type.</param>
+	/// <param name="strike">The strike price.</param>
+	/// <param name="assetPrice">Underlying asset price.</param>
+	/// <param name="riskFree">The risk free interest rate.</param>
+	/// <param name="deviation">Standard deviation.</param>
+	/// <param name="timeToExp">The option period before the expiration.</param>
+	/// <param name="d1">The d1 parameter of the option fulfilment probability estimating.</param>
+	/// <returns>Option rho.</returns>
+	public static decimal Rho(OptionTypes optionType, decimal strike, decimal assetPrice, decimal riskFree, decimal deviation, double timeToExp, double d1)
+	{
+		var expRate = ExpRate(riskFree, timeToExp);
+
+		var sign = optionType == OptionTypes.Call ? 1 : -1;
+
+		return sign * (0.01m * strike * (decimal)(timeToExp * expRate * NormalDistr(sign * D2(d1, deviation, timeToExp))));
+	}
+
+	/// <summary>
+	/// To calculate the implied volatility.
+	/// </summary>
+	/// <param name="premium">The option premium.</param>
+	/// <param name="getPremium">To calculate the premium by volatility.</param>
+	/// <returns>The implied volatility, in percent. If the value is equal to <see langword="null" />, then the value calculation currently is impossible.</returns>
+	public static decimal? ImpliedVolatility(decimal premium, Func<decimal, decimal?> getPremium)
+	{
+		if (getPremium == null)
+			throw new ArgumentNullException(nameof(getPremium));
+
+		const decimal min = 0.00001m;
+
+		// A premium at or below the price of a motionless asset is explained by no positive volatility.
+		if (premium <= getPremium(min))
+			return null;
+
+		// The premium grows with the deviation, so the search starts from a bracket that already holds
+		// the answer: the ceiling is doubled until the premium it prices exceeds the one being inverted.
+		// Reporting a ceiling the search merely stopped at would be indistinguishable from a real quote.
+		const decimal maxDeviation = 1000m;
+
+		var low = 0m;
+		var high = 2m;
+
+		while (true)
 		{
-			return riskFree == 0 ? 1 : Math.Exp(-(double)riskFree * timeToExp);
+			if (getPremium(high) is not decimal atHigh)
+				return null;
+
+			if (atHigh >= premium)
+				break;
+
+			if (high >= maxDeviation)
+				return null;
+
+			low = high;
+			high = (high * 2).Min(maxDeviation);
 		}
 
-		/// <summary>
-		/// Рассчитать параметр d1 определения вероятности исполнения опциона.
-		/// </summary>
-		/// <param name="assetPrice">Цена базового актива.</param>
-		/// <param name="strike">Цена страйка.</param>
-		/// <param name="riskFree">Безрисковая процентная ставка.</param>
-		/// <param name="dividend">Размер дивиденда по акциям.</param>
-		/// <param name="deviation">Стандартное отклонение.</param>
-		/// <param name="timeToExp">Период опциона до экспирации.</param>
-		/// <returns>Параметр d1 определения вероятности исполнения опциона.</returns>
-		public static double D1(decimal assetPrice, decimal strike, decimal riskFree, decimal dividend, decimal deviation, double timeToExp)
+		const int maxIter = 10000;
+		var currIter = 0;
+
+		while ((high - low) > min)
 		{
-			if (deviation < 0)
-				throw new ArgumentOutOfRangeException("deviation", deviation, LocalizedStrings.Str711);
+			var deviation = (high + low) / 2;
 
-			return (((double)assetPrice / (double)strike).Log() +
-				(double)(riskFree - dividend + deviation * deviation / 2.0m) * timeToExp) / ((double)deviation * timeToExp.Sqrt());
+			if (getPremium(deviation) > premium)
+				high = deviation;
+			else
+				low = deviation;
+
+			if (++currIter > maxIter)
+				throw new InvalidOperationException("Too much iterations.");
 		}
 
-		/// <summary>
-		/// Рассчитать параметр d2 определения вероятности исполнения опциона.
-		/// </summary>
-		/// <param name="d1">Параметр d1 определения вероятности исполнения опциона.</param>
-		/// <param name="deviation">Стандартное отклонение.</param>
-		/// <param name="timeToExp">Период опциона до экспирации.</param>
-		/// <returns>Параметр d2 определения вероятности исполнения опциона.</returns>
-		public static double D2(double d1, decimal deviation, double timeToExp)
-		{
-			return d1 - (double)deviation * timeToExp.Sqrt();
-		}
+		return ((high + low) / 2) * 100;
+	}
 
-		/// <summary>
-		/// Рассчитать премию опциона.
-		/// </summary>
-		/// <param name="optionType">Тип опциона.</param>
-		/// <param name="strike">Цена страйка.</param>
-		/// <param name="assetPrice">Цена базового актива.</param>
-		/// <param name="riskFree">Безрисковая процентная ставка.</param>
-		/// <param name="dividend">Размер дивиденда по акциям.</param>
-		/// <param name="deviation">Стандартное отклонение.</param>
-		/// <param name="timeToExp">Период опциона до экспирации.</param>
-		/// <param name="d1">Параметр d1 определения вероятности исполнения опциона.</param>
-		/// <returns>Премия опциона.</returns>
-		public static decimal Premium(OptionTypes optionType, decimal strike, decimal assetPrice, decimal riskFree, decimal dividend, decimal deviation, double timeToExp, double d1)
-		{
-			var sign = (optionType == OptionTypes.Call) ? 1 : -1;
+	private static double NormalDistr(double x)
+		=> Normal.CDF(0, 1, x);
 
-			var expDiv = ExpRate(dividend, timeToExp);
-			var expRate = ExpRate(riskFree, timeToExp);
+	internal static void CheckOption(this Security option)
+	{
+		if (option == null)
+			throw new ArgumentNullException(nameof(option));
 
-			return (assetPrice * (decimal)(expDiv * NormalDistr(d1 * sign)) -
-					strike * (decimal)(expRate * NormalDistr(D2(d1, deviation, timeToExp) * sign))) * sign;
-		}
+		if (option.Type != SecurityTypes.Option)
+			throw new ArgumentException(LocalizedStrings.WrongSecType.Put(option.Type), nameof(option));
 
-		/// <summary>
-		/// Рассчитать дельту опциона.
-		/// </summary>
-		/// <param name="optionType">Тип опциона.</param>
-		/// <param name="assetPrice">Цена базового актива.</param>
-		/// <param name="d1">Параметр d1 определения вероятности исполнения опциона.</param>
-		/// <returns>Дельта опциона.</returns>
-		public static decimal Delta(OptionTypes optionType, decimal assetPrice, double d1)
-		{
-			var delta = (decimal)NormalDistr(d1);
+		if (option.OptionType == null)
+			throw new ArgumentException(LocalizedStrings.OrderTypeMissed.Put(option), nameof(option));
 
-			if (optionType == OptionTypes.Put)
-				delta -= 1;
+		if (option.ExpiryDate == null)
+			throw new ArgumentException(LocalizedStrings.NoExpirationDate.Put(option), nameof(option));
 
-			return delta;
-		}
-
-		/// <summary>
-		/// Рассчитать гамму опциона.
-		/// </summary>
-		/// <param name="assetPrice">Цена базового актива.</param>
-		/// <param name="deviation">Стандартное отклонение.</param>
-		/// <param name="timeToExp">Период опциона до экспирации.</param>
-		/// <param name="d1">Параметр d1 определения вероятности исполнения опциона.</param>
-		/// <returns>Гамма опциона.</returns>
-		public static decimal Gamma(decimal assetPrice, decimal deviation, double timeToExp, double d1)
-		{
-			if (deviation == 0)
-				return 0;
-			//throw new ArgumentOutOfRangeException("deviation", deviation, "Стандартное отклонение имеет недопустимое значение.");
-
-			if (assetPrice == 0)
-				return 0;
-
-			return (decimal)InvertD1(d1) / (assetPrice * deviation * (decimal)timeToExp.Sqrt());
-		}
-
-		/// <summary>
-		/// Рассчитать вегу опциона.
-		/// </summary>
-		/// <param name="assetPrice">Цена базового актива.</param>
-		/// <param name="timeToExp">Период опциона до экспирации.</param>
-		/// <param name="d1">Параметр d1 определения вероятности исполнения опциона.</param>
-		/// <returns>Вега опциона.</returns>
-		public static decimal Vega(decimal assetPrice, double timeToExp, double d1)
-		{
-			return assetPrice * (decimal)(0.01 * InvertD1(d1) * timeToExp.Sqrt());
-		}
-
-		/// <summary>
-		/// Рассчитать тету опциона.
-		/// </summary>
-		/// <param name="optionType">Тип опциона.</param>
-		/// <param name="strike">Цена страйка.</param>
-		/// <param name="assetPrice">Цена базового актива.</param>
-		/// <param name="riskFree">Безрисковая процентная ставка.</param>
-		/// <param name="deviation">Стандартное отклонение.</param>
-		/// <param name="timeToExp">Период опциона до экспирации.</param>
-		/// <param name="d1">Параметр d1 определения вероятности исполнения опциона.</param>
-		/// <param name="daysInYear">Дней в году.</param>
-		/// <returns>Тета опциона.</returns>
-		public static decimal Theta(OptionTypes optionType, decimal strike, decimal assetPrice, decimal riskFree, decimal deviation, double timeToExp, double d1, decimal daysInYear = 365)
-		{
-			var nd1 = InvertD1(d1);
-
-			var expRate = ExpRate(riskFree, timeToExp);
-
-			var sign = optionType == OptionTypes.Call ? 1 : -1;
-
-			return
-				(-(assetPrice * deviation * (decimal)nd1) / (2 * (decimal)timeToExp.Sqrt()) -
-				sign * (strike * riskFree * (decimal)(expRate * NormalDistr(sign * D2(d1, deviation, timeToExp))))) / daysInYear;
-		}
-
-		/// <summary>
-		/// Рассчитать ро опциона.
-		/// </summary>
-		/// <param name="optionType">Тип опциона.</param>
-		/// <param name="strike">Цена страйка.</param>
-		/// <param name="assetPrice">Цена базового актива.</param>
-		/// <param name="riskFree">Безрисковая процентная ставка.</param>
-		/// <param name="deviation">Стандартное отклонение.</param>
-		/// <param name="timeToExp">Период опциона до экспирации.</param>
-		/// <param name="d1">Параметр d1 определения вероятности исполнения опциона.</param>
-		/// <returns>Ро опциона.</returns>
-		public static decimal Rho(OptionTypes optionType, decimal strike, decimal assetPrice, decimal riskFree, decimal deviation, double timeToExp, double d1)
-		{
-			var expRate = ExpRate(riskFree, timeToExp);
-
-			var sign = optionType == OptionTypes.Call ? 1 : -1;
-
-			return sign * (0.01m * strike * (decimal)(timeToExp * expRate * NormalDistr(sign * D2(d1, deviation, timeToExp))));
-		}
-
-		/// <summary>
-		/// Рассчитать подразумеваемую волатильность (Implied  Volatility).
-		/// </summary>
-		/// <param name="premium">Премия по опциону.</param>
-		/// <param name="getPremium">Рассчитать премию по волатильности.</param>
-		/// <returns>Подразумеваевая волатильность.</returns>
-		public static decimal ImpliedVolatility(decimal premium, Func<decimal, decimal> getPremium)
-		{
-			if (getPremium == null)
-				throw new ArgumentNullException("getPremium");
-
-			const decimal min = 0.00001m;
-
-			var deviation = min;
-
-			//Если Премия оказывается меньше чем премия с нулевой волатильностью, то выходим
-			if (premium <= getPremium(deviation))
-				return 0;
-
-			var high = 2m;
-			var low = 0m;
-
-			while ((high - low) > min)
-			{
-				deviation = (high + low) / 2;
-
-				if (getPremium(deviation) > premium)
-					high = deviation;
-				else
-					low = deviation;
-			}
-
-			return ((high + low) / 2) * 100;
-		}
-
-		private static double NormalDistr(double x)
-		{
-			return _normalDistribution.CumulativeDistribution(x);
-		}
+		if (option.UnderlyingSecurityId == null)
+			throw new ArgumentException(LocalizedStrings.NoAssetInfo.Put(option), nameof(option));
 	}
 }

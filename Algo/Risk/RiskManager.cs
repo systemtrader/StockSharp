@@ -1,88 +1,77 @@
-﻿namespace StockSharp.Algo.Risk
+namespace StockSharp.Algo.Risk;
+
+/// <summary>
+/// The risks control manager.
+/// </summary>
+public class RiskManager : BaseLogReceiver, IRiskManager
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Linq;
-
-	using Ecng.Collections;
-	using Ecng.Serialization;
-
-	using MoreLinq;
-
-	using StockSharp.Messages;
-
 	/// <summary>
-	/// Менеджер контроля рисков.
+	/// Initializes a new instance of the <see cref="RiskManager"/>.
 	/// </summary>
-	public class RiskManager : IRiskManager
+	public RiskManager()
 	{
-		/// <summary>
-		/// Создать <see cref="RiskManager"/>.
-		/// </summary>
-		public RiskManager()
+	}
+
+	private readonly CachedSynchronizedList<IRiskRule> _rules = [];
+
+	/// <inheritdoc />
+	public INotifyList<IRiskRule> Rules => _rules;
+
+	/// <inheritdoc />
+	public virtual void Reset()
+	{
+		_rules.Cache.ForEach(r => r.Reset());
+	}
+
+	/// <inheritdoc />
+	public IEnumerable<IRiskRule> ProcessRules(Message message)
+	{
+		if (message.Type == MessageTypes.Reset)
 		{
+			Reset();
+			return [];
 		}
 
-		private readonly CachedSynchronizedSet<IRiskRule> _rules = new CachedSynchronizedSet<IRiskRule>();
+		var rules = _rules.Cache;
 
-		/// <summary>
-		/// Список правил.
-		/// </summary>
-		public SynchronizedSet<IRiskRule> Rules
-		{
-			get { return _rules; }
-		}
+		if (rules.Length == 0)
+			return [];
 
-		/// <summary>
-		/// Сбросить состояние.
-		/// </summary>
-		public virtual void Reset()
-		{
-			_rules.Cache.ForEach(r => r.Reset());
-		}
+		return [.. rules.Where(r => r.ProcessMessage(message))];
+	}
 
-		/// <summary>
-		/// Обработать торговое сообщение.
-		/// </summary>
-		/// <param name="message">Торговое сообщение.</param>
-		/// <returns>Список правил, которые были активированы сообщением</returns>
-		public IEnumerable<IRiskRule> ProcessRules(Message message)
-		{
-			return _rules.Cache.Where(r => r.ProcessMessage(message)).ToArray();
-		}
+	/// <inheritdoc />
+	public override async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		var rules = new List<IRiskRule>();
 
-		/// <summary>
-		/// Загрузить настройки.
-		/// </summary>
-		/// <param name="storage">Хранилище.</param>
-		public void Load(SettingsStorage storage)
-		{
-			Rules.AddRange(storage.GetValue<SettingsStorage[]>("Rules").Select(s => s.LoadEntire<IRiskRule>()));
-		}
+		foreach (var s in storage.GetValue<SettingsStorage[]>(nameof(Rules)))
+			rules.Add(await s.LoadEntireAsync<IRiskRule>(cancellationToken));
 
-		/// <summary>
-		/// Сохранить настройки.
-		/// </summary>
-		/// <param name="storage">Хранилище.</param>
-		public void Save(SettingsStorage storage)
-		{
-			storage.SetValue("Rules", Rules.Select(r => r.SaveEntire(false)).ToArray());
-		}
+		Rules.Clear();
+		Rules.AddRange(rules);
 
-		RiskActions IRiskRule.Action
-		{
-			get { throw new NotSupportedException(); }
-			set { throw new NotSupportedException(); }
-		}
+		await base.LoadAsync(storage, cancellationToken);
+	}
 
-		string IRiskRule.Title
-		{
-			get { throw new NotSupportedException(); }
-		}
+	/// <inheritdoc />
+	public override async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		var rules = new List<SettingsStorage>();
 
-		bool IRiskRule.ProcessMessage(Message message)
-		{
-			throw new NotSupportedException();
-		}
+		foreach (var rule in Rules)
+			rules.Add(await rule.SaveEntireAsync(false, cancellationToken));
+
+		storage.SetValue(nameof(Rules), rules.ToArray());
+
+		await base.SaveAsync(storage, cancellationToken);
+	}
+
+	/// <inheritdoc />
+	public async ValueTask<IRiskManager> CloneAsync(CancellationToken cancellationToken)
+	{
+		var clone = new RiskManager();
+		await clone.LoadAsync(await this.SaveAsync(cancellationToken), cancellationToken);
+		return clone;
 	}
 }

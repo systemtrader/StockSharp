@@ -1,1312 +1,871 @@
-namespace StockSharp.Algo.Candles.Compression
+namespace StockSharp.Algo.Candles.Compression;
+
+/// <summary>
+/// Candles builder.
+/// </summary>
+/// <typeparam name="TCandleMessage">The type of candle which the builder will create.</typeparam>
+/// <remarks>
+/// Initialize <see cref="CandleBuilder{TCandleMessage}"/>.
+/// </remarks>
+/// <param name="exchangeInfoProvider">The exchange boards provider.</param>
+public abstract class CandleBuilder<TCandleMessage>(IExchangeInfoProvider exchangeInfoProvider) : BaseLogReceiver, ICandleBuilder
+	where TCandleMessage : CandleMessage
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Linq;
+	/// <inheritdoc />
+	public virtual Type CandleType { get; } = typeof(TCandleMessage);
 
-	using Ecng.Collections;
-	using Ecng.Common;
-	using Ecng.ComponentModel;
+	/// <summary>
+	/// The exchange boards provider.
+	/// </summary>
+	protected IExchangeInfoProvider ExchangeInfoProvider { get; } = exchangeInfoProvider ?? throw new ArgumentNullException(nameof(exchangeInfoProvider));
 
-	using MoreLinq;
-
-	using StockSharp.Logging;
-	using StockSharp.Algo.Storages;
-	using StockSharp.Messages;
-	using StockSharp.Localization;
-
-	// mika вынесен за пределы CandleBuilder, так как в дженерик классе статические переменные инициализируются каждый раз для нового параметра
-	class Holder
+	/// <inheritdoc />
+	public IEnumerable<CandleMessage> Process(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform)
 	{
-		public static readonly ICandleBuilderSource TradeStorage = new TradeStorageCandleBuilderSource();
-		public static readonly ICandleBuilderSource OrderLogStorage = new OrderLogStorageCandleBuilderSource();
+		if (IsTimeValid(subscription.Message, transform.Time))
+		{
+			foreach (var candle in OnProcess(subscription, transform))
+			{
+				subscription.CurrentCandle = candle;
+				yield return candle;
+			}
+		}
 	}
 
 	/// <summary>
-	/// Построитель свечек. Через источник <see cref="ICandleBuilderSource"/> подключается к событию <see cref="ICandleSource{TValue}.Processing"/>,
-	/// и на основе полученных данных строит свечи по заданным критериям.
+	/// Get time zone info.
 	/// </summary>
-	/// <typeparam name="TCandle">Тип свечи, которую будет формировать построитель.</typeparam>
-	public abstract class CandleBuilder<TCandle> : BaseLogReceiver, ICandleBuilder, IStorageCandleSource
-		where TCandle : Candle
+	/// <param name="subscription"><see cref="ICandleBuilderSubscription"/></param>
+	/// <returns>Info.</returns>
+	protected (TimeZoneInfo zone, WorkingTime time) GetTimeZone(ICandleBuilderSubscription subscription)
 	{
-		private sealed class CandleSeriesInfo
+		if (subscription is null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		var board = subscription.Message.IsRegularTradingHours == true ? ExchangeInfoProvider.GetOrCreateBoard(subscription.Message.SecurityId.BoardCode) : ExchangeBoard.Associated;
+
+		return (board.TimeZone, board.WorkingTime);
+	}
+
+	private bool IsTimeValid(MarketDataMessage message, DateTime time)
+	{
+		if (message.IsRegularTradingHours != true)
+			return true;
+
+		var board = ExchangeInfoProvider.TryGetExchangeBoard(message.SecurityId.BoardCode);
+
+		if (board == null)
+			return true;
+
+		return board.IsTradeTime(time, out _, out _);
+	}
+
+	/// <summary>
+	/// Add volume to <see cref="CandleMessage.TotalVolume"/>, <see cref="CandleMessage.BuyVolume"/>, <see cref="CandleMessage.SellVolume"/>, <see cref="CandleMessage.RelativeVolume"/>.
+	/// </summary>
+	/// <param name="candle"><see cref="CandleMessage"/></param>
+	/// <param name="volume">The volume to be added to the candle.</param>
+	/// <param name="volSide">The side of the volume to be added to the candle.</param>
+	protected static void AddVolume(TCandleMessage candle, decimal volume, Sides? volSide)
+	{
+		var hadOnlyKnownSideVolume = candle.TotalVolume == (candle.BuyVolume ?? 0) + (candle.SellVolume ?? 0);
+
+		candle.TotalVolume += volume;
+
+		switch (volSide)
 		{
-			private readonly CandleSourceEnumerator<ICandleBuilderSource, IEnumerable<ICandleBuilderSourceValue>> _enumerator;
-
-			public CandleSeriesInfo(CandleSeries series, DateTimeOffset from, DateTimeOffset to, IEnumerable<ICandleBuilderSource> sources, Action<CandleSeries, IEnumerable<ICandleBuilderSourceValue>> handler, Action<CandleSeries> stopped)
-			{
-				if (series == null)
-					throw new ArgumentNullException("series");
-
-				if (handler == null)
-					throw new ArgumentNullException("handler");
-
-				if (stopped == null)
-					throw new ArgumentNullException("stopped");
-
-				_enumerator = new CandleSourceEnumerator<ICandleBuilderSource, IEnumerable<ICandleBuilderSourceValue>>(series, from, to,
-					sources, v => handler(series, v), () => stopped(series));
-			}
-
-			public Candle CurrentCandle { get; set; }
-
-			public void Start()
-			{
-				_enumerator.Start();
-			}
-
-			public void Stop()
-			{
-				_enumerator.Stop();
-			}
+			case Sides.Buy:
+				candle.BuyVolume       = (candle.BuyVolume ?? 0)      + volume;
+				candle.RelativeVolume  = (candle.RelativeVolume ?? 0) + volume;
+				break;
+			case Sides.Sell:
+				candle.SellVolume      = (candle.SellVolume ?? 0)     + volume;
+				candle.RelativeVolume  = (candle.RelativeVolume ?? 0) - volume;
+				break;
 		}
 
-		private sealed class CandleBuilderSourceList : SynchronizedList<ICandleBuilderSource>, ICandleBuilderSourceList
-		{
-			private readonly CandleBuilder<TCandle> _builder;
+		if (hadOnlyKnownSideVolume && volSide != null)
+			candle.TotalVolume = (candle.BuyVolume ?? 0) + (candle.SellVolume ?? 0);
+	}
 
-			public CandleBuilderSourceList(CandleBuilder<TCandle> builder)
+	/// <summary>
+	/// To process the new data.
+	/// </summary>
+	/// <param name="subscription">Subscription.</param>
+	/// <param name="transform">The data source transformation.</param>
+	/// <returns>A new candles changes.</returns>
+	protected virtual IEnumerable<TCandleMessage> OnProcess(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform)
+	{
+		if (subscription is null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		if (transform == null)
+			throw new ArgumentNullException(nameof(transform));
+
+		var currentCandle = (TCandleMessage)subscription.CurrentCandle;
+		var volumeProfile = subscription.VolumeProfile;
+
+		var candle = ProcessValue(subscription, transform);
+
+		if (candle == null)
+		{
+			// skip the value that cannot be processed
+			yield break;
+		}
+
+		if (candle == currentCandle)
+		{
+			if (subscription.Message.IsCalcVolumeProfile)
 			{
-				_builder = builder;
+				if (volumeProfile == null)
+					throw new InvalidOperationException();
+
+				volumeProfile.Update(transform);
 			}
 
-			protected override void OnAdded(ICandleBuilderSource item)
+			//candle.State = CandleStates.Changed;
+			yield return candle;
+		}
+		else
+		{
+			if (currentCandle != null)
 			{
-				base.OnAdded(item);
-				Subscribe(item);
+				currentCandle.State = CandleStates.Finished;
+				currentCandle.LocalTime = transform.Time;
+				yield return currentCandle;
 			}
 
-			protected override bool OnRemoving(ICandleBuilderSource item)
+			if (subscription.Message.IsCalcVolumeProfile)
 			{
-				UnSubscribe(item);
-				return base.OnRemoving(item);
+				subscription.VolumeProfile = volumeProfile = new(subscription.Message.PriceStep);
+				volumeProfile.Update(transform);
+
+				candle.PriceLevels = subscription.VolumeProfile.PriceLevels;
 			}
 
-			protected override void OnInserted(int index, ICandleBuilderSource item)
-			{
-				base.OnInserted(index, item);
-				Subscribe(item);
-			}
+			candle.State = CandleStates.Active;
+			yield return candle;
+		}
+	}
 
-			protected override bool OnClearing()
-			{
-				foreach (var item in this)
-					UnSubscribe(item);
+	/// <summary>
+	/// To create a new candle.
+	/// </summary>
+	/// <param name="subscription">Subscription.</param>
+	/// <param name="transform">The data source transformation.</param>
+	/// <returns>Created candle.</returns>
+	protected virtual TCandleMessage CreateCandle(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform)
+		=> throw new NotSupportedException(LocalizedStrings.MethodMustBeOverrided);
 
-				return base.OnClearing();
-			}
+	/// <summary>
+	/// Whether the candle is created before data adding.
+	/// </summary>
+	/// <param name="subscription">Subscription.</param>
+	/// <param name="candle">Candle.</param>
+	/// <param name="transform">The data source transformation.</param>
+	/// <returns><see langword="true" /> if the candle should be finished. Otherwise, <see langword="false" />.</returns>
+	protected virtual bool IsCandleFinishedBeforeChange(ICandleBuilderSubscription subscription, TCandleMessage candle, ICandleBuilderValueTransform transform)
+		=> false;
 
-			private void Subscribe(ICandleBuilderSource source)
-			{
-				//source.NewValues += _builder.OnNewValues;
-				source.Error += _builder.RaiseError;
-			}
+	/// <summary>
+	/// To fill in the initial candle settings.
+	/// </summary>
+	/// <param name="subscription">Subscription.</param>
+	/// <param name="candle">Candle.</param>
+	/// <param name="transform">The data source transformation.</param>
+	/// <returns>Candle.</returns>
+	protected virtual TCandleMessage FirstInitCandle(ICandleBuilderSubscription subscription, TCandleMessage candle, ICandleBuilderValueTransform transform)
+	{
+		if (candle == null)
+			throw new ArgumentNullException(nameof(candle));
 
-			private void UnSubscribe(ICandleBuilderSource source)
-			{
-				//source.NewValues -= _builder.OnNewValues;
-				source.Error -= _builder.RaiseError;
-				source.Dispose();
-			}
+		if (transform == null)
+			throw new ArgumentNullException(nameof(transform));
+
+		var price = transform.Price;
+		var volume = transform.Volume;
+
+		candle.BuildFrom = transform.BuildFrom;
+		candle.SecurityId = subscription.Message.SecurityId;
+
+		candle.OpenPrice = price;
+		candle.ClosePrice = price;
+		candle.LowPrice = price;
+		candle.HighPrice = price;
+
+		candle.OpenVolume = volume;
+		candle.CloseVolume = volume;
+		candle.LowVolume = volume;
+		candle.HighVolume = volume;
+
+		if (volume is decimal v)
+		{
+			candle.TotalPrice = price * v;
+			AddVolume(candle, v, transform.Side);
 		}
 
-		private readonly SynchronizedDictionary<CandleSeries, CandleSeriesInfo> _info = new SynchronizedDictionary<CandleSeries, CandleSeriesInfo>();
+		candle.OpenInterest = transform.OpenInterest;
+		candle.LocalTime = transform.Time;
 
-		/// <summary>
-		/// Инициализировать <see cref="CandleBuilder{TCandle}"/>.
-		/// </summary>
-		protected CandleBuilder()
-			: this(new CandleBuilderContainer())
+		candle.TotalTicks = 1;
+
+		return candle;
+	}
+
+	/// <summary>
+	/// To update the candle data.
+	/// </summary>
+	/// <param name="subscription">Subscription.</param>
+	/// <param name="candle">Candle.</param>
+	/// <param name="transform">The data source transformation.</param>
+	protected virtual void UpdateCandle(ICandleBuilderSubscription subscription, TCandleMessage candle, ICandleBuilderValueTransform transform)
+	{
+		if (candle == null)
+			throw new ArgumentNullException(nameof(candle));
+
+		if (transform == null)
+			throw new ArgumentNullException(nameof(transform));
+
+		var price = transform.Price;
+		var time = transform.Time;
+		var volume = transform.Volume;
+
+		if (price < candle.LowPrice)
 		{
+			candle.LowPrice = price;
+			candle.LowTime = time;
+			candle.LowVolume = volume;
 		}
 
-		/// <summary>
-		/// Инициализировать <see cref="CandleBuilder{TCandle}"/>.
-		/// </summary>
-		/// <param name="container">Контейнер данных.</param>
-		protected CandleBuilder(ICandleBuilderContainer container)
+		if (price > candle.HighPrice)
 		{
-			if (container == null)
-				throw new ArgumentNullException("container");
-
-			Sources = new CandleBuilderSourceList(this) { Holder.TradeStorage, Holder.OrderLogStorage };
-
-			Container = container;
+			candle.HighPrice = price;
+			candle.HighTime = time;
+			candle.HighVolume = volume;
 		}
 
-		/// <summary>
-		/// Источники данных.
-		/// </summary>
-		public ICandleBuilderSourceList Sources { get; private set; }
+		candle.ClosePrice = price;
 
-		/// <summary>
-		/// Kонтейнер данных.
-		/// </summary>
-		public ICandleBuilderContainer Container { get; private set; }
-
-		/// <summary>
-		/// Менеджер свечек. Заполняется, если построитель является источником внутри <see cref="ICandleManager.Sources"/>.
-		/// </summary>
-		public ICandleManager CandleManager { get; set; }
-
-		Type ICandleBuilder.CandleType
+		if (volume is decimal v)
 		{
-			get { return typeof(TCandle); }
+			candle.CloseVolume = v;
+
+			candle.TotalPrice += price * v;
+
+			AddVolume(candle, v, transform.Side);
 		}
 
-		private IStorageRegistry _storageRegistry;
+		candle.CloseTime = time;
 
-		/// <summary>
-		/// Хранилище данных. Передается во все источники, реализующие интерфейс <see cref="IStorageCandleSource"/>.
-		/// </summary>
-		public IStorageRegistry StorageRegistry
+		candle.OpenInterest = transform.OpenInterest;
+		candle.LocalTime = transform.Time;
+
+		IncrementTicks(candle);
+	}
+
+	/// <summary>
+	/// Increment the number of ticks in the candle.
+	/// </summary>
+	/// <param name="candle"><see cref="CandleMessage"/></param>
+	protected void IncrementTicks(CandleMessage candle)
+	{
+		if (candle is null)
+			throw new ArgumentNullException(nameof(candle));
+
+		if (candle.TotalTicks != null)
+			candle.TotalTicks++;
+		else
+			candle.TotalTicks = 1;
+	}
+
+	/// <summary>
+	/// To process the new data.
+	/// </summary>
+	/// <param name="subscription">Subscription.</param>
+	/// <param name="transform">The data source transformation.</param>
+	/// <returns>A new candle. If there is not necessary to create a new candle, then <see cref="ICandleBuilderSubscription.CurrentCandle" /> is returned. If it is impossible to create a new candle (<paramref name="transform" /> cannot be applied to candles), then <see langword="null" /> is returned.</returns>
+	protected virtual TCandleMessage ProcessValue(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform)
+	{
+		var currentCandle = (TCandleMessage)subscription.CurrentCandle;
+
+		if (currentCandle == null || IsCandleFinishedBeforeChange(subscription, currentCandle, transform))
 		{
-			get { return _storageRegistry; }
-			set
-			{
-				_storageRegistry = value;
-				Sources.OfType<IStorageCandleSource>().ForEach(s => s.StorageRegistry = value);
-			}
-		}
-
-		/// <summary>
-		/// Приоритет источника по скорости (0 - самый оптимальный).
-		/// </summary>
-		public int SpeedPriority
-		{
-			get { return 2; }
-		}
-
-		/// <summary>
-		/// Событие появления нового значения для обработки.
-		/// </summary>
-		public event Action<CandleSeries, Candle> Processing;
-
-		/// <summary>
-		/// Событие окончания обработки серии.
-		/// </summary>
-		public event Action<CandleSeries> Stopped;
-
-		/// <summary>
-		/// Событие ошибки формирования свечек.
-		/// </summary>
-		public event Action<Exception> Error;
-
-		#region ICandleSource members
-
-		/// <summary>
-		/// Получить временные диапазоны, для которых у данного источниках для передаваемой серии свечек есть данные.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Временные диапазоны.</returns>
-		public virtual IEnumerable<Range<DateTimeOffset>> GetSupportedRanges(CandleSeries series)
-		{
-			if (series == null)
-				throw new ArgumentNullException("series");
-
-			if (series.CandleType != typeof(TCandle))
-				return Enumerable.Empty<Range<DateTimeOffset>>();
-
-			return Sources.SelectMany(s => s.GetSupportedRanges(series)).JoinRanges().ToArray();
-		}
-
-		/// <summary>
-		/// Запустить получение свечек для указанной серии.
-		/// </summary>
-		/// <param name="series">Серия свечек, для которой необходимо начать получать свечи.</param>
-		/// <param name="from">Начальная дата, с которой необходимо получать свечи.</param>
-		/// <param name="to">Конечная дата, до которой необходимо получать свечи.</param>
-		public virtual void Start(CandleSeries series, DateTimeOffset from, DateTimeOffset to)
-		{
-			if (series == null)
-				throw new ArgumentNullException("series");
-
-			CandleSeriesInfo info;
-
-			lock (_info.SyncRoot)
-			{
-				info = _info.TryGetValue(series);
-
-				if (info != null)
-					throw new ArgumentException(LocalizedStrings.Str636Params.Put(series), "series");
-
-				info = new CandleSeriesInfo(series, from, to, Sources, OnNewValues, s =>
-				{
-					_info.Remove(s);
-					OnStopped(s);
-				});
-
-				Container.Start(series, from, to);
-
-				_info.Add(series, info);
-			}
-
-			info.Start();
-		}
-
-		/// <summary>
-		/// Остановить получение свечек, запущенное через <see cref="Start"/>.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		public virtual void Stop(CandleSeries series)
-		{
-			if (series == null)
-				throw new ArgumentNullException("series");
-
-			var info = _info.TryGetValue(series);
-
-			if (info == null)
-				return;
-
-			info.Stop();
-		}
-
-		#endregion
-
-		/// <summary>
-		/// Метод-обработчик события <see cref="CandleSeries.Stopped"/>.
-		/// </summary>
-		/// <param name="series">Серия свечек, для которой был было вызвано событие.</param>
-		protected virtual void OnStopped(CandleSeries series)
-		{
-			_info.Remove(series);
-			Stopped.SafeInvoke(series);
-		}
-
-		/// <summary>
-		/// Обработать новые данные.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="values">Новые данные.</param>
-		protected virtual void OnNewValues(CandleSeries series, IEnumerable<ICandleBuilderSourceValue> values)
-		{
-			if (values == null)
-				throw new ArgumentNullException("values");
-
-			var info = _info.TryGetValue(series);
-
-			if (info == null)
-				return;
-
-			foreach (var value in values)
-			{
-				var valueAdded = false;
-
-				while (true)
-				{
-					var currCandle = info.CurrentCandle;
-
-					var candle = ProcessValue(series, (TCandle)currCandle, value);
-
-					if (candle == null)
-					{
-						// если значение не может быть обработано, то просто его пропускаем
-						break;
-						//throw new InvalidOperationException("Фабрика вернула пустую свечу.");
-					}
-
-					if (candle == currCandle)
-					{
-						if (!valueAdded)
-							Container.AddValue(series, candle, value);
-
-						candle.State = CandleStates.Changed;
-						RaiseProcessing(series, candle);
-
-						break;
-					}
-					else
-					{
-						if (currCandle != null)
-						{
-							info.CurrentCandle = null;
-
-							currCandle.State = CandleStates.Finished;
-							RaiseProcessing(series, currCandle);
-						}
-
-						info.CurrentCandle = candle;
-
-						Container.AddValue(series, candle, value);
-						valueAdded = true;
-
-						candle.State = CandleStates.Started;
-						RaiseProcessing(series, candle);
-					}
-				}
-			}
-		}
-
-		/// <summary>
-		/// Создать новую свечу.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="value">Данные, с помощью которых необходимо создать новую свечу.</param>
-		/// <returns>Созданная свеча.</returns>
-		protected virtual TCandle CreateCandle(CandleSeries series, ICandleBuilderSourceValue value)
-		{
-			throw new NotSupportedException(LocalizedStrings.Str637);
-		}
-
-		/// <summary>
-		/// Сформирована ли свеча до добавления данных.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candle">Свеча.</param>
-		/// <param name="value">Данные, с помощью которых принимается решение о необходимости окончания формирования текущей свечи.</param>
-		/// <returns><see langword="true"/>, если свечу необходимо закончить. Иначе, <see langword="false"/>.</returns>
-		protected virtual bool IsCandleFinishedBeforeChange(CandleSeries series, TCandle candle, ICandleBuilderSourceValue value)
-		{
-			return false;
-		}
-
-		/// <summary>
-		/// Заполнить первоначальные параметры свечи.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candle">Свеча.</param>
-		/// <param name="value">Данные.</param>
-		/// <returns>Свеча.</returns>
-		protected virtual TCandle FirstInitCandle(CandleSeries series, TCandle candle, ICandleBuilderSourceValue value)
-		{
-			if (candle == null)
-				throw new ArgumentNullException("candle");
-
-			if (value == null)
-				throw new ArgumentNullException("value");
-
-			candle.Security = value.Security;
-
-			candle.OpenPrice = value.Price;
-			candle.ClosePrice = value.Price;
-			candle.LowPrice = value.Price;
-			candle.HighPrice = value.Price;
-			//candle.TotalPrice = value.Price;
-
-			candle.OpenVolume = value.Volume;
-			candle.CloseVolume = value.Volume;
-			candle.LowVolume = value.Volume;
-			candle.HighVolume = value.Volume;
-			//candle.TotalVolume = value.Volume;
-
-			return candle;
-		}
-
-		/// <summary>
-		/// Обновить свечу данными.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candle">Свеча.</param>
-		/// <param name="value">Данные.</param>
-		protected virtual void UpdateCandle(CandleSeries series, TCandle candle, ICandleBuilderSourceValue value)
-		{
-			if (candle == null)
-				throw new ArgumentNullException("candle");
-
-			if (value == null)
-				throw new ArgumentNullException("value");
-
-			if (value.Price < candle.LowPrice)
-			{
-				candle.LowPrice = value.Price;
-				candle.LowTime = value.Time;
-			}
-
-			if (value.Price > candle.HighPrice)
-			{
-				candle.HighPrice = value.Price;
-				candle.HighTime = value.Time;
-			}
-
-			candle.ClosePrice = value.Price;
-			candle.TotalPrice += value.Price * value.Volume;
-
-			candle.LowVolume = (candle.LowVolume ?? 0m).Min(value.Volume);
-			candle.HighVolume = (candle.HighVolume ?? 0m).Max(value.Volume);
-			candle.CloseVolume = value.Volume;
-			candle.TotalVolume += value.Volume;
-
-			if (value.OrderDirection != null)
-			{
-				candle.RelativeVolume += value.OrderDirection == Sides.Buy ? value.Volume : -value.Volume;
-			}
-
-			candle.CloseTime = value.Time;
-
-			if (series.IsCalcVolumeProfile)
-				candle.VolumeProfileInfo.Update(value);
-		}
-
-		/// <summary>
-		/// Обработать новые данные.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="currentCandle">Текущая свеча.</param>
-		/// <param name="value">Новые данные, с помощью которых принимается решение о необходимости начала или окончания формирования текущей свечи.</param>
-		/// <returns>Новая свеча. Если новую свечу нет необходимости создавать, то возвращается <paramref name="currentCandle"/>.
-		/// Если новую свечу создать невозможно (<paramref name="value"/> не может быть применено к свечам), то возвращается null.</returns>
-		protected virtual TCandle ProcessValue(CandleSeries series, TCandle currentCandle, ICandleBuilderSourceValue value)
-		{
-			if (currentCandle == null || IsCandleFinishedBeforeChange(series, currentCandle, value))
-			{
-				currentCandle = CreateCandle(series, value);
-				this.AddDebugLog("NewCandle {0} ForValue {1}", currentCandle, value);
-				return currentCandle;
-			}
-
-			UpdateCandle(series, currentCandle, value);
-			this.AddDebugLog("UpdatedCandle {0} ForValue {1}", currentCandle, value);
-
+			currentCandle = CreateCandle(subscription, transform);
+			LogDebug("NewCandle {0} ForValue {1}", currentCandle, transform);
 			return currentCandle;
 		}
 
-		/// <summary>
-		/// Вызвать событие <see cref="Processing"/>.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candle">Свеча.</param>
-		protected virtual void RaiseProcessing(CandleSeries series, Candle candle)
-		{
-			if (series == null)
-				throw new ArgumentNullException("series");
+		UpdateCandle(subscription, currentCandle, transform);
 
-			if (candle == null)
-				throw new ArgumentNullException("candle");
+		// TODO performance
+		//LogDebug("UpdatedCandle {0} ForValue {1}", currentCandle, value);
 
-			// mika: чтобы построение свечек продолжалось, даже если в пользовательских обработчиках ошибки.
-			// иначе это может привести к испорченной последовательности последующих вызовов свечек.
-			// нашел багу эспер
-			try
-			{
-				Processing.SafeInvoke(series, candle);
-			}
-			catch (Exception ex)
-			{
-				RaiseError(ex);
-			}
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="Error"/>.
-		/// </summary>
-		/// <param name="error">Информация об ошибке.</param>
-		protected virtual void RaiseError(Exception error)
-		{
-			Error.SafeInvoke(error);
-			this.AddErrorLog(error);
-		}
-
-		/// <summary>
-		/// Принудительно завершить свечу.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candle">Свеча.</param>
-		protected void ForceFinishCandle(CandleSeries series, Candle candle)
-		{
-			var info = _info.TryGetValue(series);
-
-			if (info == null)
-				return;
-
-			// если успела прийти новая свеча
-			if (candle.State == CandleStates.None && info.CurrentCandle != null)
-				return;
-
-			if (candle.State != CandleStates.None && info.CurrentCandle != candle)
-				return;
-
-			info.CurrentCandle = candle.State == CandleStates.None ? null : candle;
-
-			if (candle.State != CandleStates.None)
-				candle.State = CandleStates.Finished;
-
-			RaiseProcessing(series, candle);
-		}
-
-		/// <summary>
-		/// Освободить занятые ресурсы.
-		/// </summary>
-		protected override void DisposeManaged()
-		{
-			Sources.Clear();
-			Container.Dispose();
-			base.DisposeManaged();
-		}
+		return currentCandle;
 	}
 
 	/// <summary>
-	/// Построитель свечек типа <see cref="TimeFrameCandle"/>.
+	/// To cut the price, to make it multiple of minimal step, also to limit number of signs after the comma.
 	/// </summary>
-	public class TimeFrameCandleBuilder : CandleBuilder<TimeFrameCandle>
-	{
-		//private sealed class TimeoutInfo : Disposable
-		//{
-		//	private readonly MarketTimer _timer;
-		//	private DateTime _emptyCandleTime;
-		//	private readonly TimeSpan _timeFrame;
-		//	private readonly TimeSpan _offset;
-		//	private DateTime _nextTime;
-
-		//	public TimeoutInfo(CandleSeries series, TimeFrameCandleBuilder builder)
-		//	{
-		//		if (series == null)
-		//			throw new ArgumentNullException("series");
-
-		//		if (series.Security.Connector == null)
-		//			throw new ArgumentException("Инструмент {0} не имеет информации о подключении.".Put(series.Security), "series");
-
-		//		if (builder == null)
-		//			throw new ArgumentNullException("builder");
-
-		//		_timeFrame = (TimeSpan)series.Arg;
-		//		_offset = TimeSpan.FromTicks((long)((decimal)((decimal)_timeFrame.Ticks + builder.Timeout)));
-
-		//		var security = series.Security;
-		//		var connector = security.Connector;
-
-		//		var isFirstTime = true;
-
-		//		_timer = new MarketTimer(connector, () =>
-		//		{
-		//			if (isFirstTime)
-		//			{
-		//				isFirstTime = false;
-
-		//				var bounds = _timeFrame.GetCandleBounds(security);
-
-		//				_emptyCandleTime = bounds.Min;
-		//				_nextTime = GetLimitTime(bounds.Min);
-
-		//				return;
-		//			}
-
-		//			if (security.GetMarketTime() >= _nextTime)
-		//			{
-		//				_nextTime += _timeFrame;
-
-		//				var candle = LastCandle;
-
-		//				if (candle == null)
-		//				{
-		//					candle = new TimeFrameCandle
-		//					{
-		//						Security = security,
-		//						TimeFrame = _timeFrame,
-		//						OpenTime = _emptyCandleTime,
-		//						CloseTime = _emptyCandleTime + _timeFrame,
-		//					};
-
-		//					_emptyCandleTime += _timeFrame;
-
-		//					if (!builder.GenerateEmptyCandles)
-		//						return;
-		//				}
-
-		//				builder.ForceFinishCandle(series, candle);
-		//			}
-		//		}).Interval(_timeFrame).Start();
-		//	}
-
-		//	private TimeFrameCandle _lastCandle;
-
-		//	public TimeFrameCandle LastCandle
-		//	{
-		//		private get { return _lastCandle; }
-		//		set
-		//		{
-		//			_lastCandle = value;
-		//			_emptyCandleTime = value.OpenTime + _timeFrame;
-		//			_nextTime = GetLimitTime(value.OpenTime);
-		//		}
-		//	}
-
-		//	private DateTime GetLimitTime(DateTime currentCandleTime)
-		//	{
-		//		return currentCandleTime + _offset;
-		//	}
-
-		//	protected override void DisposeManaged()
-		//	{
-		//		base.DisposeManaged();
-		//		_timer.Dispose();
-		//	}
-		//}
-
-		//private readonly SynchronizedDictionary<CandleSeries, TimeoutInfo> _timeoutInfos = new SynchronizedDictionary<CandleSeries, TimeoutInfo>();
-
-		/// <summary>
-		/// Создать <see cref="TimeFrameCandleBuilder"/>.
-		/// </summary>
-		public TimeFrameCandleBuilder()
-		{
-			GenerateEmptyCandles = true;
-		}
-
-		/// <summary>
-		/// Создать <see cref="TimeFrameCandleBuilder"/>.
-		/// </summary>
-		/// <param name="container">Контейнер данных.</param>
-		public TimeFrameCandleBuilder(ICandleBuilderContainer container)
-			: base(container)
-		{
-			GenerateEmptyCandles = true;
-		}
-
-		private Unit _timeout = 10.Percents();
-
-		/// <summary>
-		/// Временной сдвиг от окончания тайм-фрейма, после которого для незакрытой свечи принудительно посылается сигнал на закрытие.
-		/// По-умолчанию равно 10% от тайм-фрейма.
-		/// </summary>
-		public Unit Timeout
-		{
-			get { return _timeout; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
-
-				if (value < 0)
-					throw new ArgumentOutOfRangeException("value", value, LocalizedStrings.OffsetValueIncorrect);
-
-				_timeout = value;
-			}
-		}
-
-		/// <summary>
-		/// Генерировать ли пустые свечи (<see cref="CandleStates.None"/>) при отсутствии сделок.
-		/// По-умолчанию режим включен.
-		/// </summary>
-		public bool GenerateEmptyCandles { get; set; }
-
-		/// <summary>
-		/// Запустить получение свечек для указанной серии.
-		/// </summary>
-		/// <param name="series">Серия свечек, для которой необходимо начать получать свечи.</param>
-		/// <param name="from">Начальная дата, с которой необходимо получать свечи.</param>
-		/// <param name="to">Конечная дата, до которой необходимо получать свечи.</param>
-		public override void Start(CandleSeries series, DateTimeOffset from, DateTimeOffset to)
-		{
-			base.Start(series, from, to);
-
-			if (Timeout == 0)
-				return;
-
-			// TODO mika временно выключил, ошибки, нужно протестировать
-			//_timeoutInfos.Add(series, new TimeoutInfo(series, this));
-		}
-
-		/// <summary>
-		/// Получить временные диапазоны, для которых у данного источниках для передаваемой серии свечек есть данные.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Временные диапазоны.</returns>
-		public override IEnumerable<Range<DateTimeOffset>> GetSupportedRanges(CandleSeries series)
-		{
-			var ranges = base.GetSupportedRanges(series);
-
-			if (!ranges.IsEmpty())
-			{
-				if (!(series.Arg is TimeSpan))
-					throw new ArgumentException(LocalizedStrings.WrongCandleArg.Put(series.Arg), "series");
-
-				if ((TimeSpan)series.Arg <= TimeSpan.Zero)
-					throw new ArgumentOutOfRangeException("series", series.Arg, LocalizedStrings.Str640);
-			}
-
-			return ranges;
-		}
-
-		/// <summary>
-		/// Создать новую свечу.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="value">Данные, с помощью которых необходимо создать новую свечу.</param>
-		/// <returns>Созданная свеча.</returns>
-		protected override TimeFrameCandle CreateCandle(CandleSeries series, ICandleBuilderSourceValue value)
-		{
-			var timeFrame = (TimeSpan)series.Arg;
-
-			var bounds = timeFrame.GetCandleBounds(value.Time.DateTime, series.WorkingTime);
-
-			if (value.Time < bounds.Min)
-				return null;
-
-			//var openTime = new DateTimeOffset(bounds.Min + value.Time.Offset, value.Time.Offset);
-			var openTime = new DateTimeOffset(bounds.Min, value.Time.Offset);
-
-			var candle = FirstInitCandle(series, new TimeFrameCandle
-			{
-				TimeFrame = timeFrame,
-				OpenTime = openTime,
-				HighTime = openTime,
-				LowTime = openTime,
-				CloseTime = openTime, // реальное окончание свечи определяет по последней сделке
-			}, value);
-
-			//var info = _timeoutInfos.TryGetValue(series);
-			//if (info != null)
-			//	info.LastCandle = candle;
-
-			return candle;
-		}
-
-		/// <summary>
-		/// Сформирована ли свеча до добавления данных.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candle">Свеча.</param>
-		/// <param name="value">Данные, с помощью которых принимается решение о необходимости окончания формирования текущей свечи.</param>
-		/// <returns><see langword="true"/>, если свечу необходимо закончить. Иначе, <see langword="false"/>.</returns>
-		protected override bool IsCandleFinishedBeforeChange(CandleSeries series, TimeFrameCandle candle, ICandleBuilderSourceValue value)
-		{
-			return value.Time < candle.OpenTime || (candle.OpenTime + candle.TimeFrame) <= value.Time;
-		}
-
-		///// <summary>
-		///// Метод-обработчик события <see cref="CandleSeries.Stopped"/>.
-		///// </summary>
-		///// <param name="series">Серия свечек, для которой был было вызвано событие.</param>
-		//protected override void OnStopped(CandleSeries series)
-		//{
-		//	_timeoutInfos.Remove(series);
-		//	base.OnStopped(series);
-		//}
-
-		///// <summary>
-		///// Освободить ресурсы.
-		///// </summary>
-		//protected override void DisposeManaged()
-		//{
-		//	_timeoutInfos.SyncDo(d => d.Values.ForEach(v => v.Dispose()));
-		//	_timeoutInfos.Clear();
-
-		//	base.DisposeManaged();
-		//}
-	}
+	/// <param name="price">The price to be made multiple.</param>
+	/// <param name="subscription"><see cref="ICandleBuilderSubscription"/></param>
+	/// <returns>The multiple price.</returns>
+	protected decimal ShrinkPrice(Unit price, ICandleBuilderSubscription subscription)
+		=> ShrinkPrice((decimal)price, subscription);
 
 	/// <summary>
-	/// Построитель свечек типа <see cref="TickCandle"/>.
+	/// To cut the price, to make it multiple of minimal step, also to limit number of signs after the comma.
 	/// </summary>
-	public class TickCandleBuilder : CandleBuilder<TickCandle>
+	/// <param name="price">The price to be made multiple.</param>
+	/// <param name="subscription"><see cref="ICandleBuilderSubscription"/></param>
+	/// <returns>The multiple price.</returns>
+	protected decimal ShrinkPrice(decimal price, ICandleBuilderSubscription subscription)
+		=> price.ShrinkPrice(subscription.CheckOnNull(nameof(subscription)).Message);
+
+	/// <summary>
+	/// Round the price to the specified step.
+	/// </summary>
+	/// <param name="price">Price.</param>
+	/// <param name="step">Step.</param>
+	/// <returns>Rounded value.</returns>
+	protected decimal Round(decimal price, Unit step)
 	{
-		/// <summary>
-		/// Создать <see cref="TickCandleBuilder"/>.
-		/// </summary>
-		public TickCandleBuilder()
-		{
-		}
+		if (step is null)
+			throw new ArgumentNullException(nameof(step));
 
-		/// <summary>
-		/// Создать <see cref="TickCandleBuilder"/>.
-		/// </summary>
-		/// <param name="container">Контейнер данных.</param>
-		public TickCandleBuilder(ICandleBuilderContainer container)
-			: base(container)
-		{
-		}
+		static decimal roundToAbs(decimal price, decimal step)
+			=> (price / step).Round() * step;
 
-		/// <summary>
-		/// Получить временные диапазоны, для которых у данного источниках для передаваемой серии свечек есть данные.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Временные диапазоны.</returns>
-		public override IEnumerable<Range<DateTimeOffset>> GetSupportedRanges(CandleSeries series)
+		return step.Type switch
 		{
-			var ranges = base.GetSupportedRanges(series);
+			UnitTypes.Percent => roundToAbs(price, (decimal)((price + step) - price)),
+			_ => roundToAbs(price, (decimal)step),
+		};
+	}
+}
 
-			if (!ranges.IsEmpty())
+/// <summary>
+/// The builder of candles of <see cref="TimeFrameCandleMessage"/> type.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="TimeFrameCandleBuilder"/>.
+/// </remarks>
+/// <param name="exchangeInfoProvider">The exchange boards provider.</param>
+public class TimeFrameCandleBuilder(IExchangeInfoProvider exchangeInfoProvider) : CandleBuilder<TimeFrameCandleMessage>(exchangeInfoProvider)
+{
+	/// <summary>
+	/// Whether to create empty candles (<see cref="CandleStates.None"/>) in the lack of trades. The default mode is enabled.
+	/// </summary>
+	public bool GenerateEmptyCandles { get; set; } = true;
+
+	/// <inheritdoc />
+	protected override IEnumerable<TimeFrameCandleMessage> OnProcess(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform)
+	{
+		var current = (TimeFrameCandleMessage)subscription.CurrentCandle;
+
+		if (current is not null && transform.Time < current.OpenTime)
+			yield break;
+
+		var emptyFrom = current?.OpenTime + current?.TypedArg;
+
+		foreach (var candle in base.OnProcess(subscription, transform))
+		{
+			yield return candle;
+
+			if (!GenerateEmptyCandles || current is null || candle != current || candle.State != CandleStates.Finished)
+				continue;
+
+			var (zone, time) = GetTimeZone(subscription);
+			var nextOpen = current.TypedArg.GetCandleBounds(transform.Time, zone, time).Min;
+
+			for (var openTime = emptyFrom.Value; openTime < nextOpen; openTime += current.TypedArg)
 			{
-				if (!(series.Arg is int))
-					throw new ArgumentException(LocalizedStrings.WrongCandleArg.Put(series.Arg), "series");
-
-				if ((int)series.Arg <= 0)
-					throw new ArgumentOutOfRangeException("series", series.Arg, LocalizedStrings.TickCountMustBePositive);
+				yield return new TimeFrameCandleMessage
+				{
+					SecurityId = current.SecurityId,
+					TypedArg = current.TypedArg,
+					BuildFrom = current.BuildFrom,
+					OpenTime = openTime,
+					CloseTime = openTime + current.TypedArg,
+					HighTime = openTime,
+					LowTime = openTime,
+					OpenPrice = current.ClosePrice,
+					HighPrice = current.ClosePrice,
+					LowPrice = current.ClosePrice,
+					ClosePrice = current.ClosePrice,
+					TotalTicks = 0,
+					LocalTime = transform.Time,
+					State = CandleStates.None,
+				};
 			}
-
-			return ranges;
-		}
-
-		/// <summary>
-		/// Создать новую свечу.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="value">Данные, с помощью которых необходимо создать новую свечу.</param>
-		/// <returns>Созданная свеча.</returns>
-		protected override TickCandle CreateCandle(CandleSeries series, ICandleBuilderSourceValue value)
-		{
-			return FirstInitCandle(series, new TickCandle
-			{
-				MaxTradeCount = (int)series.Arg,
-				OpenTime = value.Time,
-				CloseTime = value.Time,
-				HighTime = value.Time,
-				LowTime = value.Time,
-			}, value);
-		}
-
-		/// <summary>
-		/// Сформирована ли свеча до добавления данных.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candle">Свеча.</param>
-		/// <param name="value">Данные, с помощью которых принимается решение о необходимости окончания формирования текущей свечи.</param>
-		/// <returns><see langword="true"/>, если свечу необходимо закончить. Иначе, <see langword="false"/>.</returns>
-		protected override bool IsCandleFinishedBeforeChange(CandleSeries series, TickCandle candle, ICandleBuilderSourceValue value)
-		{
-			return candle.CurrentTradeCount >= candle.MaxTradeCount;
-		}
-
-		/// <summary>
-		/// Обновить свечу данными.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candle">Свеча.</param>
-		/// <param name="value">Данные.</param>
-		protected override void UpdateCandle(CandleSeries series, TickCandle candle, ICandleBuilderSourceValue value)
-		{
-			base.UpdateCandle(series, candle, value);
-			candle.CurrentTradeCount++;
 		}
 	}
 
-	/// <summary>
-	/// Построитель свечек типа <see cref="VolumeCandle"/>.
-	/// </summary>
-	public class VolumeCandleBuilder : CandleBuilder<VolumeCandle>
+	/// <inheritdoc />
+	protected override TimeFrameCandleMessage CreateCandle(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform)
 	{
-		/// <summary>
-		/// Создать <see cref="VolumeCandleBuilder"/>.
-		/// </summary>
-		public VolumeCandleBuilder()
+		var timeFrame = subscription.Message.GetTimeFrame();
+
+		var (zone, time) = GetTimeZone(subscription);
+		var bounds = timeFrame.GetCandleBounds(transform.Time, zone, time);
+
+		if (transform.Time < bounds.Min)
+			return null;
+
+		var openTime = bounds.Min;
+
+		var candle = FirstInitCandle(subscription, new()
 		{
-		}
+			TypedArg = timeFrame,
+			OpenTime = openTime,
+			HighTime = openTime,
+			LowTime = openTime,
+			CloseTime = openTime, // реальное окончание свечи определяет по последней сделке
+		}, transform);
 
-		/// <summary>
-		/// Создать <see cref="VolumeCandleBuilder"/>.
-		/// </summary>
-		/// <param name="container">Контейнер данных.</param>
-		public VolumeCandleBuilder(ICandleBuilderContainer container)
-			: base(container)
-		{
-		}
-
-		/// <summary>
-		/// Получить временные диапазоны, для которых у данного источниках для передаваемой серии свечек есть данные.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Временные диапазоны.</returns>
-		public override IEnumerable<Range<DateTimeOffset>> GetSupportedRanges(CandleSeries series)
-		{
-			var ranges = base.GetSupportedRanges(series);
-
-			if (!ranges.IsEmpty())
-			{
-				if (!(series.Arg is decimal))
-					throw new ArgumentException(LocalizedStrings.WrongCandleArg.Put(series.Arg), "series");
-
-				if ((decimal)series.Arg <= 0)
-					throw new ArgumentOutOfRangeException("series", series.Arg, LocalizedStrings.VolumeMustBeGreaterThanZero);
-			}
-
-			return ranges;
-		}
-
-		/// <summary>
-		/// Создать новую свечу.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="value">Данные, с помощью которых необходимо создать новую свечу.</param>
-		/// <returns>Созданная свеча.</returns>
-		protected override VolumeCandle CreateCandle(CandleSeries series, ICandleBuilderSourceValue value)
-		{
-			return FirstInitCandle(series, new VolumeCandle
-			{
-				Volume = (decimal)series.Arg,
-				OpenTime = value.Time,
-				CloseTime = value.Time,
-				HighTime = value.Time,
-				LowTime = value.Time,
-			}, value);
-		}
-
-		/// <summary>
-		/// Сформирована ли свеча до добавления данных.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candle">Свеча.</param>
-		/// <param name="value">Данные, с помощью которых принимается решение о необходимости окончания формирования текущей свечи.</param>
-		/// <returns><see langword="true"/>, если свечу необходимо закончить. Иначе, <see langword="false"/>.</returns>
-		protected override bool IsCandleFinishedBeforeChange(CandleSeries series, VolumeCandle candle, ICandleBuilderSourceValue value)
-		{
-			return candle.TotalVolume >= candle.Volume;
-		}
+		return candle;
 	}
 
-	/// <summary>
-	/// Построитель свечек типа <see cref="RangeCandle"/>.
-	/// </summary>
-	public class RangeCandleBuilder : CandleBuilder<RangeCandle>
+	/// <inheritdoc />
+	protected override bool IsCandleFinishedBeforeChange(ICandleBuilderSubscription subscription, TimeFrameCandleMessage candle, ICandleBuilderValueTransform transform)
 	{
-		/// <summary>
-		/// Создать <see cref="RangeCandleBuilder"/>.
-		/// </summary>
-		public RangeCandleBuilder()
+		return (candle.OpenTime + candle.TypedArg) <= transform.Time;
+	}
+}
+
+/// <summary>
+/// The builder of candles of <see cref="TickCandleMessage"/> type.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="TickCandleBuilder"/>.
+/// </remarks>
+/// <param name="exchangeInfoProvider">The exchange boards provider.</param>
+public class TickCandleBuilder(IExchangeInfoProvider exchangeInfoProvider) : CandleBuilder<TickCandleMessage>(exchangeInfoProvider)
+{
+	/// <inheritdoc />
+	protected override TickCandleMessage CreateCandle(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform)
+	{
+		var time = transform.Time;
+
+		return FirstInitCandle(subscription, new()
 		{
-		}
-
-		/// <summary>
-		/// Создать <see cref="RangeCandleBuilder"/>.
-		/// </summary>
-		/// <param name="container">Контейнер данных.</param>
-		public RangeCandleBuilder(ICandleBuilderContainer container)
-			: base(container)
-		{
-		}
-
-		/// <summary>
-		/// Получить временные диапазоны, для которых у данного источниках для передаваемой серии свечек есть данные.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Временные диапазоны.</returns>
-		public override IEnumerable<Range<DateTimeOffset>> GetSupportedRanges(CandleSeries series)
-		{
-			var ranges = base.GetSupportedRanges(series);
-
-			if (!ranges.IsEmpty())
-			{
-				if (!(series.Arg is Unit))
-					throw new ArgumentException(LocalizedStrings.WrongCandleArg.Put(series.Arg), "series");
-
-				if ((Unit)series.Arg <= 0)
-					throw new ArgumentOutOfRangeException("series", series.Arg, LocalizedStrings.PriceRangeMustBeGreaterThanZero);
-			}
-
-			return ranges;
-		}
-
-		/// <summary>
-		/// Создать новую свечу.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="value">Данные, с помощью которых необходимо создать новую свечу.</param>
-		/// <returns>Созданная свеча.</returns>
-		protected override RangeCandle CreateCandle(CandleSeries series, ICandleBuilderSourceValue value)
-		{
-			return FirstInitCandle(series, new RangeCandle
-			{
-				PriceRange = (Unit)series.Arg,
-				OpenTime = value.Time,
-				CloseTime = value.Time,
-				HighTime = value.Time,
-				LowTime = value.Time,
-			}, value);
-		}
-
-		/// <summary>
-		/// Сформирована ли свеча до добавления данных.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candle">Свеча.</param>
-		/// <param name="value">Данные, с помощью которых принимается решение о необходимости окончания формирования текущей свечи.</param>
-		/// <returns><see langword="true"/>, если свечу необходимо закончить. Иначе, <see langword="false"/>.</returns>
-		protected override bool IsCandleFinishedBeforeChange(CandleSeries series, RangeCandle candle, ICandleBuilderSourceValue value)
-		{
-			return (decimal)(candle.LowPrice + candle.PriceRange) <= candle.HighPrice;
-		}
+			TypedArg = subscription.Message.GetArg<int>(),
+			OpenTime = time,
+			CloseTime = time,
+			HighTime = time,
+			LowTime = time,
+		}, transform);
 	}
 
-	/// <summary>
-	/// Построитель свечек типа <see cref="PnFCandle"/>.
-	/// </summary>
-	public class PnFCandleBuilder : CandleBuilder<PnFCandle>
+	/// <inheritdoc />
+	protected override bool IsCandleFinishedBeforeChange(ICandleBuilderSubscription subscription, TickCandleMessage candle, ICandleBuilderValueTransform transform)
 	{
-		/// <summary>
-		/// Создать <see cref="PnFCandleBuilder"/>.
-		/// </summary>
-		public PnFCandleBuilder()
+		return candle.TotalTicks != null && candle.TotalTicks.Value >= candle.TypedArg;
+	}
+}
+
+/// <summary>
+/// The builder of candles of <see cref="VolumeCandleMessage"/> type.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="VolumeCandleBuilder"/>.
+/// </remarks>
+/// <param name="exchangeInfoProvider">The exchange boards provider.</param>
+public class VolumeCandleBuilder(IExchangeInfoProvider exchangeInfoProvider) : CandleBuilder<VolumeCandleMessage>(exchangeInfoProvider)
+{
+	/// <inheritdoc />
+	protected override VolumeCandleMessage CreateCandle(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform)
+	{
+		var time = transform.Time;
+
+		return FirstInitCandle(subscription, new()
 		{
+			TypedArg = subscription.Message.GetArg<decimal>(),
+			OpenTime = time,
+			CloseTime = time,
+			HighTime = time,
+			LowTime = time,
+		}, transform);
+	}
+
+	/// <inheritdoc />
+	protected override bool IsCandleFinishedBeforeChange(ICandleBuilderSubscription subscription, VolumeCandleMessage candle, ICandleBuilderValueTransform transform)
+	{
+		return candle.TotalVolume >= candle.TypedArg;
+	}
+}
+
+/// <summary>
+/// The builder of candles of <see cref="RangeCandleMessage"/> type.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="RangeCandleBuilder"/>.
+/// </remarks>
+/// <param name="exchangeInfoProvider">The exchange boards provider.</param>
+public class RangeCandleBuilder(IExchangeInfoProvider exchangeInfoProvider) : CandleBuilder<RangeCandleMessage>(exchangeInfoProvider)
+{
+	/// <inheritdoc />
+	protected override RangeCandleMessage CreateCandle(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform)
+	{
+		var time = transform.Time;
+
+		return FirstInitCandle(subscription, new RangeCandleMessage
+		{
+			TypedArg = subscription.Message.GetArg<Unit>(),
+			OpenTime = time,
+			CloseTime = time,
+			HighTime = time,
+			LowTime = time,
+		}, transform);
+	}
+
+	/// <inheritdoc />
+	protected override bool IsCandleFinishedBeforeChange(ICandleBuilderSubscription subscription, RangeCandleMessage candle, ICandleBuilderValueTransform transform)
+	{
+		return (decimal)(candle.LowPrice + candle.TypedArg) <= candle.HighPrice;
+	}
+}
+
+/// <summary>
+/// The builder of candles of <see cref="PnFCandleMessage"/> type.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="PnFCandleBuilder"/>.
+/// </remarks>
+/// <param name="exchangeInfoProvider">The exchange boards provider.</param>
+public class PnFCandleBuilder(IExchangeInfoProvider exchangeInfoProvider) : CandleBuilder<PnFCandleMessage>(exchangeInfoProvider)
+{
+	/// <inheritdoc />
+	protected override IEnumerable<PnFCandleMessage> OnProcess(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform)
+	{
+		var currentPnFCandle = (PnFCandleMessage)subscription.CurrentCandle;
+
+		var pnf = subscription.Message.GetArg<PnFArg>();
+
+		var boxSize = pnf.BoxSize;
+
+		var price = ShrinkPrice(Round(transform.Price, boxSize), subscription);
+
+		var volume = transform.Volume;
+		var time = transform.Time;
+		var side = transform.Side;
+		var oi = transform.OpenInterest;
+		var buildFrom = transform.BuildFrom;
+
+		if (currentPnFCandle == null)
+		{
+			var openPrice = price;
+			var highPrice = ShrinkPrice(openPrice + pnf.BoxSize, subscription);
+
+			currentPnFCandle = CreateCandle(subscription, buildFrom, pnf, openPrice, highPrice, openPrice, highPrice, price, volume, side, time, oi);
+			yield return currentPnFCandle;
 		}
-
-		/// <summary>
-		/// Создать <see cref="PnFCandleBuilder"/>.
-		/// </summary>
-		/// <param name="container">Контейнер данных.</param>
-		public PnFCandleBuilder(ICandleBuilderContainer container)
-			: base(container)
+		else
 		{
-		}
+			var isX = currentPnFCandle.OpenPrice <= currentPnFCandle.ClosePrice;
 
-		/// <summary>
-		/// Получить временные диапазоны, для которых у данного источниках для передаваемой серии свечек есть данные.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Временные диапазоны.</returns>
-		public override IEnumerable<Range<DateTimeOffset>> GetSupportedRanges(CandleSeries series)
-		{
-			var ranges = base.GetSupportedRanges(series);
-
-			if (!ranges.IsEmpty())
+			if (isX)
 			{
-				if (!(series.Arg is PnFArg))
-					throw new ArgumentException(LocalizedStrings.WrongCandleArg.Put(series.Arg), "series");
-			}
+				if (price > currentPnFCandle.HighPrice)
+				{
+					currentPnFCandle.HighPrice = currentPnFCandle.ClosePrice = price;
+					UpdateCandle(currentPnFCandle, price, volume, time, side, oi, subscription.VolumeProfile);
+					yield return currentPnFCandle;
+				}
+				else if (price <= (currentPnFCandle.HighPrice - pnf.BoxSize * pnf.ReversalAmount))
+				{
+					currentPnFCandle.State = CandleStates.Finished;
+					yield return currentPnFCandle;
 
-			return ranges;
-		}
+					var highPrice = currentPnFCandle.HighPrice;
+					var lowPrice = price;
 
-		/// <summary>
-		/// Создать новую свечу.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="value">Данные, с помощью которых необходимо создать новую свечу.</param>
-		/// <returns>Созданная свеча.</returns>
-		protected override PnFCandle CreateCandle(CandleSeries series, ICandleBuilderSourceValue value)
-		{
-			var arg = (PnFArg)series.Arg;
-			var boxSize = arg.BoxSize;
-
-			if (CandleManager == null)
-				throw new InvalidOperationException(LocalizedStrings.CandleManagerIsNotSet);
-
-			var pnfCandle = (PnFCandle)CandleManager.Container.GetCandle(series, 0);
-
-			var candle = new PnFCandle
-			{
-				PnFArg = arg,
-				OpenTime = value.Time,
-				CloseTime = value.Time,
-				HighTime = value.Time,
-				LowTime = value.Time,
-
-				Security = value.Security,
-
-				OpenVolume = value.Volume,
-				CloseVolume = value.Volume,
-				LowVolume = value.Volume,
-				HighVolume = value.Volume,
-				TotalVolume = value.Volume,
-
-				TotalPrice = value.Price * value.Volume,
-
-				Type = pnfCandle == null ? PnFTypes.X : (pnfCandle.Type == PnFTypes.X ? PnFTypes.O : PnFTypes.X),
-			};
-
-			if (pnfCandle == null)
-			{
-				candle.OpenPrice = boxSize.AlignPrice(value.Price, value.Price);
-
-				if (candle.Type == PnFTypes.X)
-					candle.ClosePrice = (decimal)(candle.OpenPrice + boxSize);
+					currentPnFCandle = CreateCandle(subscription, buildFrom, pnf, highPrice, highPrice, lowPrice, lowPrice, price, volume, side, time, oi);
+					yield return currentPnFCandle;
+				}
 				else
-					candle.ClosePrice = (decimal)(candle.OpenPrice - boxSize);
+				{
+					UpdateCandle(currentPnFCandle, price, volume, time, side, oi, subscription.VolumeProfile);
+					yield return currentPnFCandle;
+				}
 			}
 			else
 			{
-				candle.OpenPrice = (decimal)((pnfCandle.Type == PnFTypes.X)
-					? pnfCandle.ClosePrice - boxSize
-					: pnfCandle.ClosePrice + boxSize);
+				if (price < currentPnFCandle.LowPrice)
+				{
+					currentPnFCandle.LowPrice = currentPnFCandle.ClosePrice = price;
+					UpdateCandle(currentPnFCandle, price, volume, time, side, oi, subscription.VolumeProfile);
+					yield return currentPnFCandle;
+				}
+				else if (price >= (currentPnFCandle.LowPrice + pnf.BoxSize * pnf.ReversalAmount))
+				{
+					currentPnFCandle.State = CandleStates.Finished;
+					yield return currentPnFCandle;
 
-				var price = boxSize.AlignPrice(candle.OpenPrice, value.Price);
+					var highPrice = price;
+					var lowPrice = currentPnFCandle.LowPrice;
 
-				if (candle.Type == PnFTypes.X)
-					candle.ClosePrice = (decimal)(price + boxSize);
+					currentPnFCandle = CreateCandle(subscription, buildFrom, pnf, lowPrice, highPrice, lowPrice, highPrice, price, volume, side, time, oi);
+					yield return currentPnFCandle;
+				}
 				else
-					candle.ClosePrice = (decimal)(price - boxSize);
+				{
+					UpdateCandle(currentPnFCandle, price, volume, time, side, oi, subscription.VolumeProfile);
+					yield return currentPnFCandle;
+				}
 			}
-
-			if (candle.Type == PnFTypes.X)
-			{
-				candle.LowPrice = candle.OpenPrice;
-				candle.HighPrice = candle.ClosePrice;
-			}
-			else
-			{
-				candle.LowPrice = candle.ClosePrice;
-				candle.HighPrice = candle.OpenPrice;
-			}
-
-			return candle;
-		}
-
-		/// <summary>
-		/// Сформирована ли свеча до добавления данных.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candle">Свеча.</param>
-		/// <param name="value">Данные, с помощью которых принимается решение о необходимости окончания формирования текущей свечи.</param>
-		/// <returns><see langword="true"/>, если свечу необходимо закончить. Иначе, <see langword="false"/>.</returns>
-		protected override bool IsCandleFinishedBeforeChange(CandleSeries series, PnFCandle candle, ICandleBuilderSourceValue value)
-		{
-			var argSize = candle.PnFArg.BoxSize * candle.PnFArg.ReversalAmount;
-
-			if (candle.Type == PnFTypes.X)
-				return candle.ClosePrice - argSize > value.Price;
-			else
-				return candle.ClosePrice + argSize < value.Price;
-		}
-
-		/// <summary>
-		/// Обновить свечу данными.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candle">Свеча.</param>
-		/// <param name="value">Данные.</param>
-		protected override void UpdateCandle(CandleSeries series, PnFCandle candle, ICandleBuilderSourceValue value)
-		{
-			candle.ClosePrice = candle.PnFArg.BoxSize.AlignPrice(candle.ClosePrice, value.Price);
-
-			if (candle.Type == PnFTypes.X)
-				candle.HighPrice = candle.ClosePrice;
-			else
-				candle.LowPrice = candle.ClosePrice;
-
-			candle.TotalPrice += value.Price * value.Volume;
-
-			candle.LowVolume = (candle.LowVolume ?? 0m).Min(value.Volume);
-			candle.HighVolume = (candle.HighVolume ?? 0m).Max(value.Volume);
-			candle.CloseVolume = value.Volume;
-			candle.TotalVolume += value.Volume;
-			candle.CloseTime = value.Time;
 		}
 	}
 
-	/// <summary>
-	/// Построитель свечек типа <see cref="RenkoCandle"/>.
-	/// </summary>
-	public class RenkoCandleBuilder : CandleBuilder<RenkoCandle>
+	private void UpdateCandle(PnFCandleMessage currentPnFCandle, decimal price, decimal? volume, DateTime time, Sides? side, decimal? oi, VolumeProfileBuilder volumeProfile)
 	{
-		/// <summary>
-		/// Создать <see cref="RenkoCandleBuilder"/>.
-		/// </summary>
-		public RenkoCandleBuilder()
+		IncrementTicks(currentPnFCandle);
+
+		if (volume is decimal v)
 		{
+			currentPnFCandle.TotalPrice += v * price;
+
+			AddVolume(currentPnFCandle, v, side);
 		}
 
-		/// <summary>
-		/// Создать <see cref="RenkoCandleBuilder"/>.
-		/// </summary>
-		/// <param name="container">Контейнер данных.</param>
-		public RenkoCandleBuilder(ICandleBuilderContainer container)
-			: base(container)
+		currentPnFCandle.CloseVolume = volume;
+		currentPnFCandle.CloseTime = time;
+
+		volumeProfile?.Update(price, volume, side);
+
+		currentPnFCandle.OpenInterest = oi;
+	}
+
+	private PnFCandleMessage CreateCandle(ICandleBuilderSubscription subscription, DataType buildFrom, PnFArg pnfArg, decimal openPrice, decimal highPrice, decimal lowPrice, decimal closePrice, decimal price, decimal? volume, Sides? side, DateTime time, decimal? oi)
+	{
+		var candle = new PnFCandleMessage
 		{
+			SecurityId = subscription.Message.SecurityId,
+			TypedArg = pnfArg,
+			BuildFrom = buildFrom,
+
+			OpenPrice = openPrice,
+			ClosePrice = closePrice,
+			HighPrice = highPrice,
+			LowPrice = lowPrice,
+			OpenVolume = volume,
+			//CloseVolume = volume,
+			HighVolume = volume,
+			LowVolume = volume,
+			OpenTime = time,
+			//CloseTime = time,
+			HighTime = time,
+			LowTime = time,
+			State = CandleStates.Active,
+		};
+
+		if (subscription.Message.IsCalcVolumeProfile)
+		{
+			subscription.VolumeProfile = new(subscription.Message.PriceStep);
+			candle.PriceLevels = subscription.VolumeProfile.PriceLevels;
 		}
 
-		/// <summary>
-		/// Получить временные диапазоны, для которых у данного источниках для передаваемой серии свечек есть данные.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Временные диапазоны.</returns>
-		public override IEnumerable<Range<DateTimeOffset>> GetSupportedRanges(CandleSeries series)
+		UpdateCandle(candle, price, volume, time, side, oi, subscription.VolumeProfile);
+
+		return candle;
+	}
+}
+
+/// <summary>
+/// The builder of candles of <see cref="RenkoCandleMessage"/> type.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="RenkoCandleBuilder"/>.
+/// </remarks>
+/// <param name="exchangeInfoProvider">The exchange boards provider.</param>
+public class RenkoCandleBuilder(IExchangeInfoProvider exchangeInfoProvider) : CandleBuilder<RenkoCandleMessage>(exchangeInfoProvider)
+{
+	private const int VolumeScale = 8;
+	private const int MaxCandlesPerValue = 10_000;
+
+	/// <inheritdoc />
+	protected override IEnumerable<RenkoCandleMessage> OnProcess(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform)
+	{
+		var price = transform.Price;
+		var volume = transform.Volume;
+		var time = transform.Time;
+		var side = transform.Side;
+		var oi = transform.OpenInterest;
+		var buildFrom = transform.BuildFrom;
+		var boxSize = subscription.Message.GetArg<Unit>();
+
+		RenkoCandleMessage GenerateNewCandle(decimal openPrice, decimal closePrice)
 		{
-			var ranges = base.GetSupportedRanges(series);
-
-			if (!ranges.IsEmpty())
+			var candle = new RenkoCandleMessage
 			{
-				if (!(series.Arg is Unit))
-					throw new ArgumentException(LocalizedStrings.WrongCandleArg.Put(series.Arg), "series");
-
-				if ((Unit)series.Arg <= 0)
-					throw new ArgumentOutOfRangeException("series", series.Arg, LocalizedStrings.Str645);
-			}
-
-			return ranges;
-		}
-
-		/// <summary>
-		/// Обработать новые данные.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="currentCandle">Текущая свеча.</param>
-		/// <param name="value">Новые данные, с помощью которых принимается решение о необходимости начала или окончания формирования текущей свечи.</param>
-		/// <returns>Новая свеча. Если новую свечу нет необходимости создавать, то возвращается <paramref name="currentCandle"/>.
-		/// Если новую свечу создать невозможно (<paramref name="value"/> не может быть применено к свечам), то возвращается null.</returns>
-		protected override RenkoCandle ProcessValue(CandleSeries series, RenkoCandle currentCandle, ICandleBuilderSourceValue value)
-		{
-			if (value == null)
-				throw new ArgumentNullException("value");
-
-			if (currentCandle == null)
-				return NewCandle(series, value.Price, value.Price, value);
-
-			var delta = currentCandle.BoxSize.Value;
-
-			if (currentCandle.OpenPrice < currentCandle.ClosePrice)
-			{
-				if ((value.Price - currentCandle.ClosePrice) > delta)
-				{
-					// New bullish candle
-					return NewCandle(series, currentCandle.ClosePrice, currentCandle.ClosePrice + delta, value);
-				}
-
-				if ((currentCandle.OpenPrice - value.Price) > delta)
-				{
-					// New bearish candle
-					return NewCandle(series, currentCandle.OpenPrice, currentCandle.OpenPrice - delta, value);
-				}
-			}
-			else
-			{
-				if ((value.Price - currentCandle.OpenPrice) > delta)
-				{
-					// New bullish candle
-					return NewCandle(series, currentCandle.OpenPrice, currentCandle.OpenPrice + delta, value);
-				}
-
-				if ((currentCandle.ClosePrice - value.Price) > delta)
-				{
-					// New bearish candle
-					return NewCandle(series, currentCandle.ClosePrice, currentCandle.ClosePrice - delta, value);
-				}
-			}
-
-			return UpdateRenkoCandle(currentCandle, value);
-		}
-
-		private static RenkoCandle NewCandle(CandleSeries series, decimal openPrice, decimal closePrice, ICandleBuilderSourceValue value)
-		{
-			return new RenkoCandle
-			{
+				SecurityId = subscription.Message.SecurityId,
+				TypedArg = boxSize,
+				BuildFrom = buildFrom,
+				OpenTime = time,
+				CloseTime = time,
 				OpenPrice = openPrice,
 				ClosePrice = closePrice,
-				HighPrice = Math.Max(openPrice, closePrice),
-				LowPrice = Math.Min(openPrice, closePrice),
-				TotalPrice = openPrice * value.Volume,
-				OpenVolume = value.Volume,
-				CloseVolume = value.Volume,
-				HighVolume = value.Volume,
-				LowVolume = value.Volume,
-				TotalVolume = value.Volume,
-				Security = series.Security,
-				OpenTime = value.Time,
-				CloseTime = value.Time,
-				HighTime = value.Time,
-				LowTime = value.Time,
-				BoxSize = (Unit)series.Arg,
-				RelativeVolume = value.OrderDirection == null ? 0 : (value.OrderDirection == Sides.Buy ? value.Volume : -value.Volume)
+				HighPrice = openPrice.Max(closePrice),
+				LowPrice = openPrice.Min(closePrice),
+				State = CandleStates.Active
 			};
-		}
 
-		private static RenkoCandle UpdateRenkoCandle(RenkoCandle candle, ICandleBuilderSourceValue value)
-		{
-			candle.HighPrice = Math.Max(candle.HighPrice, value.Price);
-			candle.LowPrice = Math.Min(candle.LowPrice, value.Price);
-
-			candle.HighVolume = Math.Max(candle.HighVolume ?? 0m, value.Volume);
-			candle.LowVolume = Math.Min(candle.LowVolume ?? 0m, value.Volume);
-
-			candle.CloseVolume = value.Volume;
-
-			candle.TotalPrice += value.Price * value.Volume;
-			candle.TotalVolume += value.Volume;
-
-			if (value.OrderDirection != null)
-				candle.RelativeVolume += value.OrderDirection == Sides.Buy ? value.Volume : -value.Volume;
-
-			candle.CloseTime = value.Time;
+			if (subscription.Message.IsCalcVolumeProfile)
+			{
+				subscription.VolumeProfile = new(subscription.Message.PriceStep);
+				candle.PriceLevels = subscription.VolumeProfile.PriceLevels;
+			}
 
 			return candle;
 		}
+
+		void UpdateRenkoCandle(RenkoCandleMessage candle, decimal closePrice, decimal? updateVolume)
+		{
+			IncrementTicks(candle);
+
+			candle.ClosePrice = closePrice;
+			candle.CloseVolume = updateVolume;
+			candle.CloseTime = time;
+			candle.OpenInterest = oi;
+			candle.HighPrice = candle.HighPrice.Max(closePrice);
+			candle.LowPrice = candle.LowPrice.Min(closePrice);
+
+			if (updateVolume is decimal v)
+			{
+				candle.TotalPrice += v * closePrice;
+				AddVolume(candle, v, side);
+			}
+
+			subscription.VolumeProfile?.Update(closePrice, updateVolume, side);
+		}
+
+		var currentCandle = (RenkoCandleMessage)subscription.CurrentCandle;
+
+		currentCandle ??= GenerateNewCandle(price, price);
+
+		var priceChange = price - currentCandle.OpenPrice;
+		var boxSizeAbs = (decimal)((price + boxSize) - price);
+
+		// Brick prices are snapped onto the security price grid, so a box finer than that grid
+		// rounds every new brick back onto its own open and the series can never advance: each
+		// following tick then re-derives the same box count from the same stale open, which makes
+		// brick production quadratic in the number of ticks. Clamp the box to the finest movement
+		// the grid can express.
+		if (subscription.Message.PriceStep is decimal priceStep && priceStep > 0 && boxSizeAbs < priceStep)
+			boxSizeAbs = priceStep;
+
+		if (boxSizeAbs <= 0)
+			throw new ArgumentOutOfRangeException(nameof(boxSize), boxSize, LocalizedStrings.InvalidValue);
+
+		var absoluteChange = priceChange.Abs();
+		var canReachLimit = boxSizeAbs <= decimal.MaxValue / MaxCandlesPerValue;
+		var isTruncated = canReachLimit && absoluteChange >= boxSizeAbs * MaxCandlesPerValue;
+		var boxesMoved = isTruncated
+			? MaxCandlesPerValue - 1
+			: (int)decimal.Floor(absoluteChange / boxSizeAbs);
+
+		if (boxesMoved >= 1)
+		{
+			var sign = priceChange.Sign();
+			var remainingParts = boxesMoved + 1;
+			var remainingVolume = volume;
+
+			decimal? TakeVolumePart()
+			{
+				if (remainingVolume is not decimal v)
+					return null;
+
+				if (remainingParts == 1)
+					return v;
+
+				var part = (v / remainingParts).Round(VolumeScale);
+				remainingVolume = v - part;
+				remainingParts--;
+
+				return part;
+			}
+
+			for (var i = 0; i < boxesMoved; i++)
+			{
+				var closePrice = ShrinkPrice(currentCandle.OpenPrice + (boxSize * sign), subscription);
+
+				// Snapping rounds the brick back onto its own open when the box is finer than the
+				// price grid - advance by the clamped box so the series always moves forward.
+				if (closePrice == currentCandle.OpenPrice)
+					closePrice = currentCandle.OpenPrice + boxSizeAbs * sign;
+
+				UpdateRenkoCandle(currentCandle, closePrice, TakeVolumePart());
+				currentCandle.State = CandleStates.Finished;
+				yield return currentCandle;
+
+				currentCandle = GenerateNewCandle(closePrice, closePrice);
+			}
+
+			if (isTruncated)
+				currentCandle = GenerateNewCandle(price, price);
+
+			volume = TakeVolumePart();
+		}
+
+		UpdateRenkoCandle(currentCandle, price, volume);
+		yield return currentCandle;
+	}
+}
+
+/// <summary>
+/// The builder of candles of <see cref="HeikinAshiCandleBuilder"/> type.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="HeikinAshiCandleBuilder"/>.
+/// </remarks>
+/// <param name="exchangeInfoProvider">The exchange boards provider.</param>
+public class HeikinAshiCandleBuilder(IExchangeInfoProvider exchangeInfoProvider) : CandleBuilder<HeikinAshiCandleMessage>(exchangeInfoProvider)
+{
+	/// <inheritdoc />
+	protected override HeikinAshiCandleMessage CreateCandle(ICandleBuilderSubscription subscription, ICandleBuilderValueTransform transform)
+	{
+		var timeFrame = subscription.Message.GetTimeFrame();
+
+		var (zone, time) = GetTimeZone(subscription);
+		var bounds = timeFrame.GetCandleBounds(transform.Time, zone, time);
+
+		if (transform.Time < bounds.Min)
+			return null;
+
+		var openTime = bounds.Min;
+
+		var candle = FirstInitCandle(subscription, new()
+		{
+			TypedArg = timeFrame,
+			OpenTime = openTime,
+			HighTime = openTime,
+			LowTime = openTime,
+			CloseTime = openTime,
+		}, transform);
+
+		var currentCandle = subscription.CurrentCandle;
+		if (currentCandle != null)
+		{
+			candle.OpenPrice = (currentCandle.OpenPrice + currentCandle.ClosePrice) / 2M;
+			candle.HighPrice = candle.HighPrice.Max(candle.OpenPrice).Max(candle.ClosePrice);
+			candle.LowPrice = candle.LowPrice.Min(candle.OpenPrice).Min(candle.ClosePrice);
+		}
+
+		return candle;
+	}
+
+	/// <inheritdoc />
+	protected override bool IsCandleFinishedBeforeChange(ICandleBuilderSubscription subscription, HeikinAshiCandleMessage candle, ICandleBuilderValueTransform transform)
+	{
+		return transform.Time < candle.OpenTime || (candle.OpenTime + candle.TypedArg) <= transform.Time;
+	}
+
+	/// <inheritdoc />
+	protected override void UpdateCandle(ICandleBuilderSubscription subscription, HeikinAshiCandleMessage candle, ICandleBuilderValueTransform transform)
+	{
+		base.UpdateCandle(subscription, candle, transform);
+
+		candle.ClosePrice = (candle.OpenPrice + candle.HighPrice + candle.LowPrice + candle.ClosePrice) / 4M;
+		candle.HighPrice = candle.HighPrice.Max(candle.OpenPrice).Max(candle.ClosePrice);
+		candle.LowPrice = candle.LowPrice.Min(candle.OpenPrice).Min(candle.ClosePrice);
 	}
 }

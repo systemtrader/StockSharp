@@ -1,179 +1,128 @@
-namespace StockSharp.Algo.Latency
+namespace StockSharp.Algo.Latency;
+
+/// <summary>
+/// Orders registration delay calculation manager.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="LatencyManager"/>.
+/// </remarks>
+/// <param name="state">State storage.</param>
+public class LatencyManager(ILatencyManagerState state) : ILatencyManager
 {
-	using System;
-	using System.Collections.Generic;
+	private readonly ILatencyManagerState _state = state ?? throw new ArgumentNullException(nameof(state));
 
-	using Ecng.Common;
-	using Ecng.Collections;
+	/// <inheritdoc />
+	public TimeSpan LatencyRegistration => _state.LatencyRegistration;
 
-	using StockSharp.Messages;
+	/// <inheritdoc />
+	public TimeSpan LatencyCancellation => _state.LatencyCancellation;
 
-	using StockSharp.Localization;
-
-	/// <summary>
-	/// Менеджер расчета задержки регистрации заявок.
-	/// </summary>
-	public class LatencyManager : ILatencyManager
+	/// <inheritdoc />
+	public TimeSpan? ProcessMessage(Message message)
 	{
-		private readonly SyncObject _syncObject = new SyncObject();
-		private readonly Dictionary<long, DateTime> _register = new Dictionary<long, DateTime>();
-		private readonly Dictionary<long, DateTime> _cancel = new Dictionary<long, DateTime>();
-
-		/// <summary>
-		/// Создать <see cref="LatencyManager"/>
-		/// </summary>
-		public LatencyManager()
+		switch (message.Type)
 		{
-		}
-
-		/// <summary>
-		/// Суммарное значение задержки регистрации по всем заявкам.
-		/// </summary>
-		public virtual TimeSpan LatencyRegistration { get; private set; }
-
-		/// <summary>
-		/// Суммарное значение задержки отмены по всем заявкам.
-		/// </summary>
-		public virtual TimeSpan LatencyCancellation { get; private set; }
-
-		/// <summary>
-		/// Обработать сообщение для вычисления задержки транзакции. Принимаются сообщения типа
-		/// <see cref="OrderRegisterMessage"/>, <see cref="OrderReplaceMessage"/>, <see cref="OrderPairReplaceMessage"/>,
-		/// <see cref="OrderCancelMessage"/> и <see cref="ExecutionMessage"/>.
-		/// </summary>
-		/// <param name="message">Сообщение.</param>
-		/// <returns>Задержка транзакции.</returns>
-		public TimeSpan? ProcessMessage(Message message)
-		{
-			switch (message.Type)
+			case MessageTypes.Reset:
 			{
-				case MessageTypes.OrderRegister:
-				{
-					var regMsg = (OrderRegisterMessage)message;
-
-					lock (_syncObject)
-					{
-						AddRegister(regMsg.TransactionId, regMsg.LocalTime);
-					}
-
-					break;
-				}
-				case MessageTypes.OrderReplace:
-				{
-					var replaceMsg = (OrderReplaceMessage)message;
-
-					lock (_syncObject)
-					{
-						AddCancel(replaceMsg.TransactionId, replaceMsg.LocalTime);
-						AddRegister(replaceMsg.TransactionId, replaceMsg.LocalTime);
-					}
-
-					break;
-				}
-				case MessageTypes.OrderPairReplace:
-				{
-					var replaceMsg = (OrderPairReplaceMessage)message;
-
-					lock (_syncObject)
-					{
-						AddCancel(replaceMsg.Message1.TransactionId, replaceMsg.LocalTime);
-						AddRegister(replaceMsg.Message1.TransactionId, replaceMsg.LocalTime);
-
-						AddCancel(replaceMsg.Message2.TransactionId, replaceMsg.LocalTime);
-						AddRegister(replaceMsg.Message2.TransactionId, replaceMsg.LocalTime);
-					}
-
-					break;
-				}
-				case MessageTypes.OrderCancel:
-				{
-					var cancelMsg = (OrderCancelMessage)message;
-
-					lock (_syncObject)
-						AddCancel(cancelMsg.TransactionId, cancelMsg.LocalTime);
-
-					break;
-				}
-				case MessageTypes.Execution:
-				{
-					var execMsg = (ExecutionMessage)message;
-
-					if (execMsg.ExecutionType == ExecutionTypes.Order)
-					{
-						if (execMsg.OrderState == OrderStates.Pending)
-							return null;
-
-						lock (_syncObject)
-						{
-							var time = _register.TryGetValue2(execMsg.OriginalTransactionId);
-
-							if (time == null)
-							{
-								time = _cancel.TryGetValue2(execMsg.OriginalTransactionId);
-
-								if (time != null)
-								{
-									_cancel.Remove(execMsg.OriginalTransactionId);
-
-									if (execMsg.OrderState == OrderStates.Failed)
-										return null;
-
-									return execMsg.LocalTime - time;
-								}
-							}
-							else
-							{
-								_register.Remove(execMsg.OriginalTransactionId);
-
-								if (execMsg.OrderState == OrderStates.Failed)
-									return null;
-
-								return execMsg.LocalTime - time;
-							}
-						}
-					}
-
-					break;
-				}
+				Reset();
+				break;
 			}
 
-			return null;
+			case MessageTypes.OrderRegister:
+			{
+				var regMsg = (OrderRegisterMessage)message;
+				_state.AddRegistration(regMsg.TransactionId, regMsg.LocalTime);
+				break;
+			}
+
+			case MessageTypes.OrderReplace:
+			{
+				var replaceMsg = (OrderReplaceMessage)message;
+				_state.AddRegistration(replaceMsg.TransactionId, replaceMsg.LocalTime);
+				break;
+			}
+
+			case MessageTypes.OrderCancel:
+			{
+				var cancelMsg = (OrderCancelMessage)message;
+				_state.AddCancellation(cancelMsg.TransactionId, cancelMsg.LocalTime);
+				break;
+			}
+
+			case MessageTypes.Execution:
+			{
+				var execMsg = (ExecutionMessage)message;
+
+				if (!execMsg.HasOrderInfo())
+					break;
+
+				if (execMsg.OrderState == OrderStates.Pending)
+					break;
+
+				var transId = execMsg.OriginalTransactionId;
+
+				if (!_state.TryGetAndRemoveRegistration(transId, out var time))
+				{
+					if (_state.TryGetAndRemoveCancellation(transId, out time))
+					{
+						if (execMsg.OrderState == OrderStates.Failed)
+							break;
+
+						var latency = execMsg.LocalTime - time;
+						_state.AddLatencyCancellation(latency);
+						return latency;
+					}
+				}
+				else
+				{
+					if (execMsg.OrderState == OrderStates.Failed)
+						break;
+
+					var latency = execMsg.LocalTime - time;
+					_state.AddLatencyRegistration(latency);
+					return latency;
+				}
+
+				break;
+			}
 		}
 
-		private void AddRegister(long transactionId, DateTime localTime)
-		{
-			if (transactionId == 0)
-				throw new ArgumentNullException("transactionId");
+		return null;
+	}
 
-			if (localTime == default(DateTime))
-				throw new ArgumentNullException("localTime");
+	/// <inheritdoc />
+	public void Reset()
+	{
+		_state.Clear();
+	}
 
-			if (_register.ContainsKey(transactionId))
-				throw new ArgumentException(LocalizedStrings.Str1106Params.Put(transactionId), "transactionId");
+	/// <summary>
+	/// Load settings.
+	/// </summary>
+	/// <param name="storage">Storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		=> Task.CompletedTask;
 
-			_register.Add(transactionId, localTime);
-		}
+	/// <summary>
+	/// Save settings.
+	/// </summary>
+	/// <param name="storage">Storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+		=> Task.CompletedTask;
 
-		private void AddCancel(long transactionId, DateTime localTime)
-		{
-			if (transactionId == 0)
-				throw new ArgumentNullException("transactionId");
-
-			if (localTime == default(DateTime))
-				throw new ArgumentNullException("localTime");
-
-			if (_cancel.ContainsKey(transactionId))
-				throw new ArgumentException(LocalizedStrings.Str1107Params.Put(transactionId), "transactionId");
-
-			_cancel.Add(transactionId, localTime);
-		}
-
-		/// <summary>
-		/// Обнулить расчеты.
-		/// </summary>
-		public virtual void Reset()
-		{
-			LatencyRegistration = LatencyCancellation = TimeSpan.Zero;
-		}
+	/// <summary>
+	/// Creates a clone of this manager with new state.
+	/// </summary>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Cloned manager.</returns>
+	public async ValueTask<ILatencyManager> CloneAsync(CancellationToken cancellationToken)
+	{
+		var clone = new LatencyManager(_state.GetType().CreateInstance<ILatencyManagerState>());
+		await clone.LoadAsync(await this.SaveAsync(cancellationToken), cancellationToken);
+		return clone;
 	}
 }

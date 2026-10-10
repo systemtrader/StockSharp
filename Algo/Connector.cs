@@ -1,590 +1,1103 @@
-namespace StockSharp.Algo
+namespace StockSharp.Algo;
+
+using System.Security;
+
+using StockSharp.Algo.Candles.Compression;
+using StockSharp.Algo.Commissions;
+using StockSharp.Algo.Latency;
+using StockSharp.Algo.PnL;
+using StockSharp.Algo.Risk;
+using StockSharp.Algo.Slippage;
+
+/// <summary>
+/// The class to create connections to trading systems.
+/// </summary>
+public partial class Connector : BaseLogReceiver, IConnector
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Linq;
-	using System.Threading;
+	private readonly EntityCache _entityCache;
+	private readonly ConnectorSubscriptionManager _subscriptionManager;
 
-	using Ecng.Collections;
-	using Ecng.Common;
-	using Ecng.Serialization;
+	// backward compatibility for NewXXX events
+	private readonly CachedSynchronizedSet<Security> _existingSecurities = [];
+	private readonly CachedSynchronizedSet<Portfolio> _existingPortfolios = [];
+	private readonly CachedSynchronizedSet<Position> _existingPositions = [];
 
-	using MoreLinq;
-
-	using StockSharp.BusinessEntities;
-	using StockSharp.Logging;
-	using StockSharp.Messages;
-	using StockSharp.Algo.Slippage;
-	using StockSharp.Localization;
-
-	using Wintellect.PowerCollections;
+	private bool _isDisposing;
 
 	/// <summary>
-	/// Класс для создания подключений к торговым системам.
+	/// Initializes a new instance of the <see cref="Connector"/>.
 	/// </summary>
-	public partial class Connector : BaseLogReceiver, IConnector
+	public Connector()
+		: this(new InMemorySecurityStorage(), new InMemoryPositionStorage(), new InMemoryExchangeInfoProvider())
 	{
-		private static readonly MemoryStatisticsValue<Trade> _tradeStat = new MemoryStatisticsValue<Trade>(LocalizedStrings.Ticks);
-		private static readonly MemoryStatisticsValue<Connector> _connectorStat = new MemoryStatisticsValue<Connector>(LocalizedStrings.Str1093);
-		private static readonly MemoryStatisticsValue<Message> _messageStat = new MemoryStatisticsValue<Message>(LocalizedStrings.Str1094);
+	}
 
-		static Connector()
+	/// <summary>
+	/// Initializes a new instance of the <see cref="Connector"/>.
+	/// </summary>
+	/// <param name="securityStorage">Securities meta info storage.</param>
+	/// <param name="positionStorage">Position storage.</param>
+	/// <param name="exchangeInfoProvider">Exchanges and trading boards provider.</param>
+	/// <param name="storageRegistry">The storage of market data.</param>
+	/// <param name="snapshotRegistry">Snapshot storage registry.</param>
+	/// <param name="buffer">Storage buffer.</param>
+	/// <param name="initAdapter">Initialize basket adapter.</param>
+	/// <param name="initChannels">Initialize channels.</param>
+	public Connector(ISecurityStorage securityStorage, IPositionStorage positionStorage,
+		IExchangeInfoProvider exchangeInfoProvider, IStorageRegistry storageRegistry = null,
+		ISnapshotRegistry snapshotRegistry = null, IStorageBuffer buffer = null, bool initAdapter = true, bool initChannels = true)
+	{
+		Buffer = buffer;
+
+		SecurityStorage = securityStorage ?? throw new ArgumentNullException(nameof(securityStorage));
+		PositionStorage = positionStorage ?? throw new ArgumentNullException(nameof(positionStorage));
+
+		_entityCache = new(this, exchangeInfoProvider, PositionStorage);
+
+		var transactionIdGenerator = new MillisecondIncrementalIdGenerator();
+
+		_subscriptionManager = new(this, transactionIdGenerator, UnsubscribeOnDisconnect);
+
+		//SupportLevel1DepthBuilder = true;
+		SupportFilteredMarketDepth = true;
+
+		if (initChannels)
 		{
-			MemoryStatistics.Instance.Values.Add(_tradeStat);
-			MemoryStatistics.Instance.Values.Add(_connectorStat);
-			MemoryStatistics.Instance.Values.Add(_messageStat);
+			InMessageChannel = new InMemoryMessageChannel(new MessageByOrderQueue(), $"Connector In ({Name})", RaiseError);
+			OutMessageChannel = new InMemoryMessageChannel(new MessageByOrderQueue(), $"Connector Out ({Name})", RaiseError);
 		}
 
-		private sealed class FilteredMarketDepthInfo
+		SnapshotRegistry = snapshotRegistry;
+
+		if (initAdapter)
 		{
-			private readonly Dictionary<Tuple<Sides, decimal>, Dictionary<long, decimal>> _executions = new Dictionary<Tuple<Sides, decimal>, Dictionary<long, decimal>>();
-			private readonly Dictionary<Tuple<Sides, decimal>, decimal> _ownVolumes = new Dictionary<Tuple<Sides, decimal>, decimal>();
-
-			private readonly MarketDepth _depth;
-
-			private QuoteChangeMessage _quote;
-			private bool _needUpdate;
-
-			public FilteredMarketDepthInfo(MarketDepth depth)
+			Adapter = new BasketMessageAdapter(transactionIdGenerator, new CandleBuilderProvider(ExchangeInfoProvider), new InMemorySecurityMessageAdapterProvider(), new InMemoryPortfolioMessageAdapterProvider(), buffer)
 			{
-				if (depth == null)
-					throw new ArgumentNullException("depth");
+				StorageSettings = { StorageRegistry = storageRegistry }
+			};
+		}
 
-				_depth = depth;
-			}
+#pragma warning disable CS0618 // Type or member is obsolete
+		LookupMessagesOnConnect = new LookupMessagesOnConnectSet(this);
+#pragma warning restore CS0618 // Type or member is obsolete
 
-			public void Init(MarketDepth source, IEnumerable<Order> currentOrders)
+		SubscriptionsOnConnect.Add(SecurityLookup);
+		SubscriptionsOnConnect.Add(PortfolioLookup);
+		SubscriptionsOnConnect.Add(OrderLookup);
+	}
+
+	/// <summary>
+	/// Securities meta info storage.
+	/// </summary>
+	public ISecurityStorage SecurityStorage { get; }
+
+	/// <summary>
+	/// Position storage.
+	/// </summary>
+	public IPositionStorage PositionStorage { get; }
+
+	/// <summary>
+	/// Exchanges and trading boards provider.
+	/// </summary>
+	public IExchangeInfoProvider ExchangeInfoProvider => _entityCache.ExchangeInfoProvider;
+
+	/// <summary>
+	/// The storage of market data.
+	/// </summary>
+	public IStorageRegistry StorageRegistry => Adapter?.StorageSettings.StorageRegistry;
+
+	/// <summary>
+	/// Snapshot storage registry.
+	/// </summary>
+	public ISnapshotRegistry SnapshotRegistry { get; private set; }
+
+	private IBasketSecurityProcessorProvider _basketSecurityProcessorProvider = new BasketSecurityProcessorProvider();
+
+	/// <summary>
+	/// Basket security processors provider.
+	/// </summary>
+	public IBasketSecurityProcessorProvider BasketSecurityProcessorProvider
+	{
+		get => _basketSecurityProcessorProvider;
+		set => _basketSecurityProcessorProvider = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	/// <summary>
+	/// Restore subscription on reconnect.
+	/// </summary>
+	/// <remarks>
+	/// Normal case connect/disconnect.
+	/// </remarks>
+	public bool IsRestoreSubscriptionOnNormalReconnect
+	{
+		get => _subscriptionManager.IsRestoreSubscriptionOnNormalReconnect;
+		set => _subscriptionManager.IsRestoreSubscriptionOnNormalReconnect = value;
+	}
+
+	/// <summary>
+	/// Send unsubscribe on disconnect command.
+	/// </summary>
+	/// <remarks>By default is <see langword="true"/>.</remarks>
+	public bool IsAutoUnSubscribeOnDisconnect { get; set; } = true;
+
+	/// <summary>
+	/// Send unsubscribe on disconnect.
+	/// </summary>
+	public virtual bool UnsubscribeOnDisconnect => true;
+
+	/// <summary>
+	/// The number of orders for storage. The default is 1000. If the value is set to <see cref="int.MaxValue"/>, then the orders will not be deleted. If the value is set to 0, then the orders will not be stored.
+	/// </summary>
+	public int OrdersKeepCount
+	{
+		get => _entityCache.OrdersKeepCount;
+		set => _entityCache.OrdersKeepCount = value;
+	}
+
+	/// <inheritdoc />
+	public IdGenerator TransactionIdGenerator
+	{
+		get => Adapter.TransactionIdGenerator;
+		set
+		{
+			Adapter.TransactionIdGenerator = value;
+			_subscriptionManager.TransactionIdGenerator = value;
+		}
+	}
+
+	private SecurityIdGenerator _securityIdGenerator = new();
+
+	/// <summary>
+	/// The instrument identifiers generator <see cref="Security.Id"/>.
+	/// </summary>
+	public SecurityIdGenerator SecurityIdGenerator
+	{
+		get => _securityIdGenerator;
+		set => _securityIdGenerator = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	private bool _overrideSecurityData;
+
+	/// <summary>
+	/// Override previous security data by new values.
+	/// </summary>
+	public bool OverrideSecurityData
+	{
+		get => _overrideSecurityData;
+		set
+		{
+			_overrideSecurityData = value;
+
+			if (StorageAdapter != null)
+				StorageAdapter.OverrideSecurityData = value;
+		}
+	}
+
+	/// <inheritdoc />
+	public IEnumerable<ExchangeBoard> ExchangeBoards => ExchangeInfoProvider.Boards;
+
+	/// <inheritdoc />
+	public IEnumerable<Security> Securities => _existingSecurities.Cache;
+
+	int ISecurityProvider.Count => SecurityStorage.Count;
+
+	private Action<IEnumerable<Security>> _added;
+
+	event Action<IEnumerable<Security>> ISecurityProvider.Added
+	{
+		add => _added += value;
+		remove => _added -= value;
+	}
+
+	private Action<IEnumerable<Security>> _removed;
+
+	event Action<IEnumerable<Security>> ISecurityProvider.Removed
+	{
+		add => _removed += value;
+		remove => _removed -= value;
+	}
+
+	private Action _cleared;
+
+	event Action ISecurityProvider.Cleared
+	{
+		add => _cleared += value;
+		remove => _cleared -= value;
+	}
+
+	/// <inheritdoc />
+	public ValueTask<Security> LookupByIdAsync(SecurityId id, CancellationToken cancellationToken)
+		=> SecurityStorage.LookupByIdAsync(id, cancellationToken);
+
+	IAsyncEnumerable<Security> ISecurityProvider.LookupAsync(SecurityLookupMessage criteria)
+		=> SecurityStorage.LookupAsync(criteria);
+
+	ValueTask<SecurityMessage> ISecurityMessageProvider.LookupMessageByIdAsync(SecurityId id, CancellationToken cancellationToken)
+		=> SecurityStorage.LookupMessageByIdAsync(id, cancellationToken);
+
+	IAsyncEnumerable<SecurityMessage> ISecurityMessageProvider.LookupMessagesAsync(SecurityLookupMessage criteria)
+		=> SecurityStorage.LookupMessagesAsync(criteria);
+
+	/// <inheritdoc />
+	public virtual IEnumerable<Portfolio> Portfolios => _existingPortfolios.Cache;
+
+	/// <inheritdoc />
+	public IEnumerable<Position> Positions => _existingPositions.Cache;
+
+	/// <summary>
+	/// Risk control manager.
+	/// </summary>
+	public virtual IRiskManager RiskManager { get; set; } = new RiskManager();
+
+	/// <summary>
+	/// Orders registration delay calculation manager.
+	/// </summary>
+	public ILatencyManager LatencyManager
+	{
+		get => Adapter.LatencyManager;
+		set => Adapter.LatencyManager = value;
+	}
+
+	/// <summary>
+	/// The profit-loss manager.
+	/// </summary>
+	public IPnLManager PnLManager
+	{
+		get => Adapter.PnLManager;
+		set => Adapter.PnLManager = value;
+	}
+
+	/// <summary>
+	/// The commission calculating manager.
+	/// </summary>
+	public ICommissionManager CommissionManager
+	{
+		get => Adapter.CommissionManager;
+		set => Adapter.CommissionManager = value;
+	}
+
+	/// <summary>
+	/// Slippage manager.
+	/// </summary>
+	public ISlippageManager SlippageManager
+	{
+		get => Adapter.SlippageManager;
+		set => Adapter.SlippageManager = value;
+	}
+
+	/// <inheritdoc />
+	public ConnectionStates ConnectionState
+	{
+		get => _subscriptionManager.ConnectionState;
+		private set => _subscriptionManager.ConnectionState = value;
+	}
+
+	/// <summary>
+	/// To update <see cref="Security.LastTick"/>, <see cref="Security.BestBid"/>, <see cref="Security.BestAsk"/> at each update of order book and/or trades. By default is enabled.
+	/// </summary>
+	[Obsolete("Use Level1ChangeMessage.")]
+	public bool UpdateSecurityLastQuotes { get; set; }
+
+	/// <summary>
+	/// To update <see cref="Security"/> fields when the <see cref="Level1ChangeMessage"/> message appears. By default is enabled.
+	/// </summary>
+	[Obsolete("Use Level1ChangeMessage.")]
+	public bool UpdateSecurityByLevel1 { get; set; }
+
+	/// <summary>
+	/// To update <see cref="Security"/> fields when the <see cref="SecurityMessage"/> message appears. By default is enabled.
+	/// </summary>
+	public bool UpdateSecurityByDefinition { get; set; } = true;
+
+	/// <summary>
+	/// To update <see cref="Portfolio"/> fields when the <see cref="PositionChangeMessage"/> message appears. By default is enabled.
+	/// </summary>
+	public bool UpdatePortfolioByChange { get; set; } = true;
+
+	/// <summary>
+	/// The number of errors passed through the <see cref="Error"/> event.
+	/// </summary>
+	public int ErrorCount { get; private set; }
+
+	private TimeSpan _marketTimeChangedInterval = TimeSpan.FromMilliseconds(10);
+
+	/// <summary>
+	/// The <see cref="TimeMessage"/> message generating Interval. The default is 10 milliseconds.
+	/// </summary>
+	public virtual TimeSpan MarketTimeChangedInterval
+	{
+		get => _marketTimeChangedInterval;
+		set
+		{
+			if (value <= TimeSpan.Zero)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
+
+			_marketTimeChangedInterval = value;
+		}
+	}
+
+	/// <summary>
+	/// Increment periodically <see cref="MarketTimeChangedInterval"/> value of <see cref="ILogSource.CurrentTime"/>.
+	/// </summary>
+	public bool TimeChange { get; set; } = true;
+
+	private static Subscription ToSubscription<TLookupMessage>()
+		where TLookupMessage : ISubscriptionMessage, new()
+		=> new(new TLookupMessage());
+
+	/// <inheritdoc />
+	public Subscription SecurityLookup { get; } = ToSubscription<SecurityLookupMessage>();
+	/// <inheritdoc />
+	public Subscription BoardLookup { get; } = ToSubscription<BoardLookupMessage>();
+	/// <inheritdoc />
+	public Subscription DataTypeLookup { get; } = ToSubscription<DataTypeLookupMessage>();
+	/// <inheritdoc />
+	public Subscription PortfolioLookup { get; } = ToSubscription<PortfolioLookupMessage>();
+	/// <inheritdoc />
+	public Subscription OrderLookup { get; } = ToSubscription<OrderStatusMessage>();
+
+	/// <summary>
+	/// Send subscriptions on connect.
+	/// </summary>
+	public ISet<Subscription> SubscriptionsOnConnect => _subscriptionManager.SubscriptionsOnConnect;
+
+	private class LookupMessagesOnConnectSet(Connector connector) : SynchronizedSet<MessageTypes>
+	{
+		protected override void OnAdded(MessageTypes item)
+		{
+			base.OnAdded(item);
+
+			switch (item)
 			{
-				if (source == null)
-					throw new ArgumentNullException("source");
-
-				if (currentOrders == null)
-					throw new ArgumentNullException("currentOrders");
-
-				currentOrders.Select(o => o.ToMessage()).ForEach(Process);
-
-				_depth.Update(Filter(source.Bids), Filter(source.Asks), true, source.LastChangeTime);
-			}
-
-			private IEnumerable<Quote> Filter(IEnumerable<Quote> quotes)
-			{
-				return quotes
-					.Select(quote =>
-					{
-						var res = quote.Clone();
-						var key = Tuple.Create(res.OrderDirection, res.Price);
-
-						var own = _ownVolumes.TryGetValue2(key);
-						if (own != null)
-							res.Volume -= own.Value;
-
-						return res.Volume <= 0 ? null : res;
-					})
-					.Where(q => q != null);
-			}
-
-			public void Process(QuoteChangeMessage message)
-			{
-				if (message == null)
-					throw new ArgumentNullException("message");
-
-				_quote = new QuoteChangeMessage
-				{
-					LocalTime = message.LocalTime,
-					ServerTime = message.ServerTime,
-					ExtensionInfo = message.ExtensionInfo,
-					Bids = message.Bids,
-					Asks = message.Asks,
-					IsSorted = message.IsSorted,
-				};
-				_needUpdate = true;
-			}
-
-			public void Process(ExecutionMessage message)
-			{
-				if (message.ExecutionType != ExecutionTypes.Order)
-					return;
-
-				var key = Tuple.Create(message.Side, message.Price);
-
-				switch (message.OrderState)
-				{
-					case OrderStates.Done:
-					case OrderStates.Failed:
-					{
-						var items = _executions.TryGetValue(key);
-
-						if (items == null)
-							break;
-
-						items.Remove(message.OriginalTransactionId);
-
-						if (items.Count == 0)
-							_executions.Remove(key);
-
-						break;
-					}
-
-					case OrderStates.Active:
-					{
-						if (message.Balance != null)
-							_executions.SafeAdd(key, k => new Dictionary<long, decimal>())[message.OriginalTransactionId] = message.Balance.Value;
-
-						break;
-					}
-				}
-
-				if (_executions.ContainsKey(key))
-					_ownVolumes[key] = _executions[key].Sum(o => o.Value);
-				else
-					_ownVolumes.Remove(key);
-			}
-
-			public MarketDepth GetDepth()
-			{
-				if (!_needUpdate)
-					return _depth;
-
-				_needUpdate = false;
-				_depth.Update(Filter(_quote.Bids.Select(c => c.ToQuote(_depth.Security))), Filter(_quote.Asks.Select(c => c.ToQuote(_depth.Security))), _quote.IsSorted, _quote.ServerTime);
-				_depth.LocalTime = _quote.LocalTime;
-
-				return _depth;
-			}
-		}
-
-		private class MarketDepthInfo : RefTriple<MarketDepth, IEnumerable<QuoteChange>, IEnumerable<QuoteChange>>
-		{
-			public MarketDepthInfo(MarketDepth depth)
-				: base(depth, Enumerable.Empty<QuoteChange>(), Enumerable.Empty<QuoteChange>())
-			{
-			}
-
-			public bool HasChanges
-			{
-				get { return Second != null; }
-			}
-		}
-
-		private readonly EntityCache _entityCache = new EntityCache();
-
-		private readonly SynchronizedDictionary<Security, MarketDepthInfo> _marketDepths = new SynchronizedDictionary<Security, MarketDepthInfo>();
-		private readonly SynchronizedDictionary<Security, FilteredMarketDepthInfo> _filteredMarketDepths = new SynchronizedDictionary<Security, FilteredMarketDepthInfo>();
-		private readonly Dictionary<long, List<ExecutionMessage>> _nonOrderedByIdMyTrades = new Dictionary<long, List<ExecutionMessage>>();
-		private readonly Dictionary<long, List<ExecutionMessage>> _nonOrderedByTransactionIdMyTrades = new Dictionary<long, List<ExecutionMessage>>();
-		private readonly Dictionary<string, List<ExecutionMessage>> _nonOrderedByStringIdMyTrades = new Dictionary<string, List<ExecutionMessage>>();
-		private readonly MultiDictionary<Tuple<long?, string>, RefPair<Order, Action<Order, Order>>> _orderStopOrderAssociations = new MultiDictionary<Tuple<long?, string>, RefPair<Order, Action<Order, Order>>>(false);
-
-		private readonly Dictionary<object, Security> _nativeIdSecurities = new Dictionary<object, Security>();
-		private readonly Dictionary<SecurityId, List<Message>> _suspendedSecurityMessages = new Dictionary<SecurityId, List<Message>>();
-		private readonly object _suspendSync = new object();
-		private readonly List<Security> _lookupResult = new List<Security>();
-		private readonly SynchronizedQueue<SecurityLookupMessage> _lookupQueue = new SynchronizedQueue<SecurityLookupMessage>();
-		private readonly SynchronizedDictionary<long, SecurityLookupMessage> _securityLookups = new SynchronizedDictionary<long, SecurityLookupMessage>();
-		private readonly SynchronizedDictionary<long, PortfolioLookupMessage> _portfolioLookups = new SynchronizedDictionary<long, PortfolioLookupMessage>();
-		
-		private readonly SubscriptionManager _subscriptionManager;
-
-		private readonly SynchronizedDictionary<ExchangeBoard, SessionStates> _sessionStates = new SynchronizedDictionary<ExchangeBoard, SessionStates>();
-		private readonly SynchronizedDictionary<Security, object[]> _securityValues = new SynchronizedDictionary<Security, object[]>();
-
-		private readonly ISecurityProvider _securityProvider;
-
-		private readonly SyncObject _marketTimerSync = new SyncObject();
-		private Timer _marketTimer;
-		private readonly TimeMessage _marketTimeMessage = new TimeMessage();
-		private bool _isMarketTimeHandled;
-
-		private bool _isDisposing;
-
-		/// <summary>
-		/// Создать <see cref="Connector"/>.
-		/// </summary>
-		public Connector()
-		{
-			ReConnectionSettings = new ReConnectionSettings();
-
-			_subscriptionManager = new SubscriptionManager(this);
-
-			UpdateSecurityLastQuotes = UpdateSecurityByLevel1 = true;
-
-			_connectorStat.Add(this);
-
-			_securityProvider = new ConnectorSecurityProvider(this);
-			SlippageManager = new SlippageManager();
-
-			OutMessageChannel = new InMemoryMessageChannel("Connector Out", RaiseError);
-
-			Adapter = new BasketMessageAdapter(new MillisecondIncrementalIdGenerator());
-		}
-
-		/// <summary>
-		/// Настройки контроля подключения <see cref="IConnector"/> к торговой системе.
-		/// </summary>
-		public ReConnectionSettings ReConnectionSettings { get; private set; }
-
-		private IEntityFactory _entityFactory = Algo.EntityFactory.Instance;
-
-		/// <summary>
-		/// Фабрика бизнес-сущностей (<see cref="Security"/>, <see cref="Order"/> и т.д.).
-		/// </summary>
-		public IEntityFactory EntityFactory
-		{
-			get { return _entityFactory; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
-
-				_entityFactory = value;
-			}
-		}
-
-		/// <summary>
-		/// Количество тиковых сделок для хранения. 
-		/// По умолчанию равно 100000. Если значение установлено в -1, то сделки не будут удаляться.
-		/// </summary>
-		public int TradesKeepCount
-		{
-			get { return _entityCache.TradesKeepCount; }
-			set { _entityCache.TradesKeepCount = value; }
-		}
-
-		/// <summary>
-		/// Количество заявок для хранения. 
-		/// По умолчанию равно 1000. Если значение установлено в -1, то заявки не будут удаляться.
-		/// </summary>
-		public int OrdersKeepCount
-		{
-			get { return _entityCache.OrdersKeepCount; }
-			set { _entityCache.OrdersKeepCount = value; }
-		}
-
-		/// <summary>
-		/// Генератор идентификаторов транзакций.
-		/// </summary>
-		public IdGenerator TransactionIdGenerator
-		{
-			get { return Adapter.TransactionIdGenerator; }
-			set { Adapter.TransactionIdGenerator = value; }
-		}
-
-		private SecurityIdGenerator _securityIdGenerator = new SecurityIdGenerator();
-
-		/// <summary>
-		/// Генератор идентификаторов инструментов <see cref="Security.Id"/>.
-		/// </summary>
-		public SecurityIdGenerator SecurityIdGenerator
-		{
-			get { return _securityIdGenerator; }
-			set
-			{
-				if (value == null)
-					throw new ArgumentNullException("value");
-
-				_securityIdGenerator = value;
-			}
-		}
-
-		private readonly CachedSynchronizedSet<ExchangeBoard> _exchangeBoards = new CachedSynchronizedSet<ExchangeBoard>();
-
-		/// <summary>
-		/// Список всех биржевых площадок, для которых загружены инструменты <see cref="IConnector.Securities"/>.
-		/// </summary>
-		public IEnumerable<ExchangeBoard> ExchangeBoards
-		{
-			get { return _exchangeBoards.Cache; }
-		}
-
-		private readonly CachedSynchronizedDictionary<string, Security> _securities = new CachedSynchronizedDictionary<string, Security>(StringComparer.InvariantCultureIgnoreCase);
-
-		/// <summary>
-		/// Список всех загруженных инструментов.
-		/// Вызывать необходимо после того, как пришло событие <see cref="IConnector.NewSecurities" />. Иначе будет возвращено постое множество.
-		/// </summary>
-		public virtual IEnumerable<Security> Securities
-		{
-			get { return _securities.CachedValues; }
-		}
-
-		/// <summary>
-		/// Найти инструменты, соответствующие фильтру <paramref name="criteria"/>.
-		/// </summary>
-		/// <param name="criteria">Инструмент, поля которого будут использоваться в качестве фильтра.</param>
-		/// <returns>Найденные инструменты.</returns>
-		public virtual IEnumerable<Security> Lookup(Security criteria)
-		{
-			return _securityProvider.Lookup(criteria);
-		}
-
-		/// <summary>
-		/// Получить внутренний идентификатор торговой системы.
-		/// </summary>
-		/// <param name="security">Инструмент.</param>
-		/// <returns>Внутренний идентификатор торговой системы.</returns>
-		public object GetNativeId(Security security)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			return _nativeIdSecurities.LastOrDefault(p => p.Value == security).Key;
-		}
-
-		private DateTimeOffset _currentTime;
-
-		/// <summary>
-		/// Текущее время, которое будет передано в <see cref="LogMessage.Time"/>.
-		/// </summary>
-		public override DateTimeOffset CurrentTime
-		{
-			get { return _currentTime; }
-		}
-
-		/// <summary>
-		/// Получить состояние сессии для заданной площадки.
-		/// </summary>
-		/// <param name="board">Биржевая площадка электронных торгов.</param>
-		/// <returns>Состояние сессии. Если информация о состоянии сессии отсутствует, то будет возвращено <see langword="null"/>.</returns>
-		public SessionStates? GetSessionState(ExchangeBoard board)
-		{
-			return _sessionStates.TryGetValue2(board);
-		}
-
-		/// <summary>
-		/// Получить все заявки.
-		/// </summary>
-		public IEnumerable<Order> Orders
-		{
-			get { return _entityCache.Orders; }
-		}
-
-		/// <summary>
-		/// Получить все стоп-заявки.
-		/// </summary>
-		public IEnumerable<Order> StopOrders
-		{
-			get { return Orders.Where(o => o.Type == OrderTypes.Conditional); }
-		}
-
-		private readonly SynchronizedList<OrderFail> _orderRegisterFails = new SynchronizedList<OrderFail>();
-
-		/// <summary>
-		/// Получить все ошибки при регистрации заявок.
-		/// </summary>
-		public IEnumerable<OrderFail> OrderRegisterFails
-		{
-			get { return _orderRegisterFails.SyncGet(c => c.ToArray()); }
-		}
-
-		private readonly SynchronizedList<OrderFail> _orderCancelFails = new SynchronizedList<OrderFail>();
-
-		/// <summary>
-		/// Получить все ошибки при снятии заявок.
-		/// </summary>
-		public IEnumerable<OrderFail> OrderCancelFails
-		{
-			get { return _orderCancelFails.SyncGet(c => c.ToArray()); }
-		}
-
-		/// <summary>
-		/// Получить все сделки.
-		/// </summary>
-		public IEnumerable<Trade> Trades
-		{
-			get { return _entityCache.Trades; }
-		}
-
-		/// <summary>
-		/// Получить все собственные сделки.
-		/// </summary>
-		public IEnumerable<MyTrade> MyTrades
-		{
-			get { return _entityCache.MyTrades; }
-		}
-
-		/// <summary>
-		/// Получить все портфели.
-		/// </summary>
-		public virtual IEnumerable<Portfolio> Portfolios
-		{
-			get { return _entityCache.Portfolios; }
-		}
-
-		private readonly CachedSynchronizedDictionary<Tuple<Portfolio, Security, string, TPlusLimits?>, Position> _positions = new CachedSynchronizedDictionary<Tuple<Portfolio, Security, string, TPlusLimits?>, Position>();
-
-		/// <summary>
-		/// Получить все позиции.
-		/// </summary>
-		public IEnumerable<Position> Positions
-		{
-			get { return _positions.CachedValues; }
-		}
-
-		/// <summary>
-		/// Все новости.
-		/// </summary>
-		public IEnumerable<News> News
-		{
-			get { return _entityCache.News; }
-		}
-
-		/// <summary>
-		/// Производить расчет данных на основе <see cref="ManagedMessageAdapter"/>. По-умолчанию включено.
-		/// </summary>
-		public virtual bool CalculateMessages
-		{
-			get { return true; }
-		}
-
-		/// <summary>
-		/// Менеджер расчета проскальзывания.
-		/// </summary>
-		public ISlippageManager SlippageManager { get; private set; }
-
-		/// <summary>
-		/// Состояние соединения.
-		/// </summary>
-		public ConnectionStates ConnectionState { get; private set; }
-
-		private bool _isSupportAtomicReRegister = true;
-
-		/// <summary>
-		/// Поддерживается ли перерегистрация заявок через метод <see cref="IConnector.ReRegisterOrder(StockSharp.BusinessEntities.Order,StockSharp.BusinessEntities.Order)"/>
-		/// в виде одной транзакции. По-умолчанию включено.
-		/// </summary>
-		public virtual bool IsSupportAtomicReRegister
-		{
-			get { return _isSupportAtomicReRegister; }
-			protected set { _isSupportAtomicReRegister = value; }
-		}
-
-		/// <summary>
-		/// Использовать лог заявок (orders log) для создания стаканов. По-умолчанию выключено.
-		/// </summary>
-		public virtual bool CreateDepthFromOrdersLog { get; set; }
-
-		/// <summary>
-		/// Использовать лог заявок (orders log) для создания тиковых сделок. По-умолчанию выключено.
-		/// </summary>
-		public virtual bool CreateTradesFromOrdersLog { get; set; }
-
-		/// <summary>
-		/// Обновлять <see cref="Security.LastTrade"/>, <see cref="Security.BestBid"/>, <see cref="Security.BestAsk"/> на каждом обновлении стакана и/или сделок.
-		/// По умолчанию включено.
-		/// </summary>
-		public bool UpdateSecurityLastQuotes { get; set; }
-
-		/// <summary>
-		/// Обновлять поля <see cref="Security"/> при появлении сообщения <see cref="Level1ChangeMessage"/>.
-		/// По умолчанию включено.
-		/// </summary>
-		public bool UpdateSecurityByLevel1 { get; set; }
-
-		/// <summary>
-		/// Число ошибок, переданное через событие <see cref="Error"/>.
-		/// </summary>
-		public int ErrorCount { get; private set; }
-
-		///// <summary>
-		///// Временной сдвиг от текущего времени. Используется в случае, если сервер брокера самостоятельно
-		///// указывает сдвиг во времени.
-		///// </summary>
-		//public TimeSpan? TimeShift { get; private set; }
-
-		private TimeSpan _marketTimeChangedInterval = TimeSpan.FromMilliseconds(10);
-
-		/// <summary>
-		/// Интервал генерации сообщения <see cref="TimeMessage"/>. По-умолчанию равно 10 миллисекундам.
-		/// </summary>
-		[CategoryLoc(LocalizedStrings.Str186Key)]
-		[DisplayNameLoc(LocalizedStrings.TimeIntervalKey)]
-		[DescriptionLoc(LocalizedStrings.Str195Key)]
-		public virtual TimeSpan MarketTimeChangedInterval
-		{
-			get { return _marketTimeChangedInterval; }
-			set
-			{
-				if (value <= TimeSpan.Zero)
-					throw new ArgumentOutOfRangeException("value", value, LocalizedStrings.Str196);
-
-				_marketTimeChangedInterval = value;
+				case MessageTypes.SecurityLookup:
+					connector.SubscriptionsOnConnect.Add(connector.SecurityLookup);
+					break;
+				case MessageTypes.BoardLookup:
+					connector.SubscriptionsOnConnect.Add(connector.BoardLookup);
+					break;
+				case MessageTypes.DataTypeLookup:
+					connector.SubscriptionsOnConnect.Add(connector.DataTypeLookup);
+					break;
+				case MessageTypes.PortfolioLookup:
+					connector.SubscriptionsOnConnect.Add(connector.PortfolioLookup);
+					break;
+				case MessageTypes.OrderStatus:
+					connector.SubscriptionsOnConnect.Add(connector.OrderLookup);
+					break;
 			}
 		}
 
-		private void TryOpenChannel()
+		protected override void OnRemoved(MessageTypes item)
 		{
-			if (OutMessageChannel.IsOpened)
-				return;
+			base.OnRemoved(item);
 
-			OutMessageChannel.Open();
-		}
-
-		/// <summary>
-		/// Подключиться к торговой системе.
-		/// </summary>
-		public void Connect()
-		{
-			this.AddInfoLog("Connect");
-
-			try
+			switch (item)
 			{
-				if (ConnectionState != ConnectionStates.Disconnected && ConnectionState != ConnectionStates.Failed)
-				{
-					this.AddWarningLog(LocalizedStrings.Str1095Params, ConnectionState);
-					return;
-				}
-
-				ConnectionState = ConnectionStates.Connecting;
-
-				foreach (var adapter in Adapter.InnerAdapters.SortedAdapters)
-				{
-					_adapterStates[adapter] = ConnectionStates.Connecting;
-				}
-
-				TryOpenChannel();
-
-				StartMarketTimer();
-				OnConnect();
-			}
-			catch (Exception ex)
-			{
-				RaiseConnectionError(ex);
+				case MessageTypes.SecurityLookup:
+					connector.SubscriptionsOnConnect.Remove(connector.SecurityLookup);
+					break;
+				case MessageTypes.BoardLookup:
+					connector.SubscriptionsOnConnect.Remove(connector.BoardLookup);
+					break;
+				case MessageTypes.DataTypeLookup:
+					connector.SubscriptionsOnConnect.Remove(connector.DataTypeLookup);
+					break;
+				case MessageTypes.PortfolioLookup:
+					connector.SubscriptionsOnConnect.Remove(connector.PortfolioLookup);
+					break;
+				case MessageTypes.OrderStatus:
+					connector.SubscriptionsOnConnect.Remove(connector.OrderLookup);
+					break;
 			}
 		}
 
-		/// <summary>
-		/// Подключиться к торговой системе.
-		/// </summary>
-		protected virtual void OnConnect()
+		protected override void OnCleared()
 		{
-			SendInMessage(new ConnectMessage());
+			base.OnCleared();
+
+			connector.SubscriptionsOnConnect.Clear();
 		}
+	}
 
-		/// <summary>
-		/// Отключиться от торговой системы.
-		/// </summary>
-		public void Disconnect()
+	/// <summary>
+	/// </summary>
+	[Obsolete("Use SubscriptionsOnConnect property.")]
+	public ISet<MessageTypes> LookupMessagesOnConnect { get; }
+
+	/// <inheritdoc />
+	public void Connect()
+	{
+		LogInfo(nameof(Connect));
+
+		try
 		{
-			this.AddInfoLog("Disconnect");
-
-			if (ConnectionState != ConnectionStates.Connected)
+			if (ConnectionState is not ConnectionStates.Disconnected and not ConnectionStates.Failed)
 			{
-				this.AddWarningLog(LocalizedStrings.Str1096Params, ConnectionState);
+				LogWarning(LocalizedStrings.CannotConnectReasonState, ConnectionState);
 				return;
 			}
+
+			ConnectionState = ConnectionStates.Connecting;
+
+			AsyncHelper.Run(() => OnConnectAsync(default));
+		}
+		catch (Exception ex)
+		{
+			RaiseConnectionError(ex);
+		}
+	}
+
+	/// <summary>
+	/// Connect to trading system.
+	/// </summary>
+	protected virtual ValueTask OnConnectAsync(CancellationToken cancellationToken)
+	{
+		if (TimeChange)
+			CreateTimer();
+
+		if (!IsRestoreSubscriptionOnNormalReconnect)
+			_subscriptionManager.ClearCache();
+
+		return SendInMessageAsync(new ConnectMessage(), cancellationToken);
+	}
+
+	/// <inheritdoc />
+	public void Disconnect()
+	{
+		LogInfo(nameof(Disconnect));
+
+		if (ConnectionState != ConnectionStates.Connected)
+		{
+			LogWarning(LocalizedStrings.CannotDisconnectReasonState, ConnectionState);
+			return;
+		}
+
+		ConnectionState = ConnectionStates.Disconnecting;
+
+		try
+		{
+			AsyncHelper.Run(() => OnDisconnectAsync(default));
+		}
+		catch (Exception ex)
+		{
+			RaiseConnectionError(ex);
+		}
+	}
+
+	/// <summary>
+	/// Disconnect from trading system.
+	/// </summary>
+	protected virtual async ValueTask OnDisconnectAsync(CancellationToken cancellationToken)
+	{
+		if (IsAutoUnSubscribeOnDisconnect)
+			await ApplySubscriptionManagerActionsAsync(_subscriptionManager.UnSubscribeAll(), cancellationToken);
+
+		await SendInMessageAsync(new DisconnectMessage(), cancellationToken);
+	}
+
+	/// <inheritdoc />
+	public Position GetPosition(Portfolio portfolio, Security security, string strategyId = "", Sides? side = null, string clientCode = "", string depoName = "", TPlusLimits? limitType = null)
+	{
+		return GetPosition(portfolio, security, strategyId, side, clientCode, depoName, limitType, string.Empty);
+	}
+
+	private Position GetPosition(Portfolio portfolio, Security security, string strategyId, Sides? side, string clientCode, string depoName, TPlusLimits? limitType, string description)
+	{
+		if (portfolio == null)
+			throw new ArgumentNullException(nameof(portfolio));
+
+		if (security == null)
+			throw new ArgumentNullException(nameof(security));
+
+		var position = PositionStorage.GetOrCreatePosition(portfolio, security, strategyId, side, clientCode, depoName, limitType, (pf, sec, sid, sd, clCode, ddep, limit) =>
+		{
+			return new Position
+			{
+				Portfolio = portfolio,
+				Security = security,
+				DepoName = depoName,
+				LimitType = limitType,
+				Description = description,
+				ClientCode = clientCode,
+				StrategyId = strategyId,
+				Side = side
+			};
+		}, out _);
+
+		if (_existingPositions.TryAdd(position))
+			RaiseNewPosition(position);
+
+		return position;
+	}
+
+	/// <summary>
+	/// Check <see cref="Order.Price"/> and <see cref="Order.Volume"/> are they multiply to step.
+	/// </summary>
+	public bool CheckSteps { get; set; }
+
+	/// <inheritdoc />
+	public void RegisterOrder(Order order)
+		=> AsyncHelper.Run(() => RegisterOrderAsync(order));
+
+	/// <summary>
+	/// Register new order asynchronously.
+	/// </summary>
+	/// <param name="order">Registration details.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	public async ValueTask RegisterOrderAsync(Order order, CancellationToken cancellationToken = default)
+	{
+		try
+		{
+			this.AddOrderInfoLog(order, nameof(RegisterOrder));
+
+			CheckOnNew(order);
+
+			if (order.Type != OrderTypes.Conditional)
+			{
+				if (order.Volume <= 0)
+					throw new ArgumentOutOfRangeException(nameof(order), order.Volume, LocalizedStrings.InvalidValue);
+			}
+
+			order.Type ??= order.Price > 0 ? OrderTypes.Limit : OrderTypes.Market;
+
+			await InitNewOrderAsync(order, cancellationToken);
+			await OnRegisterOrderAsync(order, cancellationToken);
+		}
+		catch (Exception ex)
+		{
+			var transactionId = order.TransactionId;
+
+			if (transactionId == 0 || order.State != OrderStates.None)
+				transactionId = TransactionIdGenerator.GetNextId();
+
+			await SendOrderFailedAsync(order, OrderOperations.Register, ex, transactionId, cancellationToken);
+		}
+	}
+
+	/// <inheritdoc />
+	public bool? IsOrderEditable(Order order)
+		=> _entityCache.TryGetAdapter(order)?.IsReplaceCommandEditCurrent;
+
+	/// <inheritdoc />
+	public bool? IsOrderReplaceable(Order order)
+		=> _entityCache.TryGetAdapter(order)?.IsMessageSupported(MessageTypes.OrderReplace);
+
+	/// <inheritdoc />
+	public void EditOrder(Order order, Order changes)
+		=> AsyncHelper.Run(() => EditOrderAsync(order, changes));
+
+	/// <summary>
+	/// Edit the order asynchronously.
+	/// </summary>
+	/// <param name="order">Order to edit.</param>
+	/// <param name="changes">Order to change with new values.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	public async ValueTask EditOrderAsync(Order order, Order changes, CancellationToken cancellationToken = default)
+	{
+		if (order is null)
+			throw new ArgumentNullException(nameof(order));
+
+		if (changes is null)
+			throw new ArgumentNullException(nameof(changes));
+
+		CheckOnOld(order);
+
+		try
+		{
+			this.AddOrderInfoLog(order, nameof(EditOrder));
+
+			CheckOnNew(changes);
+
+			if (IsOrderEditable(order) != true)
+				LogWarning("Order {0} is not editable.", order.TransactionId);
+
+			var transactionId = TransactionIdGenerator.GetNextId();
+			_entityCache.AddOrderByEditionId(order, transactionId);
+
+			changes.TransactionId = transactionId;
+			await OnEditOrderAsync(order, changes, cancellationToken);
+		}
+		catch (Exception ex)
+		{
+			await SendOrderFailedAsync(order, OrderOperations.Edit, ex, changes.TransactionId, cancellationToken);
+		}
+	}
+
+	/// <inheritdoc />
+	public void ReRegisterOrder(Order oldOrder, Order newOrder)
+		=> AsyncHelper.Run(() => ReRegisterOrderAsync(oldOrder, newOrder));
+
+	/// <summary>
+	/// Reregister the order asynchronously.
+	/// </summary>
+	/// <param name="oldOrder">Cancelling order.</param>
+	/// <param name="newOrder">New order to register.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	public async ValueTask ReRegisterOrderAsync(Order oldOrder, Order newOrder, CancellationToken cancellationToken = default)
+	{
+		if (oldOrder is null)
+			throw new ArgumentNullException(nameof(oldOrder));
+
+		if (newOrder is null)
+			throw new ArgumentNullException(nameof(newOrder));
+
+		CheckOnOld(oldOrder);
+
+		try
+		{
+			this.AddOrderInfoLog(oldOrder, nameof(ReRegisterOrder));
+
+			if (oldOrder.Security != newOrder.Security)
+				throw new ArgumentException(LocalizedStrings.SecuritiesMismatch.Put(newOrder.Security.Id, oldOrder.Security.Id), nameof(newOrder));
+
+			CheckOnNew(newOrder);
+
+			if (IsOrderReplaceable(oldOrder) != true)
+				LogWarning("Order {0} is not replaceable.", oldOrder.TransactionId);
+
+			await InitNewOrderAsync(newOrder, cancellationToken);
+
+			_entityCache.AddOrderByCancelationId(oldOrder, newOrder.TransactionId);
+
+			await OnReRegisterOrderAsync(oldOrder, newOrder, cancellationToken);
+		}
+		catch (Exception ex)
+		{
+			var transactionId = newOrder.TransactionId;
+
+			if (transactionId == 0 || newOrder.State != OrderStates.None)
+				transactionId = TransactionIdGenerator.GetNextId();
+
+			await SendOrderFailedAsync(oldOrder, OrderOperations.Cancel, ex, transactionId, cancellationToken);
+			await SendOrderFailedAsync(newOrder, OrderOperations.Register, ex, transactionId, cancellationToken);
+		}
+	}
+
+	/// <inheritdoc />
+	public void CancelOrder(Order order)
+		=> AsyncHelper.Run(() => CancelOrderAsync(order));
+
+	/// <summary>
+	/// Cancel the order asynchronously.
+	/// </summary>
+	/// <param name="order">Order to cancel.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	public async ValueTask CancelOrderAsync(Order order, CancellationToken cancellationToken = default)
+	{
+		CheckOnOld(order);
+
+		long transactionId = 0;
+
+		try
+		{
+			this.AddOrderInfoLog(order, nameof(CancelOrder));
+
+			transactionId = TransactionIdGenerator.GetNextId();
+			_entityCache.AddOrderByCancelationId(order, transactionId);
+
+			await OnCancelOrderAsync(order, transactionId, cancellationToken);
+		}
+		catch (Exception ex)
+		{
+			if (transactionId == 0)
+				transactionId = TransactionIdGenerator.GetNextId();
+
+			await SendOrderFailedAsync(order, OrderOperations.Cancel, ex, transactionId, cancellationToken);
+		}
+	}
+
+	private ValueTask SendOrderFailedAsync(Order order, OrderOperations operation, Exception error, long originalTransactionId, CancellationToken cancellationToken)
+	{
+		var fail = new OrderFail
+		{
+			Order = order,
+			Error = error,
+			ServerTime = CurrentTime,
+			TransactionId = originalTransactionId,
+		};
+
+		_entityCache.AddOrderFailById(fail, operation, originalTransactionId);
+
+		var msg = fail.ToMessage(originalTransactionId);
+		TrySetOrderSubscriptionId(msg);
+		return SendOutMessageAsync(msg, cancellationToken);
+	}
+
+	private void TrySetOrderSubscriptionId(ExecutionMessage msg)
+	{
+		var orderSubId = OrderLookup.TransactionId;
+
+		if (orderSubId > 0)
+			msg.SetSubscriptionIds(subscriptionId: orderSubId);
+	}
+
+	private void CheckOnNew(Order order)
+	{
+		CheckOrderState(order);
+
+		if (order.TransactionId != 0)
+			throw new ArgumentException(LocalizedStrings.OrderAlreadyTransId.Put(order.TransactionId), nameof(order));
+
+		if (order.State != OrderStates.None)
+			throw new ArgumentException(LocalizedStrings.OrderAlreadyState.Put(order.State), nameof(order));
+
+		if (order.Id != null || !order.StringId.IsEmpty())
+			throw new ArgumentException(LocalizedStrings.OrderAlreadyId.Put(order.Id == null ? order.StringId : order.Id.To<string>()), nameof(order));
+
+		if (CheckSteps)
+		{
+			if (order.Price > 0)
+			{
+				var priceStep = order.Security.PriceStep;
+
+				if (priceStep != null && (order.Price % priceStep.Value) != 0)
+					throw new ArgumentException(LocalizedStrings.OrderPriceNotMultipleOfPriceStep.Put(order.Price, order, priceStep.Value));
+			}
+
+			var volumeStep = order.Security.VolumeStep;
+
+			if (volumeStep != null && (order.Volume % volumeStep.Value) != 0)
+				throw new ArgumentException(LocalizedStrings.OrderVolumeNotMultipleOfVolumeStep.Put(order.Volume, order, volumeStep.Value));
+		}
+	}
+
+	private void CheckOnOld(Order order)
+	{
+		CheckOrderState(order);
+
+		if (order.TransactionId == 0)
+			throw new ArgumentException(LocalizedStrings.OrderNoTransId, nameof(order));
+
+		if (!ReferenceEquals(_entityCache.TryGetOrder(order.TransactionId, OrderOperations.Register), order))
+			throw new ArgumentException(LocalizedStrings.OrderNotFound.Put(order.TransactionId), nameof(order));
+	}
+
+	private static void CheckOrderState(Order order)
+	{
+		if (order == null)
+			throw new ArgumentNullException(nameof(order));
+
+		if (order.Type == OrderTypes.Conditional && order.Condition == null)
+			throw new ArgumentException(LocalizedStrings.ConditionNotSpecified, nameof(order));
+
+		if (order.Security == null)
+			throw new ArgumentException(LocalizedStrings.SecurityNotSpecified, nameof(order));
+
+		if (order.Portfolio == null)
+			throw new ArgumentException(LocalizedStrings.PortfolioNotSpecified, nameof(order));
+
+		if (order.Price < 0)
+			throw new ArgumentOutOfRangeException(nameof(order), order.Price, LocalizedStrings.InvalidValue);
+
+		if (order.Price == 0 && order.Type == OrderTypes.Limit)
+			throw new ArgumentException(LocalizedStrings.LimitOrderMustPrice, nameof(order));
+	}
+
+	/// <summary>
+	/// Initialize registering order (transaction id etc.).
+	/// </summary>
+	/// <param name="order">New order.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	private ValueTask InitNewOrderAsync(Order order, CancellationToken cancellationToken)
+	{
+		order.Balance = order.Volume;
+
+		if (order.TransactionId == 0)
+			order.TransactionId = TransactionIdGenerator.GetNextId();
+
+		order.LocalTime = CurrentTime;
+		order.ApplyNewState(OrderStates.Pending, this);
+
+		_entityCache.AddOrderByRegistrationId(order);
+
+		var msg = order.ToMessage();
+		TrySetOrderSubscriptionId(msg);
+		return SendOutMessageAsync(msg, cancellationToken);
+	}
+
+	/// <summary>
+	/// Register new order.
+	/// </summary>
+	/// <param name="order">Registration details.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	protected ValueTask OnRegisterOrderAsync(Order order, CancellationToken cancellationToken)
+		=> SendInMessageAsync(order.CreateRegisterMessage(GetSecurityId(order.Security)), cancellationToken);
+
+	/// <summary>
+	/// Edit the order.
+	/// </summary>
+	/// <param name="order">Order.</param>
+	/// <param name="changes">Order changes.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	protected ValueTask OnEditOrderAsync(Order order, Order changes, CancellationToken cancellationToken)
+		=> SendInMessageAsync(order.CreateReplaceMessage(changes, GetSecurityId(order.Security)), cancellationToken);
+
+	/// <summary>
+	/// Reregister the order.
+	/// </summary>
+	/// <param name="oldOrder">Cancelling order.</param>
+	/// <param name="newOrder">New order to register.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	protected ValueTask OnReRegisterOrderAsync(Order oldOrder, Order newOrder, CancellationToken cancellationToken)
+		=> SendInMessageAsync(oldOrder.CreateReplaceMessage(newOrder, GetSecurityId(newOrder.Security)), cancellationToken);
+
+	/// <summary>
+	/// Cancel the order.
+	/// </summary>
+	/// <param name="order">Order to cancel.</param>
+	/// <param name="transactionId">Order cancellation transaction id.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	protected ValueTask OnCancelOrderAsync(Order order, long transactionId, CancellationToken cancellationToken)
+		=> SendInMessageAsync(order.CreateCancelMessage(GetSecurityId(order.Security), transactionId), cancellationToken);
+
+	/// <inheritdoc />
+	public void CancelOrders(bool? isStopOrder = null, Portfolio portfolio = null, Sides? direction = null, ExchangeBoard board = null, Security security = null, SecurityTypes? securityType = null, long? transactionId = null)
+		=> AsyncHelper.Run(() => CancelOrdersAsync(isStopOrder, portfolio, direction, board, security, securityType, transactionId));
+
+	/// <summary>
+	/// Cancel orders by filter asynchronously.
+	/// </summary>
+	/// <param name="isStopOrder"><see langword="true" />, if cancel only a stop orders, <see langword="false" /> - if regular orders, <see langword="null" /> - both.</param>
+	/// <param name="portfolio">Portfolio. If the value is equal to <see langword="null" />, then the portfolio does not match the orders cancel filter.</param>
+	/// <param name="direction">Order side. If the value is <see langword="null" />, the direction does not use.</param>
+	/// <param name="board">Trading board. If the value is equal to <see langword="null" />, then the board does not match the orders cancel filter.</param>
+	/// <param name="security">Instrument. If the value is equal to <see langword="null" />, then the instrument does not match the orders cancel filter.</param>
+	/// <param name="securityType">Security type. If the value is <see langword="null" />, the type does not use.</param>
+	/// <param name="transactionId">Order cancellation transaction id.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	public ValueTask CancelOrdersAsync(bool? isStopOrder = null, Portfolio portfolio = null, Sides? direction = null, ExchangeBoard board = null, Security security = null, SecurityTypes? securityType = null, long? transactionId = null, CancellationToken cancellationToken = default)
+	{
+		transactionId ??= TransactionIdGenerator.GetNextId();
+
+		_entityCache.TryAddMassCancelationId(transactionId.Value);
+		return OnCancelOrdersAsync(transactionId.Value, cancellationToken, isStopOrder, portfolio, direction, board, security, securityType);
+	}
+
+	/// <summary>
+	/// Cancel orders by filter.
+	/// </summary>
+	/// <param name="transactionId">Order cancellation transaction id.</param>
+	/// <param name="cancellationToken">Cancellation token.</param>
+	/// <param name="isStopOrder"><see langword="true" />, if cancel only a stop orders, <see langword="false" /> - if regular orders, <see langword="null" /> - both.</param>
+	/// <param name="portfolio">Portfolio. If the value is equal to <see langword="null" />, then the portfolio does not match the orders cancel filter.</param>
+	/// <param name="direction">Order side. If the value is <see langword="null" />, the direction does not use.</param>
+	/// <param name="board">Trading board. If the value is equal to <see langword="null" />, then the board does not match the orders cancel filter.</param>
+	/// <param name="security">Instrument. If the value is equal to <see langword="null" />, then the instrument does not match the orders cancel filter.</param>
+	/// <param name="securityType">Security type. If the value is <see langword="null" />, the type does not use.</param>
+	protected ValueTask OnCancelOrdersAsync(long transactionId, CancellationToken cancellationToken, bool? isStopOrder = null, Portfolio portfolio = null, Sides? direction = null, ExchangeBoard board = null, Security security = null, SecurityTypes? securityType = null)
+	{
+		var cancelMsg = new OrderGroupCancelMessage
+		{
+			TransactionId = transactionId
+		};
+
+		if (security != null)
+			cancelMsg.SecurityId = GetSecurityId(security);
+
+		if (board != null)
+		{
+			var temp = cancelMsg.SecurityId;
+			temp.BoardCode = board.Code;
+			cancelMsg.SecurityId = temp;
+		}
+
+		if (portfolio != null)
+			cancelMsg.PortfolioName = portfolio.Name;
+
+		if (isStopOrder != null)
+			cancelMsg.OrderType = isStopOrder == true ? OrderTypes.Conditional : OrderTypes.Limit;
+
+		if (direction != null)
+			cancelMsg.Side = direction.Value;
+
+		if (securityType != null)
+			cancelMsg.SecurityType = securityType;
+
+		return SendInMessageAsync(cancelMsg, cancellationToken);
+	}
+
+	/// <summary>
+	/// Change password.
+	/// </summary>
+	/// <param name="newPassword">New password.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	public ValueTask ChangePasswordAsync(SecureString newPassword, CancellationToken cancellationToken)
+	{
+		var msg = new ChangePasswordMessage
+		{
+			NewPassword = newPassword,
+			TransactionId = TransactionIdGenerator.GetNextId()
+		};
+
+		return SendInMessageAsync(msg, cancellationToken);
+	}
+
+	private DateTime _prevTime;
+
+	private void ProcessTimeInterval(Message message)
+	{
+		if (message == _marketTimeMessage)
+		{
+			using (_marketTimerSync.EnterScope())
+				_isMarketTimeHandled = true;
+		}
+
+		var currentTime = message.LocalTime;
+
+		if (_prevTime == default)
+		{
+			_prevTime = currentTime;
+			return;
+		}
+
+		var diff = currentTime - _prevTime;
+
+		if (diff < MarketTimeChangedInterval)
+			return;
+
+		_prevTime = currentTime;
+		RaiseCurrentTimeChanged(diff);
+	}
+
+	/// <inheritdoc />
+	[Obsolete("Use GetSecurityAsync instead.")]
+	public Security GetSecurity(SecurityId securityId)
+		// Sync bridge over the async path kept only for the deprecated IConnector contract.
+		=> AsyncHelper.Run(() => GetSecurityAsync(securityId, default));
+
+	private async ValueTask<Security> EnsureGetSecurityAsync<TMessage>(TMessage message, CancellationToken cancellationToken)
+		where TMessage : ISecurityIdMessage, ISubscriptionIdMessage
+	{
+		var secId = message.SecurityId;
+
+		if (secId.IsMoney())
+			return EntitiesExtensions.MoneySecurity;
+
+		if (secId == default)
+		{
+			var subscrSecId = message
+				.GetSubscriptionIds()
+				.Select(id => _subscriptionManager.TryGetSubscription(id, true, false, null)?.SecurityId)
+				.Where(id => id != null && id.Value != default)
+				.FirstOrDefault();
+
+			if (subscrSecId == null || subscrSecId.Value == default)
+				throw new ArgumentOutOfRangeException(nameof(message), message, LocalizedStrings.EmptySecId);
+
+			secId = subscrSecId.Value;
+		}
+
+		return await GetSecurityAsync(secId, cancellationToken) ?? throw new ArgumentOutOfRangeException(nameof(message), message, LocalizedStrings.SecurityNoFound.Put(secId));
+	}
+
+	/// <inheritdoc />
+	public ValueTask<Security> GetSecurityAsync(SecurityId securityId, CancellationToken cancellationToken)
+		=> GetSecurityAsync(securityId, s => false, cancellationToken);
+
+	/// <summary>
+	/// To get the instrument by the code.
+	/// </summary>
+	/// <param name="id">Security ID.</param>
+	/// <param name="changeSecurity">The handler changing the instrument. It returns <see langword="true" /> if the instrument has been changed and the <see cref="SecurityReceived"/> should be called.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Security.</returns>
+	private async ValueTask<Security> GetSecurityAsync(SecurityId id, Func<Security, bool> changeSecurity, CancellationToken cancellationToken)
+	{
+		if (id == default)
+			throw new ArgumentNullException(nameof(id));
+
+		if (changeSecurity == null)
+			throw new ArgumentNullException(nameof(changeSecurity));
+
+		var (security, isNew) = await SecurityStorage.GetOrCreateAsync(id, key =>
+		{
+			var idInfo = SecurityIdGenerator.Split(key);
+
+			var code = idInfo.SecurityCode;
+			var board = ExchangeInfoProvider.GetOrCreateBoard(idInfo.BoardCode);
+
+			return new()
+			{
+				Id = key,
+				Code = code,
+				Board = board,
+			};
+		}, cancellationToken);
+
+		if (_existingSecurities.TryAdd(security))
+			_added?.Invoke([security]);
+
+		if (isNew)
+			ExchangeInfoProvider.Save(security.Board);
+
+		changeSecurity(security);
+
+		return security;
+	}
+
+	/// <inheritdoc />
+	public SecurityId GetSecurityId(Security security)
+		=> security.ToSecurityId(SecurityIdGenerator, copyExtended: true);
+
+	/// <summary>
+	/// Generate <see cref="Security.Id"/> security.
+	/// </summary>
+	/// <param name="secCode"><see cref="SecurityId.SecurityCode"/>.</param>
+	/// <param name="boardCode"><see cref="SecurityId.BoardCode"/>.</param>
+	/// <returns><see cref="Security.Id"/> security.</returns>
+	protected string CreateSecurityId(string secCode, string boardCode)
+		=> SecurityIdGenerator.GenerateId(secCode, boardCode);
+
+	/// <inheritdoc />
+	public object GetSecurityValue(Security security, Level1Fields field)
+		=> _entityCache.GetSecurityValue(security, field);
+
+	/// <inheritdoc />
+	public IEnumerable<Level1Fields> GetLevel1Fields(Security security)
+		=> _entityCache.GetLevel1Fields(security);
+
+	/// <summary>
+	/// Clear cache.
+	/// </summary>
+	public virtual async ValueTask ClearCacheAsync(CancellationToken cancellationToken)
+	{
+		_entityCache.Clear();
+
+		_existingSecurities.Clear();
+		_existingPortfolios.Clear();
+		_existingPositions.Clear();
+
+		_prevTime = default;
+
+		ConnectionState = ConnectionStates.Disconnected;
+
+		_subscriptionManager.ClearCache();
+
+		await SendInMessageAsync(new ResetMessage(), cancellationToken);
+
+		CloseTimer();
+
+		_cleared?.Invoke();
+	}
+
+	/// <summary>
+	/// To release allocated resources. In particular, to disconnect from the trading system.
+	/// It is what both <see cref="IDisposable.Dispose"/> and <see cref="DisposeAsync"/> run.
+	/// </summary>
+	/// <returns><see cref="ValueTask"/></returns>
+	protected virtual async ValueTask DisposeManagedAsync()
+	{
+		_isDisposing = true;
+
+		if (ConnectionState == ConnectionStates.Connected)
+		{
+			LogInfo(nameof(Disconnect));
 
 			ConnectionState = ConnectionStates.Disconnecting;
 
-			foreach (var adapter in Adapter.InnerAdapters.SortedAdapters)
-			{
-				_adapterStates[adapter] = ConnectionStates.Disconnecting;
-			}
-
-			_subscriptionManager.Stop();
-
 			try
 			{
-				OnDisconnect();
+				await OnDisconnectAsync(CancellationToken.None);
 			}
 			catch (Exception ex)
 			{
@@ -592,1040 +1105,154 @@ namespace StockSharp.Algo
 			}
 		}
 
-		/// <summary>
-		/// Отключиться от торговой системы.
-		/// </summary>
-		protected virtual void OnDisconnect()
+		base.DisposeManaged();
+
+		//if (ConnectionState == ConnectionStates.Disconnected || ConnectionState == ConnectionStates.Failed)
+		//	TransactionAdapter = null;
+
+		//if (ExportState == ConnectionStates.Disconnected || ExportState == ConnectionStates.Failed)
+		//	MarketDataAdapter = null;
+
+		await SendInMessageAsync(_disposeMessage, CancellationToken.None);
+
+		CloseTimer();
+	}
+
+	/// <summary>
+	/// The release as <see cref="IDisposable"/> requires it: the caller is blocked until <see cref="DisposeManagedAsync"/> is over.
+	/// </summary>
+	protected sealed override void DisposeManaged()
+		=> AsyncHelper.Run(DisposeManagedAsync);
+
+	/// <inheritdoc />
+	public async ValueTask DisposeAsync()
+	{
+		if (!TryBeginDispose())
+			return;
+
+		try
 		{
-			SendInMessage(new DisconnectMessage());
+			await DisposeManagedAsync();
+			DisposeNative();
+		}
+		finally
+		{
+			EndDispose();
+		}
+	}
+
+	/// <summary>
+	/// Load settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public override async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		if (storage is null)
+			throw new ArgumentNullException(nameof(storage));
+
+		OrdersKeepCount = storage.GetValue(nameof(OrdersKeepCount), OrdersKeepCount);
+#pragma warning disable CS0618 // Type or member is obsolete
+		UpdateSecurityLastQuotes = storage.GetValue(nameof(UpdateSecurityLastQuotes), UpdateSecurityLastQuotes);
+		UpdateSecurityByLevel1 = storage.GetValue(nameof(UpdateSecurityByLevel1), UpdateSecurityByLevel1);
+#pragma warning restore CS0618 // Type or member is obsolete
+		UpdateSecurityByDefinition = storage.GetValue(nameof(UpdateSecurityByDefinition), UpdateSecurityByDefinition);
+		UpdatePortfolioByChange = storage.GetValue(nameof(UpdatePortfolioByChange), UpdatePortfolioByChange);
+		//ReConnectionSettings.Load(storage.GetValue<SettingsStorage>(nameof(ReConnectionSettings)));
+		OverrideSecurityData = storage.GetValue(nameof(OverrideSecurityData), OverrideSecurityData);
+		CheckSteps = storage.GetValue(nameof(CheckSteps), CheckSteps);
+
+		if (storage.ContainsKey(nameof(RiskManager)))
+			RiskManager = await storage.GetValue<SettingsStorage>(nameof(RiskManager)).LoadEntireAsync<IRiskManager>(cancellationToken);
+
+		await Adapter.LoadAsync(storage, nameof(Adapter), cancellationToken);
+
+		MarketTimeChangedInterval = storage.GetValue<TimeSpan>(nameof(MarketTimeChangedInterval));
+		TimeChange = storage.GetValue(nameof(TimeChange), TimeChange);
+
+		var supportBasketSecurities = storage.GetValue(nameof(SupportBasketSecurities), SupportBasketSecurities);
+		var supportSnapshots = storage.GetValue(nameof(SupportSnapshots), SupportSnapshots);
+		var supportAssociatedSecurity = storage.GetValue(nameof(SupportAssociatedSecurity), SupportAssociatedSecurity);
+		var supportFilteredMarketDepth = storage.GetValue(nameof(SupportFilteredMarketDepth), SupportFilteredMarketDepth);
+
+		// Rebuild these wrappers from the inside out so their order is the same as in Adapter's setter.
+		SupportFilteredMarketDepth = false;
+		SupportAssociatedSecurity = false;
+		SupportSnapshots = false;
+		SupportBasketSecurities = false;
+
+		SupportBasketSecurities = supportBasketSecurities;
+		SupportSnapshots = supportSnapshots;
+		SupportAssociatedSecurity = supportAssociatedSecurity;
+		SupportFilteredMarketDepth = supportFilteredMarketDepth;
+
+		var subscriptionsOnConnect = storage.GetValue<object>("LookupMessagesOnConnect") ?? storage.GetValue<object>(nameof(SubscriptionsOnConnect));
+		if (subscriptionsOnConnect is IEnumerable<SettingsStorage> subSettings)
+		{
+			SubscriptionsOnConnect.Clear();
+			SubscriptionsOnConnect.AddRange((await subSettings.LoadAllAsync<DataType>(cancellationToken)).Select(dt => new Subscription(dt)));
+		}
+		else if (subscriptionsOnConnect is string str)
+		{
+			SubscriptionsOnConnect.Clear();
+
+#pragma warning disable CS0618
+			LookupMessagesOnConnect.Clear();
+			LookupMessagesOnConnect.AddRange(str.SplitByComma(true).Select(s => s.ToMessageType()));
+#pragma warning restore CS0618
 		}
 
-		/// <summary>
-		/// Найти инструменты, соответствующие фильтру <paramref name="criteria"/>.
-		/// Найденные инструменты будут переданы через событие <see cref="IConnector.LookupSecuritiesResult"/>.
-		/// </summary>
-		/// <param name="criteria">Инструмент, поля которого будут использоваться в качестве фильтра.</param>
-		public void LookupSecurities(Security criteria)
-		{
-			if (criteria == null)
-				throw new ArgumentNullException("criteria");
-
-			var boardCode = criteria.Board != null ? criteria.Board.Code : string.Empty;
-			var securityCode = criteria.Code ?? string.Empty;
-
-			if (!criteria.Id.IsEmpty())
-			{
-				var info = SecurityIdGenerator.Split(criteria.Id);
-
-				if (boardCode.IsEmpty())
-					boardCode = GetBoardCode(info.Item2);
-
-				if (securityCode.IsEmpty())
-					securityCode = info.Item1;
-			}
-
-			var message = new SecurityLookupMessage
-			{
-				TransactionId = TransactionIdGenerator.GetNextId(),
-				//LocalTime = CurrentTime,
-				SecurityId = criteria.ExternalId.ToSecurityId(securityCode, boardCode, criteria.Type),
-				Name = criteria.Name,
-				Class = criteria.Class,
-				SecurityType = criteria.Type,
-				ExpiryDate = criteria.ExpiryDate,
-				ShortName = criteria.ShortName,
-				VolumeStep = criteria.VolumeStep,
-				Multiplier = criteria.Multiplier,
-				PriceStep = criteria.PriceStep,
-				Decimals = criteria.Decimals,
-				Currency = criteria.Currency,
-				SettlementDate = criteria.SettlementDate,
-				OptionType = criteria.OptionType,
-				Strike = criteria.Strike,
-				BinaryOptionType = criteria.BinaryOptionType,
-				UnderlyingSecurityCode = criteria.UnderlyingSecurityId.IsEmpty() ? null : SecurityIdGenerator.Split(criteria.UnderlyingSecurityId).Item1
-			};
-
-			LookupSecurities(message);
-		}
-
-		/// <summary>
-		/// Найти инструменты, соответствующие фильтру <paramref name="criteria"/>.
-		/// Найденные инструменты будут переданы через событие <see cref="IConnector.LookupSecuritiesResult"/>.
-		/// </summary>
-		/// <param name="criteria">Критерий, поля которого будут использоваться в качестве фильтра.</param>
-		public virtual void LookupSecurities(SecurityLookupMessage criteria)
-		{
-			if (criteria == null)
-				throw new ArgumentNullException("criteria");
-
-			//если для критерия указаны код биржи и код инструмента, то сначала смотрим нет ли такого инструмента
-			if (!NeedLookupSecurities(criteria.SecurityId))
-			{
-				_securityLookups.Add(criteria.TransactionId, (SecurityLookupMessage)criteria.Clone());
-				SendOutMessage(new SecurityLookupResultMessage { OriginalTransactionId = criteria.TransactionId });
-				return;
-			}
-
-			lock (_lookupQueue.SyncRoot)
-			{
-				_lookupQueue.Enqueue(criteria);
-
-				if (_lookupQueue.Count == 1)
-					SendInMessage(criteria);
-			}
-		}
-
-		private bool NeedLookupSecurities(SecurityId securityId)
-		{
-			if (securityId.SecurityCode.IsEmpty() || securityId.BoardCode.IsEmpty())
-				return true;
-
-			var id = SecurityIdGenerator.GenerateId(securityId.SecurityCode, securityId.BoardCode);
-
-			var security = Securities.FirstOrDefault(s => s.Id.CompareIgnoreCase(id));
-
-			return security == null;
-		}
-
-		/// <summary>
-		/// Найти портфели, соответствующие фильтру <paramref name="criteria"/>.
-		/// Найденные портфели будут переданы через событие <see cref="IConnector.LookupPortfoliosResult"/>.
-		/// </summary>
-		/// <param name="criteria">Портфель, поля которого будут использоваться в качестве фильтра.</param>
-		public virtual void LookupPortfolios(Portfolio criteria)
-		{
-			if (criteria == null)
-				throw new ArgumentNullException("criteria");
-
-			var msg = new PortfolioLookupMessage
-			{
-				TransactionId = TransactionIdGenerator.GetNextId(),
-				BoardCode = criteria.Board == null ? null : criteria.Board.Code,
-				Currency = criteria.Currency,
-				PortfolioName = criteria.Name,
-			};
-
-			_portfolioLookups.Add(msg.TransactionId, msg);
-
-			SendInMessage(msg);
-		}
-
-		/// <summary>
-		/// Получить позицию по портфелю и инструменту.
-		/// </summary>
-		/// <param name="portfolio">Портфель, по которому нужно найти позицию.</param>
-		/// <param name="security">Инструмент, по которому нужно найти позицию.</param>
-		/// <param name="depoName">Название депозитария, где находится физически ценная бумага.
-		/// По-умолчанию передается пустая строка, что означает суммарную позицию по всем депозитариям.</param>
-		/// <returns>Позиция.</returns>
-		public Position GetPosition(Portfolio portfolio, Security security, string depoName = "")
-		{
-			return GetPosition(portfolio, security, depoName, TPlusLimits.T0, string.Empty);
-		}
-
-		private Position GetPosition(Portfolio portfolio, Security security, string depoName, TPlusLimits? limitType, string description)
-		{
-			if (portfolio == null)
-				throw new ArgumentNullException("portfolio");
-
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			Position position;
-
-			var isNew = false;
-
-			lock (_positions.SyncRoot)
-			{
-				if (depoName == null)
-					depoName = string.Empty;
-
-				var key = Tuple.Create(portfolio, security, depoName, limitType);
-
-				if (!_positions.TryGetValue(key, out position))
-				{
-					isNew = true;
-
-					position = EntityFactory.CreatePosition(portfolio, security);
-					position.DepoName = depoName;
-					position.LimitType = limitType;
-					position.Description = description;
-					_positions.Add(key, position);
-				}
-			}
-
-			if (isNew)
-				RaiseNewPositions(new[] { position });
-
-			return position;
-		}
-
-		/// <summary>
-		/// Получить стакан котировок.
-		/// </summary>
-		/// <param name="security">Инструмент, по которому нужно получить стакан.</param>
-		/// <returns>Стакан котировок.</returns>
-		public MarketDepth GetMarketDepth(Security security)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			MarketDepthInfo info;
-
-			var isNew = false;
-
-			lock (_marketDepths.SyncRoot)
-			{
-				if (!_marketDepths.TryGetValue(security, out info))
-				{
-					isNew = true;
-
-					info = new MarketDepthInfo(EntityFactory.CreateMarketDepth(security));
-
-					// стакан из лога заявок бесконечен
-					if (CreateDepthFromOrdersLog)
-						info.First.MaxDepth = int.MaxValue;
-
-					_marketDepths.Add(security, info);
-				}
-				else
-				{
-					if (info.HasChanges)
-					{
-						new QuoteChangeMessage
-						{
-							LocalTime = info.First.LocalTime,
-							ServerTime = info.First.LastChangeTime,
-							Bids = info.Second,
-							Asks = info.Third
-						}.ToMarketDepth(info.First, GetSecurity);
-
-						info.Second = null;
-						info.Third = null;
-					}
-				}
-			}
-
-			if (isNew)
-				RaiseNewMarketDepths(new[] { info.First });
-
-			return info.First;
-		}
-
-		/// <summary>
-		/// Получить отфильтрованный стакан котировок.
-		/// </summary>
-		/// <param name="security">Инструмент, по которому нужно получить стакан.</param>
-		/// <returns>Отфильтрованный стакан котировок.</returns>
-		public MarketDepth GetFilteredMarketDepth(Security security)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			if (!_subscriptionManager.IsFilteredMarketDepthRegistered(security))
-				throw new InvalidOperationException(LocalizedStrings.Str1097Params.Put(security.Id));
-
-			return GetFilteredMarketDepthInfo(security).GetDepth();
-		}
-
-		private FilteredMarketDepthInfo GetFilteredMarketDepthInfo(Security security)
-		{
-			return _filteredMarketDepths.SafeAdd(security, s => new FilteredMarketDepthInfo(EntityFactory.CreateMarketDepth(s)));
-		}
-
-		/// <summary>
-		/// Зарегистрировать заявку на бирже.
-		/// </summary>
-		/// <param name="order">Заявка, содержащая информацию для регистрации.</param>
-		public void RegisterOrder(Order order)
-		{
-			RegisterOrder(order, true);
-		}
-
-		private void RegisterOrder(Order order, bool initOrder)
-		{
-			try
-			{
-				this.AddOrderInfoLog(order, "RegisterOrder");
-
-				CheckOnNew(order, order.Type != OrderTypes.Conditional, initOrder);
-
-				var cs = order.Security as ContinuousSecurity;
-
-				while (cs != null)
-				{
-					order.Security = cs.GetSecurity(order.Security.ToExchangeTime(CurrentTime));
-					cs = order.Security as ContinuousSecurity;
-				}
-
-				if (initOrder)
-					InitNewOrder(order);
-
-				OnRegisterOrder(order);
-			}
-			catch (Exception ex)
-			{
-				SendOrderFailed(order, ex);
-			}
-		}
-
-		/// <summary>
-		/// Перерегистрировать заявку на бирже.
-		/// </summary>
-		/// <param name="oldOrder">Заявка, которую нужно снять и на основе нее зарегистрировать новую.</param>
-		/// <param name="price">Цена новой заявки.</param>
-		/// <param name="volume">Объем новой заявки.</param>
-		/// <returns>Новая заявка.</returns>
-		/// <remarks>
-		/// Если объём не задан, меняется только цена.
-		/// </remarks>
-		public Order ReRegisterOrder(Order oldOrder, decimal price, decimal volume = 0)
-		{
-			if (oldOrder == null)
-				throw new ArgumentNullException("oldOrder");
-
-			var newOrder = oldOrder.ReRegisterClone(price, volume);
-			ReRegisterOrder(oldOrder, newOrder);
-			return newOrder;
-		}
-
-		/// <summary>
-		/// Перерегистрировать заявку на бирже.
-		/// </summary>
-		/// <param name="oldOrder">Заявка, которую нужно снять.</param>
-		/// <param name="newOrder">Новая заявка, которую нужно зарегистрировать.</param>
-		public virtual void ReRegisterOrder(Order oldOrder, Order newOrder)
-		{
-			if (oldOrder == null)
-				throw new ArgumentNullException("oldOrder");
-
-			if (newOrder == null)
-				throw new ArgumentNullException("newOrder");
-
-			try
-			{
-				if (oldOrder.Security != newOrder.Security)
-					throw new ArgumentException(LocalizedStrings.Str1098Params.Put(newOrder.Security.Id, oldOrder.Security.Id), "newOrder");
-
-				if (oldOrder.Type == OrderTypes.Conditional)
-				{
-					CancelOrder(oldOrder);
-					RegisterOrder(newOrder);
-				}
-				else
-				{
-					CheckOnOld(oldOrder);
-					CheckOnNew(newOrder, false);
-
-					if (oldOrder.Comment.IsEmpty())
-						oldOrder.Comment = newOrder.Comment;
-
-					InitNewOrder(newOrder);
-					_entityCache.AddOrderByCancelTransaction(newOrder.TransactionId, oldOrder);
-
-					OnReRegisterOrder(oldOrder, newOrder);
-				}
-			}
-			catch (Exception ex)
-			{
-				SendOrderFailed(oldOrder, ex);
-				SendOrderFailed(newOrder, ex);
-			}
-		}
-
-		/// <summary>
-		/// Перерегистрировать пару заявок на бирже.
-		/// </summary>
-		/// <param name="oldOrder1">Первая заявка, которую нужно снять.</param>
-		/// <param name="newOrder1">Первая новая заявка, которую нужно зарегистрировать.</param>
-		/// <param name="oldOrder2">Вторая заявка, которую нужно снять.</param>
-		/// <param name="newOrder2">Вторая новая заявка, которую нужно зарегистрировать.</param>
-		public void ReRegisterOrderPair(Order oldOrder1, Order newOrder1, Order oldOrder2, Order newOrder2)
-		{
-			if (oldOrder1 == null)
-				throw new ArgumentNullException("oldOrder1");
-
-			if (newOrder1 == null)
-				throw new ArgumentNullException("newOrder1");
-
-			if (oldOrder2 == null)
-				throw new ArgumentNullException("oldOrder2");
-
-			if (newOrder2 == null)
-				throw new ArgumentNullException("newOrder2");
-
-			try
-			{
-				if (oldOrder1.Security != newOrder1.Security)
-					throw new ArgumentException(LocalizedStrings.Str1099Params.Put(newOrder1.Security.Id, oldOrder1.Security.Id), "newOrder1");
-
-				if (oldOrder2.Security != newOrder2.Security)
-					throw new ArgumentException(LocalizedStrings.Str1100Params.Put(newOrder2.Security.Id, oldOrder2.Security.Id), "newOrder2");
-
-				if (oldOrder1.Type == OrderTypes.Conditional || oldOrder2.Type == OrderTypes.Conditional)
-				{
-					CancelOrder(oldOrder1);
-					RegisterOrder(newOrder1);
-
-					CancelOrder(oldOrder2);
-					RegisterOrder(newOrder2);
-				}
-				else
-				{
-					CheckOnOld(oldOrder1);
-					CheckOnNew(newOrder1, false);
-
-					CheckOnOld(oldOrder2);
-					CheckOnNew(newOrder2, false);
-
-					if (oldOrder1.Comment.IsEmpty())
-						oldOrder1.Comment = newOrder1.Comment;
-
-					if (oldOrder2.Comment.IsEmpty())
-						oldOrder2.Comment = newOrder2.Comment;
-
-					InitNewOrder(newOrder1);
-					InitNewOrder(newOrder2);
-
-					_entityCache.AddOrderByCancelTransaction(newOrder1.TransactionId, oldOrder1);
-					_entityCache.AddOrderByCancelTransaction(newOrder2.TransactionId, oldOrder2);
-
-					OnReRegisterOrderPair(oldOrder1, newOrder1, oldOrder2, newOrder2);
-				}
-			}
-			catch (Exception ex)
-			{
-				SendOrderFailed(oldOrder1, ex);
-				SendOrderFailed(newOrder1, ex);
-
-				SendOrderFailed(oldOrder2, ex);
-				SendOrderFailed(newOrder2, ex);
-			}
-		}
-
-		/// <summary>
-		/// Отменить заявку на бирже.
-		/// </summary>
-		/// <param name="order">Заявка, которую нужно отменять.</param>
-		public void CancelOrder(Order order)
-		{
-			try
-			{
-				this.AddOrderInfoLog(order, "CancelOrder");
-
-				CheckOnOld(order);
-
-				var transactionId = TransactionIdGenerator.GetNextId();
-				_entityCache.AddOrderByCancelTransaction(transactionId, order);
-
-				//order.InitLatencyMonitoring(false);
-				OnCancelOrder(order, transactionId);
-			}
-			catch (Exception ex)
-			{
-				SendOrderFailed(order, ex);
-			}
-		}
-
-		private void SendOrderFailed(Order order, Exception error)
-		{
-			SendOutMessage(new OrderFail
-			{
-				Order = order,
-				Error = error,
-				ServerTime = CurrentTime,
-			}.ToMessage());
-		}
-
-		private static void CheckOnNew(Order order, bool checkVolume = true, bool checkTransactionId = true)
-		{
-			ChechOrderState(order);
-
-			if (checkVolume)
-			{
-				if (order.Volume == 0)
-					throw new ArgumentException(LocalizedStrings.Str894, "order");
-
-				if (order.Volume < 0)
-					throw new ArgumentOutOfRangeException("order", order.Volume, LocalizedStrings.Str895);
-			}
-
-			if (order.Id != null || !order.StringId.IsEmpty())
-				throw new ArgumentException(LocalizedStrings.Str896Params.Put(order.Id == null ? order.StringId : order.Id.To<string>()), "order");
-
-			if (!checkTransactionId)
-				return;
-
-			if (order.TransactionId != 0)
-				throw new ArgumentException(LocalizedStrings.Str897Params.Put(order.TransactionId), "order");
-
-			if (order.State != OrderStates.None)
-				throw new ArgumentException(LocalizedStrings.Str898Params.Put(order.State), "order");
-		}
-
-		private static void CheckOnOld(Order order)
-		{
-			ChechOrderState(order);
-
-			if (order.TransactionId == 0 && order.Id == null && order.StringId.IsEmpty())
-				throw new ArgumentException(LocalizedStrings.Str899, "order");
-		}
-
-		private static void ChechOrderState(Order order)
-		{
-			if (order == null)
-				throw new ArgumentNullException("order");
-
-			if (order.Type == OrderTypes.Conditional && order.Condition == null)
-				throw new ArgumentException(LocalizedStrings.Str889, "order");
-
-			if (order.Security == null)
-				throw new ArgumentException(LocalizedStrings.Str890, "order");
-
-			if (order.Portfolio == null)
-				throw new ArgumentException(LocalizedStrings.Str891, "order");
-
-			if (order.Price < 0)
-				throw new ArgumentOutOfRangeException("order", order.Price, LocalizedStrings.Str892);
-
-			if (order.Price == 0 && (order.Type == OrderTypes.Limit || order.Type == OrderTypes.ExtRepo || order.Type == OrderTypes.Repo || order.Type == OrderTypes.Rps))
-				throw new ArgumentException(LocalizedStrings.Str893, "order");
-		}
-
-		/// <summary>
-		/// Инициализировать новую заявку идентификатором транзакции, информацией о подключении и т.д.
-		/// </summary>
-		/// <param name="order">Новая заявка.</param>
-		private void InitNewOrder(Order order)
-		{
-			order.Balance = order.Volume;
-
-			if (order.ExtensionInfo == null)
-				order.ExtensionInfo = new Dictionary<object, object>();
-
-			//order.InitializationTime = trader.MarketTime;
-			if (order.TransactionId == 0)
-				order.TransactionId = TransactionIdGenerator.GetNextId();
-
-			order.Connector = this;
-
-			if (order.Security is ContinuousSecurity)
-				order.Security = ((ContinuousSecurity)order.Security).GetSecurity(order.Security.ToExchangeTime(CurrentTime));
-
-			order.LocalTime = CurrentTime.LocalDateTime;
-			order.State = OrderStates.Pending;
-
-			if (!_entityCache.TryAddOrder(order))
-				throw new ArgumentException(LocalizedStrings.Str1101Params.Put(order.TransactionId));
-
-			//RaiseNewOrder(order);
-			SendOutMessage(order.ToMessage());
-		}
-
-		/// <summary>
-		/// Зарегистрировать заявку на бирже.
-		/// </summary>
-		/// <param name="order">Заявка, содержащая информацию для регистрации.</param>
-		protected virtual void OnRegisterOrder(Order order)
-		{
-			var regMsg = order.CreateRegisterMessage(GetSecurityId(order.Security));
-
-			var depoName = order.Portfolio.GetValue<string>(PositionChangeTypes.DepoName);
-			if (depoName != null)
-				regMsg.AddValue(PositionChangeTypes.DepoName, depoName);
-
-			if (CalculateMessages)
-				SlippageManager.ProcessMessage(regMsg);
-
-			SendInMessage(regMsg);
-		}
-
-		/// <summary>
-		/// Перерегистрировать заявку на бирже.
-		/// </summary>
-		/// <param name="oldOrder">Заявка, которую нужно снять.</param>
-		/// <param name="newOrder">Новая заявка, которую нужно зарегистрировать.</param>
-		protected virtual void OnReRegisterOrder(Order oldOrder, Order newOrder)
-		{
-			if (IsSupportAtomicReRegister && oldOrder.Security.Board.IsSupportAtomicReRegister)
-			{
-				var replaceMsg = oldOrder.CreateReplaceMessage(newOrder, GetSecurityId(newOrder.Security));
-				SendInMessage(replaceMsg);
-			}
-			else
-			{
-				CancelOrder(oldOrder);
-				RegisterOrder(newOrder, false);
-			}
-		}
-
-		/// <summary>
-		/// Перерегистрировать пару заявок на бирже.
-		/// </summary>
-		/// <param name="oldOrder1">Первая заявка, которую нужно снять.</param>
-		/// <param name="newOrder1">Первая новая заявка, которую нужно зарегистрировать.</param>
-		/// <param name="oldOrder2">Вторая заявка, которую нужно снять.</param>
-		/// <param name="newOrder2">Вторая новая заявка, которую нужно зарегистрировать.</param>
-		protected virtual void OnReRegisterOrderPair(Order oldOrder1, Order newOrder1, Order oldOrder2, Order newOrder2)
-		{
-			CancelOrder(oldOrder1);
-			RegisterOrder(newOrder1, false);
-
-			CancelOrder(oldOrder2);
-			RegisterOrder(newOrder2, false);
-		}
-
-		/// <summary>
-		/// Отменить заявку на бирже.
-		/// </summary>
-		/// <param name="order">Заявка, которую нужно отменять.</param>
-		/// <param name="transactionId">Идентификатор транзакции отмены.</param>
-		protected virtual void OnCancelOrder(Order order, long transactionId)
-		{
-			var cancelMsg = order.CreateCancelMessage(GetSecurityId(order.Security), transactionId);
-			SendInMessage(cancelMsg);
-		}
-
-		/// <summary>
-		/// Отменить группу заявок на бирже по фильтру.
-		/// </summary>
-		/// <param name="isStopOrder"><see langword="true"/>, если нужно отменить только стоп-заявки, false - если только обычный и null - если оба типа.</param>
-		/// <param name="portfolio">Портфель. Если значение равно null, то портфель не попадает в фильтр снятия заявок.</param>
-		/// <param name="direction">Направление заявки. Если значение равно null, то направление не попадает в фильтр снятия заявок.</param>
-		/// <param name="board">Торговая площадка. Если значение равно null, то площадка не попадает в фильтр снятия заявок.</param>
-		/// <param name="security">Инструмент. Если значение равно null, то инструмент не попадает в фильтр снятия заявок.</param>
-		public void CancelOrders(bool? isStopOrder = null, Portfolio portfolio = null, Sides? direction = null, ExchangeBoard board = null, Security security = null)
-		{
-			var transactionId = TransactionIdGenerator.GetNextId();
-			_entityCache.AddOrderByCancelTransaction(transactionId, null);
-			OnCancelOrders(transactionId, isStopOrder, portfolio, direction, board, security);
-		}
-
-		/// <summary>
-		/// Отменить группу заявок на бирже по фильтру.
-		/// </summary>
-		/// <param name="transactionId">Идентификатор транзакции отмены.</param>
-		/// <param name="isStopOrder"><see langword="true"/>, если нужно отменить только стоп-заявки, false - если только обычный и null - если оба типа.</param>
-		/// <param name="portfolio">Портфель. Если значение равно null, то портфель не попадает в фильтр снятия заявок.</param>
-		/// <param name="direction">Направление заявки. Если значение равно null, то направление не попадает в фильтр снятия заявок.</param>
-		/// <param name="board">Торговая площадка. Если значение равно null, то площадка не попадает в фильтр снятия заявок.</param>
-		/// <param name="security">Инструмент. Если значение равно null, то инструмент не попадает в фильтр снятия заявок.</param>
-		protected virtual void OnCancelOrders(long transactionId, bool? isStopOrder = null, Portfolio portfolio = null, Sides? direction = null, ExchangeBoard board = null, Security security = null)
-		{
-			var cancelMsg = MessageConverterHelper.CreateGroupCancelMessage(transactionId, isStopOrder, portfolio, direction, board, security == null ? default(SecurityId) : GetSecurityId(security), security);
-			SendInMessage(cancelMsg);
-		}
-
-		private DateTimeOffset _prevTime;
-
-		private void ProcessTimeInterval(Message message)
-		{
-			if (message == _marketTimeMessage)
-			{
-				lock (_marketTimerSync)
-					_isMarketTimeHandled = true;
-			}
-
-			// output messages from adapters goes asynchronously
-			if (_currentTime > message.LocalTime)
-				return;
-
-			_currentTime = message.LocalTime;
-
-			if (_prevTime.IsDefault())
-			{
-				_prevTime = _currentTime;
-				return;
-			}
-
-			var diff = _currentTime - _prevTime;
-
-			if (diff >= MarketTimeChangedInterval)
-			{
-				_prevTime = _currentTime;
-				RaiseMarketTimeChanged(diff);
-			}
-		}
-
-		/// <summary>
-		/// Получить инструмент по коду.
-		/// </summary>
-		/// <param name="securityId">Идентификатор инструмента.</param>
-		/// <returns>Инструмент.</returns>
-		protected Security GetSecurity(SecurityId securityId)
-		{
-			return GetSecurity(CreateSecurityId(securityId.SecurityCode, securityId.BoardCode), s => false);
-		}
-
-		/// <summary>
-		/// Получить инструмент по коду. Если инструмент не найден, то для создания инструмента вызывается <see cref="IEntityFactory.CreateSecurity"/>.
-		/// </summary>
-		/// <param name="id">Идентификатор инструмента.</param>
-		/// <param name="changeSecurity">Обработчик, изменяющий инструмент. Возвращает <see langword="true"/>, если инструмент был изменен, и необходимо вызвать <see cref="IConnector.SecuritiesChanged"/>.</param>
-		/// <returns>Инструмент.</returns>
-		private Security GetSecurity(string id, Func<Security, bool> changeSecurity)
-		{
-			if (id.IsEmpty())
-				throw new ArgumentNullException("id");
-
-			if (changeSecurity == null)
-				throw new ArgumentNullException("changeSecurity");
-
-			bool isNew;
-
-			var security = _securities.SafeAdd(id, key =>
-			{
-				var s = EntityFactory.CreateSecurity(key);
-
-				if (s == null)
-					throw new InvalidOperationException(LocalizedStrings.Str1102Params.Put(key));
-
-				if (s.ExtensionInfo == null)
-					s.ExtensionInfo = new Dictionary<object, object>();
-
-				var info = SecurityIdGenerator.Split(key);
-
-				if (s.Board == null)
-					s.Board = ExchangeBoard.GetOrCreateBoard(GetBoardCode(info.Item2));
-
-				if (s.Code.IsEmpty())
-					s.Code = info.Item1;
-
-				if (s.Name.IsEmpty())
-					s.Name = info.Item1;
-
-				if (s.Class.IsEmpty())
-					s.Class = info.Item2;
-
-				return s;
-			}, out isNew);
-
-			var isChanged = changeSecurity(security);
-
-			if (isNew)
-			{
-				if (security.Board == null)
-					throw new InvalidOperationException(LocalizedStrings.Str1103Params.Put(id));
-
-				_exchangeBoards.TryAdd(security.Board);
-				RaiseNewSecurities(new[] { security });
-			}
-			else if (isChanged)
-				RaiseSecurityChanged(security);
-
-			return security;
-		}
-
-		/// <summary>
-		/// Получить <see cref="SecurityId"/>.
-		/// </summary>
-		/// <param name="security">Инструмент.</param>
-		/// <returns>Идентификатор инструмента.</returns>
-		public SecurityId GetSecurityId(Security security)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			var secId = security.ToSecurityId(SecurityIdGenerator);
-
-			lock (_suspendSync)
-				secId.Native = GetNativeId(security);
-
-			return secId;
-		}
-
-		private void ProcessMyTrades<T>(Order order, T id, Dictionary<T, List<ExecutionMessage>> nonOrderedMyTrades)
-		{
-			var value = nonOrderedMyTrades.TryGetValue(id);
-
-			if (value == null)
-				return;
-
-			var retVal = new List<ExecutionMessage>();
-
-			foreach (var message in value.ToArray())
-			{
-				// проверяем совпадение по дате, исключая ситуация сопоставления сделки с заявкой, имеющая неуникальный идентификатор
-				if (message.ServerTime.Date != order.Time.Date)
-					continue;
-
-				retVal.Add(message);
-				value.Remove(message);
-			}
-
-			if (value.IsEmpty())
-				nonOrderedMyTrades.Remove(id);
-
-			var trades = retVal
-				.Select(t => _entityCache.ProcessMyTradeMessage(order.Security, t))
-				.Where(t => t != null && t.Item2)
-				.Select(t => t.Item1)
-				.ToArray();
-
-			if (trades.Length > 0)
-				RaiseNewMyTrades(trades);
-		}
-
-		/// <summary>
-		/// Получить портфель по названию. Если портфель не зарегистрирован, то он создается через <see cref="IEntityFactory.CreatePortfolio"/>.
-		/// </summary>
-		/// <param name="name">Название портфеля.</param>
-		/// <param name="changePortfolio">Обработчик, изменяющий портфель.</param>
-		/// <returns>Портфель.</returns>
-		private Portfolio GetPortfolio(string name, Func<Portfolio, bool> changePortfolio = null)
-		{
-			if (name.IsEmpty())
-				throw new ArgumentNullException("name");
-
-			var result = _entityCache.ProcessPortfolio(name, changePortfolio);
-
-			var portfolio = result.Item1;
-			var isNew = result.Item2;
-			var isChanged = result.Item3;
-
-			if (isNew)
-			{
-				this.AddInfoLog(LocalizedStrings.Str1105Params, portfolio.Name);
-				RaiseNewPortfolios(new[] { portfolio });
-			}
-			else if (isChanged)
-				RaisePortfoliosChanged(new[] { portfolio });
-
-			return portfolio;
-		}
-
-		private string GetBoardCode(string secClass)
-		{
-			return MarketDataAdapter.GetBoardCode(secClass);
-		}
-
-		/// <summary>
-		/// Сгенерировать <see cref="Security.Id"/> инструмента.
-		/// </summary>
-		/// <param name="secCode">Код инструмента.</param>
-		/// <param name="secClass">Класс инструмента.</param>
-		/// <returns><see cref="Security.Id"/> инструмента.</returns>
-		protected string CreateSecurityId(string secCode, string secClass)
-		{
-			return SecurityIdGenerator.GenerateId(secCode, GetBoardCode(secClass));
-		}
-
-		/// <summary>
-		/// Получить значение маркет-данных для инструмента.
-		/// </summary>
-		/// <param name="security">Инструмент.</param>
-		/// <param name="field">Поле маркет-данных.</param>
-		/// <returns>Значение поля. Если данных нет, то будет возвращено <see langword="null"/>.</returns>
-		public object GetSecurityValue(Security security, Level1Fields field)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			var values = _securityValues.TryGetValue(security);
-			return values == null ? null : values[(int)field];
-		}
-
-		/// <summary>
-		/// Получить набор доступных полей <see cref="Level1Fields"/>, для которых есть маркет-данные для инструмента.
-		/// </summary>
-		/// <param name="security">Инструмент.</param>
-		/// <returns>Набор доступных полей.</returns>
-		public IEnumerable<Level1Fields> GetLevel1Fields(Security security)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			var values = _securityValues.TryGetValue(security);
-
-			if (values == null)
-				return Enumerable.Empty<Level1Fields>();
-
-			var fields = new List<Level1Fields>(30);
-
-			for (var i = 0; i < values.Length; i++)
-			{
-				if (values[i] != null)
-					fields.Add((Level1Fields)i);
-			}
-
-			return fields;
-		}
-
-		private object[] GetSecurityValues(Security security)
-		{
-			return _securityValues.SafeAdd(security, key => new object[Enumerator.GetValues<Level1Fields>().Count()]);
-		}
-
-		/// <summary>
-		/// Очистить кэш данных.
-		/// </summary>
-		public virtual void ClearCache()
-		{
-			_entityCache.Clear();
-			_prevTime = default(DateTimeOffset);
-
-			_exchangeBoards.Clear();
-			_securities.Clear();
-
-			_securityLookups.Clear();
-			_portfolioLookups.Clear();
-
-			_positions.Clear();
-			_filteredMarketDepths.Clear();
-
-			_lookupQueue.Clear();
-			_lookupResult.Clear();
-
-			_marketDepths.Clear();
-
-			_nativeIdSecurities.Clear();
-
-			_nonOrderedByIdMyTrades.Clear();
-			_nonOrderedByStringIdMyTrades.Clear();
-			_nonOrderedByTransactionIdMyTrades.Clear();
-
-			_orderCancelFails.Clear();
-			_orderRegisterFails.Clear();
-
-			ConnectionState = ConnectionStates.Disconnected;
-
-			_adapterStates.Clear();
-
-			_suspendedSecurityMessages.Clear();
-
-			_subscriptionManager.ClearCache();
-
-			_securityValues.Clear();
-			_sessionStates.Clear();
-			_filteredMarketDepths.Clear();
-			_olBuilders.Clear();
-
-			SendInMessage(new ResetMessage());
-		}
-
-		/// <summary>
-		/// Запустить таймер генерации сообщений <see cref="TimeMessage"/> с интервалом <see cref="MarketTimeChangedInterval"/>.
-		/// </summary>
-		protected virtual void StartMarketTimer()
-		{
-			if (null != _marketTimer)
-				return;
-
-			_isMarketTimeHandled = true;
-
-			_marketTimer = ThreadingHelper
-				.Timer(() =>
-				{
-					// TimeMsg required for notify invoke MarketTimeChanged event (and active time based IMarketRule-s)
-					// No need to put _marketTimeMessage again, if it still in queue.
-
-					lock (_marketTimerSync)
-					{
-						if (!_isMarketTimeHandled)
-							return;
-
-						_isMarketTimeHandled = false;
-					}
-
-					_marketTimeMessage.LocalTime = TimeHelper.Now;
-					SendOutMessage(_marketTimeMessage);
-				})
-				.Interval(MarketTimeChangedInterval);
-		}
-
-		/// <summary>
-		/// Остановить таймер, запущенный ранее через <see cref="StartMarketTimer"/>.
-		/// </summary>
-		protected void StopMarketTimer()
-		{
-			if (null == _marketTimer)
-				return;
-
-			_marketTimer.Dispose();
-			_marketTimer = null;
-		}
-
-		/// <summary>
-		/// Освободить занятые ресурсы. В частности, отключиться от торговой системы через <see cref="Disconnect"/>.
-		/// </summary>
-		protected override void DisposeManaged()
-		{
-			_isDisposing = true;
-
-			if (ConnectionState == ConnectionStates.Connected)
-			{
-				try
-				{
-					Disconnect();
-				}
-				catch (Exception ex)
-				{
-					RaiseConnectionError(ex);
-				}
-			}
-
-			base.DisposeManaged();
-
-			_connectorStat.Remove(this);
-
-			//if (ConnectionState == ConnectionStates.Disconnected || ConnectionState == ConnectionStates.Failed)
-			//	TransactionAdapter = null;
-
-			//if (ExportState == ConnectionStates.Disconnected || ExportState == ConnectionStates.Failed)
-			//	MarketDataAdapter = null;
-
-			Adapter = null;
-		}
-
-		/// <summary>
-		/// Загрузить настройки.
-		/// </summary>
-		/// <param name="storage">Хранилище настроек.</param>
-		public override void Load(SettingsStorage storage)
-		{
-			if (storage == null)
-				throw new ArgumentNullException("storage");
-
-			TradesKeepCount = storage.GetValue("TradesKeepCount", TradesKeepCount);
-			OrdersKeepCount = storage.GetValue("OrdersKeepCount", OrdersKeepCount);
-			UpdateSecurityLastQuotes = storage.GetValue("UpdateSecurityLastQuotes", true);
-			UpdateSecurityByLevel1 = storage.GetValue("UpdateSecurityByLevel1", true);
-			ReConnectionSettings.Load(storage.GetValue<SettingsStorage>("ReConnectionSettings"));
-
-			Adapter.Load(storage.GetValue<SettingsStorage>("Adapter"));
-
-			CreateDepthFromOrdersLog = storage.GetValue<bool>("CreateDepthFromOrdersLog");
-			CreateTradesFromOrdersLog = storage.GetValue<bool>("CreateTradesFromOrdersLog");
-
-			MarketTimeChangedInterval = storage.GetValue<TimeSpan>("MarketTimeChangedInterval");
-
-			base.Load(storage);
-		}
-
-		/// <summary>
-		/// Сохранить настройки.
-		/// </summary>
-		/// <param name="storage">Хранилище настроек.</param>
-		public override void Save(SettingsStorage storage)
-		{
-			if (storage == null)
-				throw new ArgumentNullException("storage");
-
-			storage.SetValue("TradesKeepCount", TradesKeepCount);
-			storage.SetValue("OrdersKeepCount", OrdersKeepCount);
-			storage.SetValue("UpdateSecurityLastQuotes", UpdateSecurityLastQuotes);
-			storage.SetValue("UpdateSecurityByLevel1", UpdateSecurityByLevel1);
-			storage.SetValue("ReConnectionSettings", ReConnectionSettings.Save());
-
-			storage.SetValue("Adapter", Adapter.Save());
-
-			storage.SetValue("CreateDepthFromOrdersLog", CreateDepthFromOrdersLog);
-			storage.SetValue("CreateTradesFromOrdersLog", CreateTradesFromOrdersLog);
-
-			storage.SetValue("MarketTimeChangedInterval", MarketTimeChangedInterval);
-
-			base.Save(storage);
-		}
+		IsRestoreSubscriptionOnNormalReconnect = storage.GetValue(nameof(IsRestoreSubscriptionOnNormalReconnect), IsRestoreSubscriptionOnNormalReconnect);
+		IsAutoUnSubscribeOnDisconnect = storage.GetValue(nameof(IsAutoUnSubscribeOnDisconnect), IsAutoUnSubscribeOnDisconnect);
+
+		if (Buffer != null && storage.ContainsKey(nameof(Buffer)))
+			await Buffer.LoadAsync(storage, nameof(Buffer), cancellationToken);
+
+		await base.LoadAsync(storage, cancellationToken);
+	}
+
+	/// <summary>
+	/// Save settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public override async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		if (storage is null)
+			throw new ArgumentNullException(nameof(storage));
+
+		storage.SetValue(nameof(OrdersKeepCount), OrdersKeepCount);
+#pragma warning disable CS0618 // Type or member is obsolete
+		storage.SetValue(nameof(UpdateSecurityLastQuotes), UpdateSecurityLastQuotes);
+		storage.SetValue(nameof(UpdateSecurityByLevel1), UpdateSecurityByLevel1);
+#pragma warning restore CS0618 // Type or member is obsolete
+		storage.SetValue(nameof(UpdateSecurityByDefinition), UpdateSecurityByDefinition);
+		storage.SetValue(nameof(UpdatePortfolioByChange), UpdatePortfolioByChange);
+		//storage.SetValue(nameof(ReConnectionSettings), ReConnectionSettings.Save());
+		storage.SetValue(nameof(OverrideSecurityData), OverrideSecurityData);
+		storage.SetValue(nameof(CheckSteps), CheckSteps);
+
+		if (RiskManager != null)
+			storage.SetValue(nameof(RiskManager), await RiskManager.SaveEntireAsync(false, cancellationToken));
+
+		storage.SetValue(nameof(Adapter), await Adapter.SaveAsync(cancellationToken));
+
+		storage.SetValue(nameof(MarketTimeChangedInterval), MarketTimeChangedInterval);
+		storage.SetValue(nameof(TimeChange), TimeChange);
+		storage.SetValue(nameof(SupportBasketSecurities), SupportBasketSecurities);
+		storage.SetValue(nameof(SupportFilteredMarketDepth), SupportFilteredMarketDepth);
+		storage.SetValue(nameof(SupportSnapshots), SupportSnapshots);
+		storage.SetValue(nameof(SupportAssociatedSecurity), SupportAssociatedSecurity);
+
+		storage.SetValue(nameof(SubscriptionsOnConnect), await _subscriptionManager.SubscriptionsOnConnect.Cache.Select(s => s.DataType).SaveAllAsync(cancellationToken));
+		storage.SetValue(nameof(IsRestoreSubscriptionOnNormalReconnect), IsRestoreSubscriptionOnNormalReconnect);
+		storage.SetValue(nameof(IsAutoUnSubscribeOnDisconnect), IsAutoUnSubscribeOnDisconnect);
+
+		if (Buffer != null)
+			storage.SetValue(nameof(Buffer), await Buffer.SaveAsync(cancellationToken));
+
+		await base.SaveAsync(storage, cancellationToken);
 	}
 }

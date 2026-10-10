@@ -1,216 +1,401 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+using System.Globalization;
+
+/// <summary>
+/// Security ID.
+/// </summary>
+[DataContract]
+[Serializable]
+public struct SecurityId : IEquatable<SecurityId>, IAsyncPersistable
 {
-	using System;
-	using System.ComponentModel;
-	using System.Runtime.Serialization;
+	static SecurityId()
+	{
+		Money.EnsureGetHashCode();
+		News.EnsureGetHashCode();
+	}
 
-	using Ecng.Common;
-	using Ecng.Serialization;
-
-	using StockSharp.Localization;
+	private string _securityCode;
 
 	/// <summary>
-	/// Идентификатор инструмента.
+	/// Security code.
 	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	public struct SecurityId : IEquatable<SecurityId>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SecCodeKey,
+		Description = LocalizedStrings.SecCodeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string SecurityCode
 	{
-		private string _securityCode;
-
-		/// <summary>
-		/// Код инструмента.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str349Key)]
-		[DescriptionLoc(LocalizedStrings.Str349Key, true)]
-		[MainCategory]
-		public string SecurityCode
+		readonly get => _securityCode;
+		set
 		{
-			get { return _securityCode; }
-			set { _securityCode = value; }
+			CheckImmutable();
+			_securityCode = value;
+			_hashCode = default;
+		}
+	}
+
+	private string _boardCode;
+
+	/// <summary>
+	/// Electronic board code.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.BoardKey,
+		Description = LocalizedStrings.BoardCodeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string BoardCode
+	{
+		readonly get => _boardCode;
+		set
+		{
+			CheckImmutable();
+			_boardCode = value;
+			_hashCode = default;
+		}
+	}
+
+	private object _native;
+
+	/// <summary>
+	/// Native (internal) trading system security id.
+	/// </summary>
+	public object Native
+	{
+		readonly get => _nativeAsInt != 0 ? _nativeAsInt : _native;
+		set
+		{
+			CheckImmutable();
+
+			_native = value;
+
+			_nativeAsInt = 0;
+
+			if (value is long l)
+				_nativeAsInt = l;
+
+			_hashCode = default;
+		}
+	}
+
+	private long _nativeAsInt;
+
+	/// <summary>
+	/// Native (internal) trading system security id represented as integer.
+	/// </summary>
+	public long NativeAsInt
+	{
+		readonly get => _nativeAsInt;
+		set
+		{
+			CheckImmutable();
+
+			_nativeAsInt = value;
+			_hashCode = default;
+		}
+	}
+
+	/// <summary>
+	/// ID in SEDOL format (Stock Exchange Daily Official List).
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.SedolKey,
+		Description = LocalizedStrings.SedolDescKey)]
+	public string Sedol { get; set; }
+
+	/// <summary>
+	/// ID in CUSIP format (Committee on Uniform Securities Identification Procedures).
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.CusipKey,
+		Description = LocalizedStrings.CusipDescKey)]
+	public string Cusip { get; set; }
+
+	/// <summary>
+	/// ID in ISIN format (International Securities Identification Number).
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.IsinKey,
+		Description = LocalizedStrings.IsinDescKey)]
+	public string Isin { get; set; }
+
+	/// <summary>
+	/// ID in RIC format (Reuters Instrument Code).
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.RicKey,
+		Description = LocalizedStrings.RicDescKey)]
+	public string Ric { get; set; }
+
+	/// <summary>
+	/// ID in Bloomberg format.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.BloombergKey,
+		Description = LocalizedStrings.BloombergDescKey)]
+	public string Bloomberg { get; set; }
+
+	/// <summary>
+	/// ID in IQFeed format.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.IQFeedKey,
+		Description = LocalizedStrings.IQFeedDescKey)]
+	public string IQFeed { get; set; }
+
+	/// <summary>
+	/// ID in Interactive Brokers format.
+	/// </summary>
+	[DataMember]
+	//[Nullable]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.InteractiveBrokersKey,
+		Description = LocalizedStrings.InteractiveBrokersDescKey)]
+	public int? InteractiveBrokers { get; set; }
+
+	/// <summary>
+	/// ID in Plaza format.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PlazaKey,
+		Description = LocalizedStrings.PlazaDescKey)]
+	public string Plaza { get; set; }
+
+	private int _hashCode;
+
+	/// <summary>
+	/// Get the hash code of the object.
+	/// </summary>
+	/// <returns>A hash code.</returns>
+	public override int GetHashCode()
+	{
+		return EnsureGetHashCode();
+	}
+
+	private int EnsureGetHashCode()
+	{
+		if (_hashCode == 0)
+		{
+			if (_nativeAsInt == default && _native == default && _securityCode == default && _boardCode == default)
+				return 0;
+
+			_hashCode = (_nativeAsInt != 0 ? _nativeAsInt.GetHashCode() : _native?.GetHashCode())
+			            ?? ((_securityCode?.ToUpperInvariant() ?? string.Empty).GetHashCode() ^ (_boardCode?.ToUpperInvariant() ?? string.Empty).GetHashCode());
 		}
 
-		private string _boardCode;
+		return _hashCode;
+	}
 
-		/// <summary>
-		/// Код электронной площадки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.BoardKey)]
-		[DescriptionLoc(LocalizedStrings.BoardCodeKey)]
-		[MainCategory]
-		public string BoardCode
+	/// <summary>
+	/// Compare <see cref="SecurityId"/> on the equivalence.
+	/// </summary>
+	/// <param name="other">Another value with which to compare.</param>
+	/// <returns><see langword="true" />, if the specified object is equal to the current object, otherwise, <see langword="false" />.</returns>
+	public override bool Equals(object other)
+	{
+		return other is SecurityId secId && Equals(secId);
+	}
+
+	/// <summary>
+	/// Compare <see cref="SecurityId"/> on the equivalence.
+	/// </summary>
+	/// <param name="other">Another value with which to compare.</param>
+	/// <returns><see langword="true" />, if the specified object is equal to the current object, otherwise, <see langword="false" />.</returns>
+	public bool Equals(SecurityId other)
+	{
+		if (EnsureGetHashCode() != other.EnsureGetHashCode())
+			return false;
+
+		if (_nativeAsInt != 0)
+			return _nativeAsInt.Equals(other._nativeAsInt);
+
+		if (_native != null)
+			return _native.Equals(other._native);
+
+		return string.Equals(_securityCode, other._securityCode, StringComparison.OrdinalIgnoreCase)
+			&& string.Equals(_boardCode, other._boardCode, StringComparison.OrdinalIgnoreCase);
+	}
+
+	/// <summary>
+	/// Compare the inequality of two identifiers.
+	/// </summary>
+	/// <param name="left">Left operand.</param>
+	/// <param name="right">Right operand.</param>
+	/// <returns><see langword="true" />, if identifiers are equal, otherwise, <see langword="false" />.</returns>
+	public static bool operator !=(SecurityId left, SecurityId right)
+	{
+		return !(left == right);
+	}
+
+	/// <summary>
+	/// Compare two identifiers for equality.
+	/// </summary>
+	/// <param name="left">Left operand.</param>
+	/// <param name="right">Right operand.</param>
+	/// <returns><see langword="true" />, if the specified identifiers are equal, otherwise, <see langword="false" />.</returns>
+	public static bool operator ==(SecurityId left, SecurityId right)
+	{
+		return left.Equals(right);
+	}
+
+	/// <inheritdoc />
+	public override readonly string ToString()
+	{
+		var id = $"{SecurityCode}@{BoardCode}";
+
+		if (Native != null)
+			id += $",Native:{Native}";
+
+		//if (SecurityType != null)
+		//	id += $",Type:{SecurityType.Value}";
+
+		if (!Isin.IsEmpty())
+			id += $",ISIN:{Isin}";
+
+		if (!IQFeed.IsEmpty())
+			id += $",IQFeed:{IQFeed}";
+
+		if (InteractiveBrokers != null)
+			id += $",IB:{InteractiveBrokers}";
+
+		return id;
+	}
+
+	/// <summary>
+	/// Load settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		SecurityCode = storage.GetValue<string>(nameof(SecurityCode));
+		BoardCode = storage.GetValue<string>(nameof(BoardCode));
+
+		return Task.CompletedTask;
+	}
+
+	/// <summary>
+	/// Save settings.
+	/// </summary>
+	/// <param name="storage">Settings storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		storage.SetValue(nameof(SecurityCode), SecurityCode);
+		storage.SetValue(nameof(BoardCode), BoardCode);
+
+		return Task.CompletedTask;
+	}
+
+	/// <summary>
+	/// Board code for combined security.
+	/// </summary>
+	public const string AssociatedBoardCode = "ALL";
+
+	/// <summary>
+	/// Create security id with board code set as <see cref="AssociatedBoardCode"/>.
+	/// </summary>
+	/// <param name="securityCode">Security code.</param>
+	/// <returns>Security ID.</returns>
+	public static SecurityId CreateAssociated(string securityCode)
+	{
+		return new SecurityId
 		{
-			get { return _boardCode; }
-			set { _boardCode = value; }
-		}
+			SecurityCode = securityCode,
+			BoardCode = AssociatedBoardCode,
+		};
+	}
 
-		private object _native;
+	/// <summary>
+	/// "Money" security id.
+	/// </summary>
+	public static readonly SecurityId Money = new SecurityId
+	{
+		SecurityCode = "MONEY",
+		BoardCode = AssociatedBoardCode,
+		IsSpecial = true,
+	}.Immutable();
 
-		/// <summary>
-		/// Внутренний идентификатор торговой системы.
-		/// </summary>
-		public object Native
-		{
-			get { return _native; }
-			set { _native = value; }
-		}
+	/// <summary>
+	/// "News" security id.
+	/// </summary>
+	public static readonly SecurityId News = new SecurityId
+	{
+		SecurityCode = "NEWS",
+		BoardCode = AssociatedBoardCode,
+		IsSpecial = true,
+	}.Immutable();
 
-		private SecurityTypes? _securityType;
+	/// <summary>
+	/// Determines the id is <see cref="Money"/> or <see cref="News"/>.
+	/// </summary>
+	public bool IsSpecial { get; private set; }
 
-		/// <summary>
-		/// Тип инструмента.
-		/// </summary>
-		public SecurityTypes? SecurityType
-		{
-			get { return _securityType; }
-			set { _securityType = value; }
-		}
+	private bool _immutable;
 
-		/// <summary>
-		/// Идентификатор в формате SEDOL (Stock Exchange Daily Official List).
-		/// </summary>
-		[DataMember]
-		[DisplayName("SEDOL")]
-		[DescriptionLoc(LocalizedStrings.Str351Key)]
-		public string Sedol { get; set; }
+	/// <summary>
+	/// Make immutable.
+	/// </summary>
+	/// <returns><see cref="SecurityId"/>.</returns>
+	public SecurityId Immutable()
+	{
+		_immutable = true;
+		return this;
+	}
 
-		/// <summary>
-		/// Идентификатор в формате CUSIP (Committee on Uniform Securities Identification Procedures).
-		/// </summary>
-		[DataMember]
-		[DisplayName("CUSIP")]
-		[DescriptionLoc(LocalizedStrings.Str352Key)]
-		public string Cusip { get; set; }
+	private readonly void CheckImmutable()
+	{
+		if (_immutable)
+			throw new InvalidOperationException(LocalizedStrings.CannotBeModified);
+	}
+}
 
-		/// <summary>
-		/// Идентификатор в формате ISIN (International Securities Identification Number).
-		/// </summary>
-		[DataMember]
-		[DisplayName("ISIN")]
-		[DescriptionLoc(LocalizedStrings.Str353Key)]
-		public string Isin { get; set; }
+/// <summary>
+/// Converter to use with <see cref="SecurityId"/> properties.
+/// </summary>
+public class StringToSecurityIdTypeConverter : TypeConverter
+{
+	/// <inheritdoc />
+	public override bool CanConvertFrom(ITypeDescriptorContext ctx, Type sourceType)
+		=> sourceType == typeof(string) || base.CanConvertFrom(ctx, sourceType);
 
-		/// <summary>
-		/// Идентификатор в формате RIC (Reuters Instrument Code).
-		/// </summary>
-		[DataMember]
-		[DisplayName("RIC")]
-		[DescriptionLoc(LocalizedStrings.Str354Key)]
-		public string Ric { get; set; }
+	/// <inheritdoc />
+	public override object ConvertFrom(ITypeDescriptorContext ctx, CultureInfo culture, object value)
+	{
+		if (value is not string securityId)
+			return base.ConvertFrom(ctx, culture, value);
 
-		/// <summary>
-		/// Идентификатор в формате Bloomberg.
-		/// </summary>
-		[DataMember]
-		[DisplayName("Bloomberg")]
-		[DescriptionLoc(LocalizedStrings.Str355Key)]
-		public string Bloomberg { get; set; }
+		// TypeDescriptor passes no context outside of a property grid, and converting an id from a
+		// config file or from code has to work all the same.
+		var isNullable = ctx?.PropertyDescriptor?.PropertyType.IsNullable() == true;
 
-		/// <summary>
-		/// Идентификатор в формате IQFeed.
-		/// </summary>
-		[DataMember]
-		[DisplayName("IQFeed")]
-		[DescriptionLoc(LocalizedStrings.Str356Key)]
-		public string IQFeed { get; set; }
+		const string delimiter = "@";
 
-		/// <summary>
-		/// Идентификатор в формате Interactive Brokers.
-		/// </summary>
-		[DataMember]
-		[DisplayName("InteractiveBrokers")]
-		[DescriptionLoc(LocalizedStrings.Str357Key)]
-		[Nullable]
-		public int? InteractiveBrokers { get; set; }
+		var index = securityId.LastIndexOfIgnoreCase(delimiter);
 
-		/// <summary>
-		/// Идентификатор в формате Plaza.
-		/// </summary>
-		[DataMember]
-		[DisplayName("Plaza")]
-		[DescriptionLoc(LocalizedStrings.Str358Key)]
-		public string Plaza { get; set; }
-
-		private int _hashCode;
-		
-		/// <summary>
-		/// Рассчитать хеш-код объекта.
-		/// </summary>
-		/// <returns>Хеш-код.</returns>
-		public override int GetHashCode()
-		{
-			return EnsureGetHashCode();
-		}
-
-		private int EnsureGetHashCode()
-		{
-			if (_hashCode == 0)
-			{
-				_hashCode = _native != null
-					? _native.GetHashCode()
-					: (_securityCode + _boardCode).ToLowerInvariant().GetHashCode();
-			}
-
-			return _hashCode;
-		}
-
-		/// <summary>
-		/// Сравнить идентификатор инструмента на эквивалентность.
-		/// </summary>
-		/// <param name="other">Другой идентификатор для сравнения.</param>
-		/// <returns><see langword="true"/>, если идентификаторы эквивалентны, иначе, <see langword="false"/>.</returns>
-		public override bool Equals(object other)
-		{
-			return Equals((SecurityId)other);
-		}
-
-		/// <summary>
-		/// Сравнить идентификатор инструмента на эквивалентность.
-		/// </summary>
-		/// <param name="other">Другой идентификатор для сравнения.</param>
-		/// <returns><see langword="true"/>, если идентификаторы эквивалентны, иначе, <see langword="false"/>.</returns>
-		public bool Equals(SecurityId other)
-		{
-			if (EnsureGetHashCode() != other.EnsureGetHashCode())
-				return false;
-
-			if (_native == null)
-				return _securityCode.CompareIgnoreCase(other._securityCode) && _boardCode.CompareIgnoreCase(other._boardCode);
-
-			return _native.Equals(other.Native);
-		}
-
-		/// <summary>
-		/// Сравнить на неравенство два идентификатора.
-		/// </summary>
-		/// <param name="left">Левый операнд.</param>
-		/// <param name="right">Правый операнд.</param>
-		/// <returns><see langword="true"/>, если идентификаторы не эквивалентны, иначе, <see langword="false"/>.</returns>
-		public static bool operator !=(SecurityId left, SecurityId right)
-		{
-			return !(left == right);
-		}
-
-		/// <summary>
-		/// Сравнить на равенство два идентификатора.
-		/// </summary>
-		/// <param name="left">Левый операнд.</param>
-		/// <param name="right">Правый операнд.</param>
-		/// <returns><see langword="true"/>, если идентификаторы эквивалентны, иначе, <see langword="false"/>.</returns>
-		public static bool operator ==(SecurityId left, SecurityId right)
-		{
-			return left.Equals(right);
-		}
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return "S#:{0}@{1}, Native:{2},Type:{3}".Put(SecurityCode, BoardCode, Native, SecurityType);
-		}
+		return index < 0 ?
+			isNullable ? (SecurityId?)null : default(SecurityId) :
+			new SecurityId { SecurityCode = securityId.Substring(0, index), BoardCode = securityId.Substring(index + delimiter.Length, securityId.Length - index - delimiter.Length) };
 	}
 }

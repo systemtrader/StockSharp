@@ -1,190 +1,135 @@
-namespace StockSharp.BusinessEntities
+namespace StockSharp.BusinessEntities;
+
+/// <summary>
+/// Portfolio, describing the trading account and the size of its generated commission.
+/// </summary>
+[Serializable]
+[DataContract]
+[Display(
+	ResourceType = typeof(LocalizedStrings),
+	Name = LocalizedStrings.PortfolioKey,
+	Description = LocalizedStrings.PortfolioDescKey)]
+public class Portfolio : Position
 {
-	using System;
-	using System.ComponentModel;
-	using System.Runtime.Serialization;
-	using System.Xml.Serialization;
+	/// <summary>
+	/// Initializes a new instance of the <see cref="Portfolio"/>.
+	/// </summary>
+	public Portfolio()
+	{
+	}
 
-	using Ecng.Serialization;
+	/// <inheritdoc />
+	public override string PortfolioName => Name;
 
-	using StockSharp.Messages;
-	using StockSharp.Localization;
+	private string _name;
 
 	/// <summary>
-	/// Портфель, описывающий торговый счет и размер сгенерированной комиссии по нему.
+	/// Portfolio code name.
 	/// </summary>
-	[Serializable]
-	[System.Runtime.Serialization.DataContract]
-	[DisplayNameLoc(LocalizedStrings.PortfolioKey)]
-	[DescriptionLoc(LocalizedStrings.Str541Key)]
-	[CategoryOrderLoc(MainCategoryAttribute.NameKey, 0)]
-	[CategoryOrderLoc(StatisticsCategoryAttribute.NameKey, 1)]
-	public class Portfolio : BasePosition
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.NameKey,
+		Description = LocalizedStrings.PortfolioNameKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	[BasicSetting]
+	public string Name
 	{
-		/// <summary>
-		/// Создать <see cref="Portfolio"/>.
-		/// </summary>
-		public Portfolio()
+		get => _name;
+		set
 		{
+			if (_name == value)
+				return;
+
+			_name = value;
+			NotifyChanged();
 		}
+	}
 
-		private string _name;
+	/// <summary>
+	/// Exchange board, for which the current portfolio is active.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.BoardKey,
+		Description = LocalizedStrings.PortfolioBoardKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public ExchangeBoard Board { get; set; }
 
-		/// <summary>
-		/// Кодовое название портфеля.
-		/// </summary>
-		[DataMember]
-		[Identity]
-		[DisplayNameLoc(LocalizedStrings.NameKey)]
-		[DescriptionLoc(LocalizedStrings.Str247Key)]
-		[MainCategory]
-		public string Name
+	private PortfolioStates? _state;
+
+	/// <summary>
+	/// Portfolio state.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.StateKey,
+		Description = LocalizedStrings.PortfolioStateKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	[Browsable(false)]
+	public PortfolioStates? State
+	{
+		get => _state;
+		set
 		{
-			get { return _name; }
-			set
-			{
-				if (_name == value)
-					return;
+			if (_state == value)
+				return;
 
-				_name = value;
-				NotifyChanged("Name");
-			}
+			_state = value;
+			NotifyChanged();
 		}
+	}
 
-		private decimal _leverage;
+	/// <inheritdoc />
+	[Browsable(false)]
+	public override string StrategyId { get => base.StrategyId; set => base.StrategyId = value; }
 
-		/// <summary>
-		/// Плечо маржи.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str542Key)]
-		[DescriptionLoc(LocalizedStrings.Str261Key, true)]
-		[MainCategory]
-		public decimal Leverage
-		{
-			get { return _leverage; }
-			set
-			{
-				if (_leverage == value)
-					return;
+	/// <inheritdoc />
+	[Browsable(false)]
+	public override Sides? Side { get => base.Side; set => base.Side = value; }
 
-				_leverage = value;
-				NotifyChanged("Leverage");
-			}
-		}
+	/// <summary>
+	/// Portfolio associated with the orders received through the orders log.
+	/// </summary>
+	public static Portfolio AnonymousPortfolio { get; } = new Portfolio
+	{
+		Name = Messages.Extensions.AnonymousPortfolioName,
+	};
 
-		private CurrencyTypes? _currency;
+	/// <summary>
+	/// Create virtual portfolio for simulation.
+	/// </summary>
+	/// <returns>Simulator.</returns>
+	public static Portfolio CreateSimulator() => new()
+	{
+		Name = Messages.Extensions.SimulatorPortfolioName,
+		BeginValue = 1000000,
+	};
 
-		/// <summary>
-		/// Валюта портфеля.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str250Key)]
-		[DescriptionLoc(LocalizedStrings.Str251Key)]
-		[MainCategory]
-		[Nullable]
-		public CurrencyTypes? Currency
-		{
-			get { return _currency; }
-			set
-			{
-				_currency = value;
-				NotifyChanged("Currency");
-			}
-		}
+	/// <summary>
+	/// To copy the current portfolio fields to the <paramref name="destination" />.
+	/// </summary>
+	/// <param name="destination">The portfolio, in which fields should be copied.</param>
+	public void CopyTo(Portfolio destination)
+	{
+		base.CopyTo(destination);
 
-		[field: NonSerialized]
-		private IConnector _connector;
+		destination.Name = Name;
+		destination.Board = Board;
+		//destination.Connector = Connector;
+		destination.State = State;
+	}
 
-		/// <summary>
-		/// Подключение к торговой системе, через который был загружен данный портфель.
-		/// </summary>
-		[Ignore]
-		[XmlIgnore]
-		[Browsable(false)]
-		public IConnector Connector
-		{
-			get { return _connector; }
-			set { _connector = value; }
-		}
+	/// <inheritdoc />
+	public override string ToString() => Name;
 
-		/// <summary>
-		/// Биржевая площадка, для которой действует данный портфель.
-		/// </summary>
-		[RelationSingle(IdentityType = typeof(string))]
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.BoardKey)]
-		[DescriptionLoc(LocalizedStrings.Str544Key)]
-		[MainCategory]
-		public ExchangeBoard Board { get; set; }
-
-		private PortfolioStates? _state;
-
-		/// <summary>
-		/// Состояние портфеля.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.StateKey)]
-		[DescriptionLoc(LocalizedStrings.Str252Key)]
-		[MainCategory]
-		[Nullable]
-		public PortfolioStates? State
-		{
-			get { return _state; }
-			set
-			{
-				if (_state == value)
-					return;
-
-				_state = value;
-				NotifyChanged("State");
-			}
-		}
-
-		private static readonly Portfolio _anonymousPortfolio = new Portfolio { Name = LocalizedStrings.Str545 };
-
-		/// <summary>
-		/// Портфель, ассоциированный с заявками, полученные через лог заявок.
-		/// </summary>
-		public static Portfolio AnonymousPortfolio
-		{
-			get { return _anonymousPortfolio; }
-		}
-
-		/// <summary>
-		/// Создать копию объекта <see cref="Portfolio"/>.
-		/// </summary>
-		/// <returns>Копия объекта.</returns>
-		public Portfolio Clone()
-		{
-			var clone = new Portfolio();
-			CopyTo(clone);
-			return clone;
-		}
-
-		/// <summary>
-		/// Скопировать поля текущего портфеля в <paramref name="destination"/>.
-		/// </summary>
-		/// <param name="destination">Портфель, в который необходимо скопировать поля.</param>
-		public void CopyTo(Portfolio destination)
-		{
-			base.CopyTo(destination);
-
-			destination.Name = Name;
-			destination.Board = Board;
-			destination.Currency = Currency;
-			destination.Leverage = Leverage;
-			destination.Connector = Connector;
-			destination.State = State;
-		}
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return Name;
-		}
+	/// <inheritdoc />
+	public override Position Clone()
+	{
+		var clone = new Portfolio();
+		CopyTo(clone);
+		return clone;
 	}
 }

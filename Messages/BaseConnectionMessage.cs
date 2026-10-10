@@ -1,39 +1,35 @@
-﻿namespace StockSharp.Messages
-{
-	using System;
-	using System.Runtime.Serialization;
+namespace StockSharp.Messages;
 
-	using Ecng.Common;
+/// <summary>
+/// Base connect/disconnect message.
+/// </summary>
+/// <remarks>
+/// Initialize <see cref="BaseConnectionMessage"/>.
+/// </remarks>
+/// <param name="type">Message type.</param>
+[DataContract]
+[Serializable]
+public abstract class BaseConnectionMessage(MessageTypes type) : Message(type), IErrorMessage
+{
+	/// <inheritdoc />
+	[DataMember]
+	[XmlIgnore]
+	public Exception Error { get; set; }
 
 	/// <summary>
-	/// Базовое сообщение подключения или отключения.
+	/// Copy the message into the <paramref name="destination" />.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public abstract class BaseConnectionMessage : Message
+	/// <param name="destination">The object, to which copied information.</param>
+	protected virtual void CopyTo(BaseConnectionMessage destination)
 	{
-		/// <summary>
-		/// Инициализировать <see cref="BaseConnectionMessage"/>.
-		/// </summary>
-		/// <param name="type">Тип сообщения.</param>
-		protected BaseConnectionMessage(MessageTypes type)
-			: base(type)
-		{
-		}
+		base.CopyTo(destination);
 
-		/// <summary>
-		/// Информация об ошибке. Сигнализирует об ошибке подключения или отключения.
-		/// </summary>
-		[DataMember]
-		public Exception Error { get; set; }
+		destination.Error = Error;
+	}
 
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + (Error == null ? null : ",Error={Message}".PutEx(Error));
-		}
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		return base.ToString() + (Error == null ? null : $",Error={Error.Message}");
 	}
 }

@@ -1,51 +1,49 @@
-﻿namespace StockSharp.Messages
-{
-	using System;
-	using System.Runtime.Serialization;
+namespace StockSharp.Messages;
 
-	using Ecng.Common;
+/// <summary>
+/// Error message.
+/// </summary>
+[DataContract]
+[Serializable]
+public class ErrorMessage : Message, IErrorMessage, IOriginalTransactionIdMessage
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="ErrorMessage"/>.
+	/// </summary>
+	public ErrorMessage()
+		: base(MessageTypes.Error)
+	{
+	}
+
+	/// <inheritdoc />
+	[DataMember]
+	[XmlIgnore]
+	public Exception Error { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public long OriginalTransactionId { get; set; }
+
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		return base.ToString() + $",Error={Error?.Message},OrigTrId={OriginalTransactionId}";
+	}
 
 	/// <summary>
-	/// Сообщение об ошибке.
+	/// Create a copy of <see cref="ErrorMessage"/>.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public class ErrorMessage : Message
+	/// <returns>Copy.</returns>
+	public override Message Clone()
 	{
-		/// <summary>
-		/// Создать <see cref="ErrorMessage"/>.
-		/// </summary>
-		public ErrorMessage()
-			: base(MessageTypes.Error)
+		var clone = new ErrorMessage
 		{
-		}
+			Error = Error,
+			OriginalTransactionId = OriginalTransactionId,
+		};
 
-		/// <summary>
-		/// Информация об ошибке.
-		/// </summary>
-		[DataMember]
-		public Exception Error { get; set; }
+		CopyTo(clone);
 
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",Error={Message}".PutEx(Error);
-		}
-
-		/// <summary>
-		/// Создать копию объекта <see cref="ErrorMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			return new ErrorMessage
-			{
-				Error = Error,
-				LocalTime = LocalTime,
-			};
-		}
+		return clone;
 	}
 }

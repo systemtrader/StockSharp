@@ -1,59 +1,55 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// A message containing changes.
+/// </summary>
+/// <typeparam name="TMessage">Message type.</typeparam>
+/// <typeparam name="TField">Changes type.</typeparam>
+/// <remarks>
+/// Initialize <see cref="BaseChangeMessage{TMessage,TField}"/>.
+/// </remarks>
+/// <param name="type">Message type.</param>
+[DataContract]
+[Serializable]
+public abstract class BaseChangeMessage<TMessage, TField>(MessageTypes type) :	BaseSubscriptionIdMessage<TMessage>(type),
+	IServerTimeMessage, IGeneratedMessage
+	where TMessage : BaseChangeMessage<TMessage, TField>, new()
 {
-	using System;
-	using System.Collections.Generic;
-	using System.ComponentModel;
-	using System.Runtime.Serialization;
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.ServerTimeKey,
+		Description = LocalizedStrings.ChangeServerTimeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public DateTime ServerTime { get; set; }
 
-	using Ecng.Common;
-
-	using StockSharp.Localization;
+	/// <inheritdoc />
+	[DataMember]
+	public DataType BuildFrom { get; set; }
 
 	/// <summary>
-	/// Сообщение, содержащее изменения.
+	/// Changes.
 	/// </summary>
-	/// <typeparam name="TField">Тип изменений.</typeparam>
-	[DataContract]
-	[Serializable]
-	public abstract class BaseChangeMessage<TField> : Message
+	[Browsable(false)]
+	//[DataMember]
+	[XmlIgnore]
+	public IDictionary<TField, object> Changes { get; } = new Dictionary<TField, object>();
+
+	/// <inheritdoc />
+	public override void CopyTo(TMessage destination)
 	{
-		/// <summary>
-		/// Серверное время изменения.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.ServerTimeKey)]
-		[DescriptionLoc(LocalizedStrings.Str168Key)]
-		[MainCategory]
-		public DateTimeOffset ServerTime { get; set; }
+		base.CopyTo(destination);
 
-		private readonly IDictionary<TField, object> _changes = new Dictionary<TField, object>();
+		destination.ServerTime = ServerTime;
+		destination.BuildFrom = BuildFrom;
 
-		/// <summary>
-		/// Изменения.
-		/// </summary>
-		[Browsable(false)]
-		[DataMember]
-		public IDictionary<TField, object> Changes
-		{
-			get { return _changes; }
-		}
+		destination.Changes.AddRange(Changes);
+	}
 
-		/// <summary>
-		/// Инициализировать <see cref="BaseChangeMessage{T}"/>.
-		/// </summary>
-		/// <param name="type">Тип данных.</param>
-		protected BaseChangeMessage(MessageTypes type)
-			: base(type)
-		{
-		}
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",T(S)={0:yyyy/MM/dd HH:mm:ss.fff}".Put(ServerTime);
-		}
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		return base.ToString() + $",T(S)={ServerTime:yyyy/MM/dd HH:mm:ss.fff}";
 	}
 }

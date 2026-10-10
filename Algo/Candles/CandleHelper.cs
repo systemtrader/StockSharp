@@ -1,1083 +1,925 @@
-﻿namespace StockSharp.Algo.Candles
+namespace StockSharp.Algo.Candles;
+
+using Ecng.Configuration;
+
+using StockSharp.Algo.Candles.Compression;
+
+/// <summary>
+/// Extension class for candles.
+/// </summary>
+public static partial class CandleHelper
 {
-	using System;
-	using System.Collections;
-	using System.Collections.Generic;
-	using System.Linq;
-	using System.Threading;
+	/// <summary>
+	/// Try get suitable market-data type for candles compression.
+	/// </summary>
+	/// <param name="adapter">Adapter.</param>
+	/// <param name="subscription">Subscription.</param>
+	/// <param name="provider">Candle builders provider.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Which market-data type is used as a source value. <see langword="null"/> if compression is impossible.</returns>
+	public static async ValueTask<DataType> TryGetCandlesBuildFromAsync(this IMessageAdapter adapter, MarketDataMessage subscription, CandleBuilderProvider provider, CancellationToken cancellationToken)
+	{
+		if (adapter == null)
+			throw new ArgumentNullException(nameof(adapter));
 
-	using Ecng.Collections;
-	using Ecng.Common;
-	using Ecng.ComponentModel;
+		if (subscription == null)
+			throw new ArgumentNullException(nameof(subscription));
 
-	using MoreLinq;
+		if (provider == null)
+			throw new ArgumentNullException(nameof(provider));
 
-	using StockSharp.Algo.Candles.Compression;
-	using StockSharp.Algo.Candles.VolumePriceStatistics;
-	using StockSharp.BusinessEntities;
-	using StockSharp.Messages;
+		if (!provider.IsRegistered(subscription.DataType2.MessageType))
+			return null;
+
+		if (subscription.BuildMode == MarketDataBuildModes.Load)
+			return null;
+
+		var buildFrom = subscription.BuildFrom;
+
+		if (buildFrom is not null && !DataType.CandleSources.Contains(buildFrom))
+			buildFrom = null;
+
+		buildFrom ??= (await adapter.GetSupportedMarketDataTypesAsync(subscription.SecurityId, subscription.From, subscription.To).ToArrayAsync(cancellationToken)).Intersect(DataType.CandleSources).OrderBy(t =>
+		{
+			// by priority
+			if (t == DataType.Ticks)
+				return 0;
+			else if (t == DataType.Level1)
+				return 1;
+			else if (t == DataType.OrderLog)
+				return 2;
+			else if (t == DataType.MarketDepth)
+				return 3;
+			else
+				return 4;
+		}).FirstOrDefault();
+
+		if (buildFrom == null || !await adapter.GetSupportedMarketDataTypesAsync(subscription.SecurityId, subscription.From, subscription.To).ContainsAsync(buildFrom, cancellationToken: cancellationToken))
+			return null;
+
+		return buildFrom;
+	}
+
+	private static IEnumerable<CandleMessage> ToCandles<TSourceMessage>(this IEnumerable<TSourceMessage> messages, MarketDataMessage mdMsg, Func<TSourceMessage, ICandleBuilderValueTransform> createTransform, CandleBuilderProvider candleBuilderProvider = null)
+		where TSourceMessage : Message
+	{
+		if (createTransform is null)
+			throw new ArgumentNullException(nameof(createTransform));
+
+		CandleMessage lastActiveCandle = null;
+
+		using var builder = candleBuilderProvider.CreateBuilder(mdMsg.DataType2.MessageType);
+
+		var subscription = new CandleBuilderSubscription(mdMsg);
+		var isFinishedOnly = mdMsg.IsFinishedOnly;
+
+		ICandleBuilderValueTransform transform = null;
+
+		foreach (var message in messages)
+		{
+			transform ??= createTransform(message);
+
+			if (!transform.Process(message))
+				continue;
+
+			foreach (var candle in builder.Process(subscription, transform))
+			{
+				if (candle.State == CandleStates.Finished)
+				{
+					lastActiveCandle = null;
+					yield return candle;
+				}
+				else
+				{
+					if (!isFinishedOnly)
+						lastActiveCandle = candle;
+				}
+			}
+		}
+
+		if (lastActiveCandle != null)
+			yield return lastActiveCandle;
+	}
+
+	private static ICandleBuilder CreateBuilder(this CandleBuilderProvider candleBuilderProvider, Type messageType)
+	{
+		if (messageType is null)
+			throw new ArgumentNullException(nameof(messageType));
+
+		candleBuilderProvider ??= ConfigManager.TryGetService<CandleBuilderProvider>() ?? new CandleBuilderProvider(ServicesRegistry.EnsureGetExchangeInfoProvider());
+
+		return candleBuilderProvider.Get(messageType);
+	}
 
 	/// <summary>
-	/// Вспомогательный класс для работы со свечами.
+	/// To create candles from the tick trades collection.
 	/// </summary>
-	public static class CandleHelper
+	/// <param name="executions">Tick data.</param>
+	/// <param name="subscription">Market data subscription.</param>
+	/// <param name="candleBuilderProvider">Candle builders provider.</param>
+	/// <returns>Candles.</returns>
+	public static IEnumerable<CandleMessage> ToCandles(this IEnumerable<ExecutionMessage> executions, Subscription subscription, CandleBuilderProvider candleBuilderProvider = null)
 	{
-		/// <summary>
-		/// Создать <see cref="CandleSeries"/> для свечек <see cref="TimeFrameCandle"/>.
-		/// </summary>
-		/// <param name="security">Инструмент.</param>
-		/// <param name="arg">Значение <see cref="TimeFrameCandle.TimeFrame"/>.</param>
-		/// <returns>Серия свечек.</returns>
-		public static CandleSeries TimeFrame(this Security security, TimeSpan arg)
+		if (subscription is null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		return ToCandles(executions, subscription.MarketData, candleBuilderProvider);
+	}
+
+	/// <summary>
+	/// To create candles from the tick trades collection.
+	/// </summary>
+	/// <param name="executions">Tick data.</param>
+	/// <param name="mdMsg">Market data subscription.</param>
+	/// <param name="candleBuilderProvider">Candle builders provider.</param>
+	/// <returns>Candles.</returns>
+	public static IEnumerable<CandleMessage> ToCandles(this IEnumerable<ExecutionMessage> executions, MarketDataMessage mdMsg, CandleBuilderProvider candleBuilderProvider = null)
+	{
+		return executions.ToCandles(mdMsg, execMsg =>
 		{
-			return new CandleSeries(typeof(TimeFrameCandle), security, arg);
+			if (execMsg.DataType == DataType.Ticks)
+				return new TickCandleBuilderValueTransform();
+			else if (execMsg.DataType == DataType.OrderLog)
+				return new OrderLogCandleBuilderValueTransform();
+			else
+				throw new ArgumentOutOfRangeException(nameof(execMsg), execMsg.DataType, LocalizedStrings.InvalidValue);
+		}, candleBuilderProvider);
+	}
+
+	/// <summary>
+	/// To create candles from the order books collection.
+	/// </summary>
+	/// <param name="depths">Market depths.</param>
+	/// <param name="subscription">Market data subscription.</param>
+	/// <param name="type">Type of candle depth based data.</param>
+	/// <param name="candleBuilderProvider">Candle builders provider.</param>
+	/// <returns>Candles.</returns>
+	public static IEnumerable<CandleMessage> ToCandles(this IEnumerable<QuoteChangeMessage> depths, Subscription subscription, Level1Fields type = Level1Fields.SpreadMiddle, CandleBuilderProvider candleBuilderProvider = null)
+	{
+		if (subscription is null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		return ToCandles(depths, subscription.MarketData, type, candleBuilderProvider);
+	}
+
+	/// <summary>
+	/// To create candles from the order books collection.
+	/// </summary>
+	/// <param name="depths">Market depths.</param>
+	/// <param name="mdMsg">Market data subscription.</param>
+	/// <param name="type">Type of candle depth based data.</param>
+	/// <param name="candleBuilderProvider">Candle builders provider.</param>
+	/// <returns>Candles.</returns>
+	public static IEnumerable<CandleMessage> ToCandles(this IEnumerable<QuoteChangeMessage> depths, MarketDataMessage mdMsg, Level1Fields type = Level1Fields.SpreadMiddle, CandleBuilderProvider candleBuilderProvider = null)
+	{
+		return depths.ToCandles(mdMsg, quoteMsg => new QuoteCandleBuilderValueTransform(mdMsg.PriceStep, mdMsg.VolumeStep) { Type = type }, candleBuilderProvider);
+	}
+
+	/// <summary>
+	/// To create tick trades from candles.
+	/// </summary>
+	/// <param name="candles">Candles.</param>
+	/// <param name="volumeStep">Volume step.</param>
+	/// <returns>Tick trades.</returns>
+	public static IEnumerable<ExecutionMessage> ToTrades<TCandle>(this IEnumerable<TCandle> candles, decimal volumeStep)
+		where TCandle : ICandleMessage
+		=> candles.ToAsyncEnumerable().ToTrades(volumeStep).ToBlockingEnumerable();
+
+	/// <summary>
+	/// To get candle time frames relatively to the exchange working hours.
+	/// </summary>
+	/// <param name="timeFrame">The time frame for which you need to get time range.</param>
+	/// <param name="currentTime">The current time within the range of time frames.</param>
+	/// <param name="board">The information about the board from which <see cref="ExchangeBoard.WorkingTime"/> working hours will be taken.</param>
+	/// <returns>The candle time frames.</returns>
+	public static Range<DateTime> GetCandleBounds(this TimeSpan timeFrame, DateTime currentTime, ExchangeBoard board)
+	{
+		if (board == null)
+			throw new ArgumentNullException(nameof(board));
+
+		return timeFrame.GetCandleBounds(currentTime, board.TimeZone, board.WorkingTime);
+	}
+
+	/// <summary>
+	/// To get the number of time frames within the specified time range.
+	/// </summary>
+	/// <param name="range">The specified time range for which you need to get the number of time frames.</param>
+	/// <param name="timeFrame">The time frame size.</param>
+	/// <param name="board"><see cref="ExchangeBoard"/>.</param>
+	/// <returns>The received number of time frames.</returns>
+	public static long GetTimeFrameCount(this Range<DateTime> range, TimeSpan timeFrame, ExchangeBoard board)
+	{
+		if (board is null)
+			throw new ArgumentNullException(nameof(board));
+
+		return range.GetTimeFrameCount(timeFrame, board.WorkingTime);
+	}
+
+	/// <summary>
+	/// The total volume of bids in the <see cref="VolumeProfileBuilder"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>The total volume of bids.</returns>
+	public static decimal TotalBuyVolume(this VolumeProfileBuilder volumeProfile)
+	{
+		if (volumeProfile == null)
+			throw new ArgumentNullException(nameof(volumeProfile));
+
+		return volumeProfile.PriceLevels.Select(p => p.BuyVolume).Sum();
+	}
+
+	/// <summary>
+	/// The total volume of asks in the <see cref="VolumeProfileBuilder"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>The total volume of asks.</returns>
+	public static decimal TotalSellVolume(this VolumeProfileBuilder volumeProfile)
+	{
+		if (volumeProfile == null)
+			throw new ArgumentNullException(nameof(volumeProfile));
+
+		return volumeProfile.PriceLevels.Select(p => p.SellVolume).Sum();
+	}
+
+	/// <summary>
+	/// The total number of bids in the <see cref="VolumeProfileBuilder"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>The total number of bids.</returns>
+	public static decimal TotalBuyCount(this VolumeProfileBuilder volumeProfile)
+	{
+		if (volumeProfile == null)
+			throw new ArgumentNullException(nameof(volumeProfile));
+
+		return volumeProfile.PriceLevels.Select(p => p.BuyCount).Sum();
+	}
+
+	/// <summary>
+	/// The total number of asks in the <see cref="VolumeProfileBuilder"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>The total number of asks.</returns>
+	public static decimal TotalSellCount(this VolumeProfileBuilder volumeProfile)
+	{
+		if (volumeProfile == null)
+			throw new ArgumentNullException(nameof(volumeProfile));
+
+		return volumeProfile.PriceLevels.Select(p => p.SellCount).Sum();
+	}
+
+	/// <summary>
+	/// POC (Point Of Control) returns <see cref="CandlePriceLevel"/> which had the maximum volume.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>The <see cref="CandlePriceLevel"/> which had the maximum volume.</returns>
+	public static CandlePriceLevel PoC(this VolumeProfileBuilder volumeProfile)
+	{
+		if (volumeProfile == null)
+			throw new ArgumentNullException(nameof(volumeProfile));
+
+		var levels = volumeProfile.PriceLevels.ToArray();
+
+		if (levels.Length == 0)
+			return default;
+
+		var max = levels.Select(p => p.BuyVolume + p.SellVolume).Max();
+		return levels.FirstOrDefault(p => p.BuyVolume + p.SellVolume == max);
+	}
+
+	/// <summary>
+	/// The total volume of bids which was above <see cref="PoC"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>The total volume of bids.</returns>
+	public static decimal BuyVolAbovePoC(this VolumeProfileBuilder volumeProfile)
+	{
+		var poc = volumeProfile.PoC();
+
+		if (poc.Price == 0)
+			return 0;
+
+		return volumeProfile.PriceLevels.Where(p => p.Price > poc.Price).Select(p => p.BuyVolume).Sum();
+	}
+
+	/// <summary>
+	/// The total volume of bids which was below <see cref="PoC"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>The total volume of bids.</returns>
+	public static decimal BuyVolBelowPoC(this VolumeProfileBuilder volumeProfile)
+	{
+		var poc = volumeProfile.PoC();
+
+		if (poc.Price == 0)
+			return 0;
+
+		return volumeProfile.PriceLevels.Where(p => p.Price < poc.Price).Select(p => p.BuyVolume).Sum();
+	}
+
+	/// <summary>
+	/// The total volume of asks which was above <see cref="PoC"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>The total volume of asks.</returns>
+	public static decimal SellVolAbovePoC(this VolumeProfileBuilder volumeProfile)
+	{
+		var poc = volumeProfile.PoC();
+
+		if (poc.Price == 0)
+			return 0;
+
+		return volumeProfile.PriceLevels.Where(p => p.Price > poc.Price).Select(p => p.SellVolume).Sum();
+	}
+
+	/// <summary>
+	/// The total volume of asks which was below <see cref="PoC"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>The total volume of asks.</returns>
+	public static decimal SellVolBelowPoC(this VolumeProfileBuilder volumeProfile)
+	{
+		var poc = volumeProfile.PoC();
+
+		if (poc.Price == 0)
+			return 0;
+
+		return volumeProfile.PriceLevels.Where(p => p.Price < poc.Price).Select(p => p.SellVolume).Sum();
+	}
+
+	/// <summary>
+	/// The total volume which was above <see cref="PoC"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>Total volume.</returns>
+	public static decimal VolumeAbovePoC(this VolumeProfileBuilder volumeProfile)
+	{
+		return volumeProfile.BuyVolAbovePoC() + volumeProfile.SellVolAbovePoC();
+	}
+
+	/// <summary>
+	/// The total volume which was below <see cref="PoC"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>Total volume.</returns>
+	public static decimal VolumeBelowPoC(this VolumeProfileBuilder volumeProfile)
+	{
+		return volumeProfile.BuyVolBelowPoC() + volumeProfile.SellVolBelowPoC();
+	}
+
+	/// <summary>
+	/// The difference between <see cref="TotalBuyVolume"/> and <see cref="TotalSellVolume"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>Delta.</returns>
+	public static decimal Delta(this VolumeProfileBuilder volumeProfile)
+	{
+		return volumeProfile.TotalBuyVolume() - volumeProfile.TotalSellVolume();
+	}
+
+	/// <summary>
+	/// It returns the price level at which the maximum <see cref="Delta"/> is passed.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns><see cref="CandlePriceLevel"/>.</returns>
+	public static CandlePriceLevel PriceLevelOfMaxDelta(this VolumeProfileBuilder volumeProfile)
+	{
+		if (volumeProfile == null)
+			throw new ArgumentNullException(nameof(volumeProfile));
+
+		var levels = volumeProfile.PriceLevels.ToArray();
+
+		if (levels.Length == 0)
+			return default;
+
+		var delta = levels.Select(p => p.BuyVolume - p.SellVolume).Max();
+		return levels.FirstOrDefault(p => p.BuyVolume - p.SellVolume == delta);
+	}
+
+	/// <summary>
+	/// It returns the price level at which the minimum <see cref="Delta"/> is passed.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>The price level.</returns>
+	public static CandlePriceLevel PriceLevelOfMinDelta(this VolumeProfileBuilder volumeProfile)
+	{
+		if (volumeProfile == null)
+			throw new ArgumentNullException(nameof(volumeProfile));
+
+		var levels = volumeProfile.PriceLevels.ToArray();
+
+		if (levels.Length == 0)
+			return default;
+
+		var delta = levels.Select(p => p.BuyVolume - p.SellVolume).Min();
+		return levels.FirstOrDefault(p => p.BuyVolume - p.SellVolume == delta);
+	}
+
+	/// <summary>
+	/// The total Delta which was above <see cref="PoC"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>Delta.</returns>
+	public static decimal DeltaAbovePoC(this VolumeProfileBuilder volumeProfile)
+	{
+		return volumeProfile.BuyVolAbovePoC() - volumeProfile.SellVolAbovePoC();
+	}
+
+	/// <summary>
+	/// The total Delta which was below <see cref="PoC"/>.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <returns>Delta.</returns>
+	public static decimal DeltaBelowPoC(this VolumeProfileBuilder volumeProfile)
+	{
+		return volumeProfile.BuyVolBelowPoC() - volumeProfile.SellVolBelowPoC();
+	}
+
+	/// <summary>
+	/// To update the profile with new value.
+	/// </summary>
+	/// <param name="volumeProfile">Volume profile.</param>
+	/// <param name="transform">The data source transformation.</param>
+	public static void Update(this VolumeProfileBuilder volumeProfile, ICandleBuilderValueTransform transform)
+	{
+		if (volumeProfile == null)
+			throw new ArgumentNullException(nameof(volumeProfile));
+
+		if (transform == null)
+			throw new ArgumentNullException(nameof(transform));
+
+		volumeProfile.Update(transform.Price, transform.Volume, transform.Side);
+	}
+
+	/// <summary>
+	/// To get the candle middle price.
+	/// </summary>
+	/// <param name="candle">The candle for which you need to get a length.</param>
+	/// <param name="priceStep"><see cref="SecurityMessage.PriceStep"/></param>
+	/// <returns>The candle length.</returns>
+	public static decimal GetMiddlePrice(this ICandleMessage candle, decimal? priceStep)
+	{
+		if (candle is null)
+			throw new ArgumentNullException(nameof(candle));
+
+		var price = candle.LowPrice + candle.GetLength() / 2;
+
+		if (priceStep is not null)
+			price = price.ShrinkPrice(priceStep, priceStep.Value.GetCachedDecimals());
+
+		return price;
+	}
+
+	/// <summary>
+	/// To get the candle length.
+	/// </summary>
+	/// <param name="candle">The candle for which you need to get a length.</param>
+	/// <returns>The candle length.</returns>
+	public static decimal GetLength(this ICandleMessage candle)
+	{
+		if (candle == null)
+			throw new ArgumentNullException(nameof(candle));
+
+		return candle.HighPrice - candle.LowPrice;
+	}
+
+	/// <summary>
+	/// To get the candle body.
+	/// </summary>
+	/// <param name="candle">The candle for which you need to get the body.</param>
+	/// <returns>The candle body.</returns>
+	public static decimal GetBody(this ICandleMessage candle)
+	{
+		if (candle == null)
+			throw new ArgumentNullException(nameof(candle));
+
+		return (candle.OpenPrice - candle.ClosePrice).Abs();
+	}
+
+	/// <summary>
+	/// To get the candle upper shadow length.
+	/// </summary>
+	/// <param name="candle">The candle for which you need to get the upper shadow length.</param>
+	/// <returns>The candle upper shadow length. If 0, there is no shadow.</returns>
+	public static decimal GetTopShadow(this ICandleMessage candle)
+	{
+		if (candle == null)
+			throw new ArgumentNullException(nameof(candle));
+
+		return candle.HighPrice - candle.OpenPrice.Max(candle.ClosePrice);
+	}
+
+	/// <summary>
+	/// To get the candle lower shadow length.
+	/// </summary>
+	/// <param name="candle">The candle for which you need to get the lower shadow length.</param>
+	/// <returns>The candle lower shadow length. If 0, there is no shadow.</returns>
+	public static decimal GetBottomShadow(this ICandleMessage candle)
+	{
+		if (candle == null)
+			throw new ArgumentNullException(nameof(candle));
+
+		return candle.OpenPrice.Min(candle.ClosePrice) - candle.LowPrice;
+	}
+
+	/// <summary>
+	/// To create tick trades from candle.
+	/// </summary>
+	/// <param name="candleMsg">Candle.</param>
+	/// <param name="volumeStep">Volume step.</param>
+	/// <param name="decimals">The number of decimal places for the volume.</param>
+	/// <param name="ticks">Array to tick trades.</param>
+	public static void ConvertToTrades(this ICandleMessage candleMsg, decimal volumeStep, int decimals, (Sides? side, decimal price, decimal volume, DateTime time)[] ticks)
+	{
+		if (candleMsg is null)
+			throw new ArgumentNullException(nameof(candleMsg));
+
+		if (ticks is null)
+			throw new ArgumentNullException(nameof(ticks));
+
+		if (ticks.Length != 4)
+			throw new ArgumentOutOfRangeException(nameof(ticks));
+
+		var vol = (candleMsg.TotalVolume / 4).Round(volumeStep, decimals, MidpointRounding.AwayFromZero);
+		var isUptrend = candleMsg.ClosePrice >= candleMsg.OpenPrice;
+		var time = candleMsg.OpenTime;
+
+		if (candleMsg.OpenPrice == candleMsg.ClosePrice &&
+			candleMsg.LowPrice == candleMsg.HighPrice &&
+			candleMsg.OpenPrice == candleMsg.LowPrice ||
+			candleMsg.TotalVolume == 1)
+		{
+			// For candle with single price or volume equals 1 - generate only one tick
+			ticks[0] = (Sides.Buy, candleMsg.OpenPrice, candleMsg.TotalVolume, time);
+
+			ticks[1] = ticks[2] = ticks[3] = default;
 		}
-
-		/// <summary>
-		/// Создать <see cref="CandleSeries"/> для свечек <see cref="RangeCandle"/>.
-		/// </summary>
-		/// <param name="security">Инструмент.</param>
-		/// <param name="arg">Значение <see cref="RangeCandle.PriceRange"/>.</param>
-		/// <returns>Серия свечек.</returns>
-		public static CandleSeries Range(this Security security, Unit arg)
+		else if (candleMsg.TotalVolume == 2)
 		{
-			return new CandleSeries(typeof(RangeCandle), security, arg);
+			ticks[0] = (Sides.Buy, candleMsg.HighPrice, 1, candleMsg.HighTime == default ? time : candleMsg.HighTime);
+			ticks[1] = (Sides.Sell, candleMsg.LowPrice, 1, candleMsg.LowTime == default ? time : candleMsg.LowTime);
+
+			ticks[2] = ticks[3] = default;
 		}
-
-		/// <summary>
-		/// Создать <see cref="CandleSeries"/> для свечек <see cref="VolumeCandle"/>.
-		/// </summary>
-		/// <param name="security">Инструмент.</param>
-		/// <param name="arg">Значение <see cref="VolumeCandle.Volume"/>.</param>
-		/// <returns>Серия свечек.</returns>
-		public static CandleSeries Volume(this Security security, decimal arg)
+		else if (candleMsg.TotalVolume == 3)
 		{
-			return new CandleSeries(typeof(VolumeCandle), security, arg);
+			ticks[0] = (isUptrend ? Sides.Buy : Sides.Sell, candleMsg.OpenPrice, 1, time);
+			ticks[1] = (Sides.Buy, candleMsg.HighPrice, 1, candleMsg.HighTime == default ? time : candleMsg.HighTime);
+			ticks[2] = (Sides.Sell, candleMsg.LowPrice, 1, candleMsg.LowTime == default ? time : candleMsg.LowTime);
+
+			ticks[3] = default;
 		}
-
-		/// <summary>
-		/// Создать <see cref="CandleSeries"/> для свечек <see cref="TickCandle"/>.
-		/// </summary>
-		/// <param name="security">Инструмент.</param>
-		/// <param name="arg">Значение <see cref="TickCandle.MaxTradeCount"/>.</param>
-		/// <returns>Серия свечек.</returns>
-		public static CandleSeries Tick(this Security security, decimal arg)
+		else
 		{
-			return new CandleSeries(typeof(TickCandle), security, arg);
+			ticks[0] = (isUptrend ? Sides.Buy : Sides.Sell, candleMsg.OpenPrice, vol, time);
+			ticks[1] = (Sides.Buy, candleMsg.HighPrice, vol, candleMsg.HighTime == default ? time : candleMsg.HighTime);
+			ticks[2] = (Sides.Sell, candleMsg.LowPrice, vol, candleMsg.LowTime == default ? time : candleMsg.LowTime);
+			ticks[3] = (isUptrend ? Sides.Buy : Sides.Sell, candleMsg.ClosePrice, candleMsg.TotalVolume - 3 * vol, candleMsg.CloseTime == default ? time : candleMsg.CloseTime);
 		}
+	}
 
-		/// <summary>
-		/// Создать <see cref="CandleSeries"/> для свечек <see cref="PnFCandle"/>.
-		/// </summary>
-		/// <param name="security">Инструмент.</param>
-		/// <param name="arg">Значение <see cref="PnFCandle.PnFArg"/>.</param>
-		/// <returns>Серия свечек.</returns>
-		public static CandleSeries PnF(this Security security, PnFArg arg)
+	/// <summary>
+	/// Convert tick info into <see cref="ExecutionMessage"/>.
+	/// </summary>
+	/// <param name="tick">Tick info.</param>
+	/// <param name="securityId"><see cref="ExecutionMessage.SecurityId"/></param>
+	/// <param name="localTime"><see cref="Message.LocalTime"/></param>
+	/// <returns><see cref="ExecutionMessage"/></returns>
+	public static ExecutionMessage ToTickMessage(this (Sides? side, decimal price, decimal volume, DateTime time) tick, SecurityId securityId, DateTime localTime)
+	{
+		return new()
 		{
-			return new CandleSeries(typeof(PnFCandle), security, arg);
-		}
+			LocalTime = localTime,
+			SecurityId = securityId,
+			ServerTime = tick.time,
+			//TradeId = _tradeIdGenerator.Next,
+			TradePrice = tick.price,
+			TradeVolume = tick.volume,
+			OriginSide = tick.side,
+			DataTypeEx = DataType.Ticks,
+			//OpenInterest = openInterest
+		};
+	}
 
-		/// <summary>
-		/// Создать <see cref="CandleSeries"/> для свечек <see cref="RenkoCandle"/>.
-		/// </summary>
-		/// <param name="security">Инструмент.</param>
-		/// <param name="arg">Значение <see cref="RenkoCandle.BoxSize"/>.</param>
-		/// <returns>Серия свечек.</returns>
-		public static CandleSeries Renko(this Security security, Unit arg)
+	/// <summary>
+	/// <see cref="ICandleMessage.PriceLevels"/> with minimum <see cref="CandlePriceLevel.TotalVolume"/>.
+	/// </summary>
+	/// <param name="candle"><see cref="ICandleMessage"/></param>
+	/// <returns><see cref="ICandleMessage.PriceLevels"/> with minimum <see cref="CandlePriceLevel.TotalVolume"/>.</returns>
+	public static CandlePriceLevel? MinPriceLevel(this ICandleMessage candle)
+		=> candle.CheckOnNull(nameof(candle)).PriceLevels?.OrderBy(l => l.TotalVolume).FirstOr();
+
+	/// <summary>
+	/// <see cref="ICandleMessage.PriceLevels"/> with maximum <see cref="CandlePriceLevel.TotalVolume"/>.
+	/// </summary>
+	/// <param name="candle"><see cref="ICandleMessage"/></param>
+	/// <returns><see cref="ICandleMessage.PriceLevels"/> with maximum <see cref="CandlePriceLevel.TotalVolume"/>.</returns>
+	public static CandlePriceLevel? MaxPriceLevel(this ICandleMessage candle)
+		=> candle.CheckOnNull(nameof(candle)).PriceLevels?.OrderByDescending(l => l.TotalVolume).FirstOr();
+
+	/// <summary>
+	/// To get candle time frames relatively to the exchange working hours.
+	/// </summary>
+	/// <param name="timeFrame">The time frame for which you need to get time range.</param>
+	/// <param name="currentTime">The current time within the range of time frames.</param>
+	/// <param name="board">The information about the board from which <see cref="BoardMessage.WorkingTime"/> working hours will be taken.</param>
+	/// <returns>The candle time frames.</returns>
+	public static Range<DateTime> GetCandleBounds(this TimeSpan timeFrame, DateTime currentTime, BoardMessage board)
+	{
+		if (board == null)
+			throw new ArgumentNullException(nameof(board));
+
+		return timeFrame.GetCandleBounds(currentTime, board.TimeZone, board.WorkingTime);
+	}
+
+	/// <summary>
+	/// To get the number of time frames within the specified time range.
+	/// </summary>
+	/// <param name="range">The specified time range for which you need to get the number of time frames.</param>
+	/// <param name="timeFrame">The time frame size.</param>
+	/// <param name="board"><see cref="BoardMessage"/>.</param>
+	/// <returns>The received number of time frames.</returns>
+	public static long GetTimeFrameCount(this Range<DateTime> range, TimeSpan timeFrame, BoardMessage board)
+	{
+		if (board is null)
+			throw new ArgumentNullException(nameof(board));
+
+		return range.GetTimeFrameCount(timeFrame, board.WorkingTime);
+	}
+
+	/// <summary>
+	/// To calculate the area for the candles group.
+	/// </summary>
+	/// <param name="candles">Candles.</param>
+	/// <returns>The area.</returns>
+	public static VolumeProfileBuilder GetValueArea<TCandle>(this IEnumerable<TCandle> candles)
+		where TCandle : ICandleMessage
+	{
+		var area = new VolumeProfileBuilder();
+
+		foreach (var candle in candles)
 		{
-			return new CandleSeries(typeof(RenkoCandle), security, arg);
-		}
+			if (candle.PriceLevels == null)
+				continue;
 
-		/// <summary>
-		/// Запустить получение свечек.
-		/// </summary>
-		/// <param name="manager">Менеджер свечек.</param>
-		/// <param name="series">Серия свечек.</param>
-		public static void Start(this ICandleManager manager, CandleSeries series)
-		{
-			manager.ThrowIfNull().Start(series, series.From, series.To);
-		}
-
-		/// <summary>
-		/// Прекратить получение свечек.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		public static void Stop(this CandleSeries series)
-		{
-			var manager = series.ThrowIfNull().CandleManager;
-
-			// серию ранее не запускали, значит и останавливать не нужно
-			if (manager == null)
-				return;
-
-			manager.Stop(series);
-		}
-
-		private static ICandleManagerContainer GetContainer(this CandleSeries series)
-		{
-			return series.ThrowIfNull().CandleManager.Container;
-		}
-
-		/// <summary>
-		/// Получить количество свечек.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Количество свечек.</returns>
-		public static int GetCandleCount(this CandleSeries series)
-		{
-			return series.GetContainer().GetCandleCount(series);
-		}
-
-		/// <summary>
-		/// Получить все свечи на период <paramref name="time"/>.
-		/// </summary>
-		/// <typeparam name="TCandle">Тип свечек.</typeparam>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="time">Период свечи.</param>
-		/// <returns>Свечи.</returns>
-		public static IEnumerable<TCandle> GetCandles<TCandle>(this CandleSeries series, DateTime time) 
-			where TCandle : Candle
-		{
-			return series.GetContainer().GetCandles(series, time).OfType<TCandle>();
-		}
-
-		/// <summary>
-		/// Получить все свечи.
-		/// </summary>
-		/// <typeparam name="TCandle">Тип свечек.</typeparam>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Свечи.</returns>
-		public static IEnumerable<TCandle> GetCandles<TCandle>(this CandleSeries series)
-			where TCandle : Candle
-		{
-			return series.GetContainer().GetCandles(series).OfType<TCandle>();
-		}
-
-		/// <summary>
-		/// Получить свечи по диапазону дат.
-		/// </summary>
-		/// <typeparam name="TCandle">Тип свечек.</typeparam>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="timeRange">Диапазон дат, в которые должны входить свечи. Учитывается значение <see cref="Candle.OpenTime"/>.</param>
-		/// <returns>Найденные свечи.</returns>
-		public static IEnumerable<TCandle> GetCandles<TCandle>(this CandleSeries series, Range<DateTimeOffset> timeRange)
-			where TCandle : Candle
-		{
-			return series.GetContainer().GetCandles(series, timeRange).OfType<TCandle>();
-		}
-
-		/// <summary>
-		/// Получить свечи по общему количеству.
-		/// </summary>
-		/// <typeparam name="TCandle">Тип свечек.</typeparam>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candleCount">Количество свечек, которое необходимо вернуть.</param>
-		/// <returns>Найденные свечи.</returns>
-		public static IEnumerable<TCandle> GetCandles<TCandle>(this CandleSeries series, int candleCount)
-		{
-			return series.GetContainer().GetCandles(series, candleCount).OfType<TCandle>();
-		}
-
-		/// <summary>
-		/// Получить свечу по индексу.
-		/// </summary>
-		/// <typeparam name="TCandle">Тип свечек.</typeparam>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="candleIndex">Порядковый номер свечи с конца.</param>
-		/// <returns>Найденная свеча. Если свечи не существует, то будет возвращено null.</returns>
-		public static TCandle GetCandle<TCandle>(this CandleSeries series, int candleIndex)
-			where TCandle : Candle
-		{
-			return (TCandle)series.GetContainer().GetCandle(series, candleIndex);
-		}
-
-		/// <summary>
-		/// Получить временную свечу за определенную дату.
-		/// </summary>
-		/// <param name="series">Серия свечек.</param>
-		/// <param name="time">Дата свечи.</param>
-		/// <returns>Найденная свеча (null, если свеча по заданным критериям не существует).</returns>
-		public static TimeFrameCandle GetTimeFrameCandle(this CandleSeries series, DateTime time)
-		{
-			return series.GetCandles<TimeFrameCandle>().FirstOrDefault(c => c.OpenTime == time);
-		}
-
-		/// <summary>
-		/// Получить текущую свечу.
-		/// </summary>
-		/// <typeparam name="TCandle">Тип свечек.</typeparam>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Найденная свеча. Если свеча не существует, то будет возвращено null.</returns>
-		public static TCandle GetCurrentCandle<TCandle>(this CandleSeries series)
-			where TCandle : Candle
-		{
-			return series.GetCandle<TCandle>(0);
-		}
-
-		/// <summary>
-		/// Получить серию свечек по заданным параметрам.
-		/// </summary>
-		/// <typeparam name="TCandle">Тип свечек.</typeparam>
-		/// <param name="manager">Менеджер свечек.</param>
-		/// <param name="security">Инструмент, по которому нужно фильтровать сделки для формирования свечек.</param>
-		/// <param name="arg">Параметр свечи.</param>
-		/// <returns>Серия свечек. Null, если такая серия не зарегистрирована.</returns>
-		public static CandleSeries GetSeries<TCandle>(this ICandleManager manager, Security security, object arg)
-			where TCandle : Candle
-		{
-			return manager.ThrowIfNull().Series.FirstOrDefault(s => s.CandleType == typeof(TCandle) && s.Security == security && s.Arg.Equals(arg));
-		}
-
-		private static CandleSeries ThrowIfNull(this CandleSeries series)
-		{
-			if (series == null)
-				throw new ArgumentNullException("series");
-
-			return series;
-		}
-
-		private static ICandleManager ThrowIfNull(this ICandleManager manager)
-		{
-			if (manager == null)
-				throw new ArgumentNullException("manager");
-
-			return manager;
-		}
-
-		private sealed class CandleEnumerable<TValue> : SimpleEnumerable<Candle>, IEnumerableEx<Candle>
-		{
-			private sealed class CandleEnumerator : SimpleEnumerator<Candle>
+			foreach (var priceLevel in candle.PriceLevels)
 			{
-				private sealed class EnumeratorCandleBuilderSource : ConvertableCandleBuilderSource<TValue>
+				area.Update(priceLevel);
+			}
+		}
+
+		area.Calculate();
+		return area;
+	}
+
+	/// <summary>
+	/// Compress candles to bigger time-frame candles.
+	/// </summary>
+	/// <param name="source">Smaller time-frame candles.</param>
+	/// <param name="compressor">Compressor of candles from smaller time-frames to bigger.</param>
+	/// <param name="includeLastCandle">Output last active candle as finished.</param>
+	/// <returns>Bigger time-frame candles.</returns>
+	public static IEnumerable<CandleMessage> Compress(this IEnumerable<CandleMessage> source, BiggerTimeFrameCandleCompressor compressor, bool includeLastCandle)
+	{
+		if (source == null)
+			throw new ArgumentNullException(nameof(source));
+
+		if (compressor == null)
+			throw new ArgumentNullException(nameof(compressor));
+
+		CandleMessage lastActiveCandle = null;
+
+		foreach (var message in source)
+		{
+			foreach (var candleMessage in compressor.Process(message))
+			{
+				if (candleMessage.State == CandleStates.Finished)
 				{
-					private readonly Security _security;
-
-					public EnumeratorCandleBuilderSource(Security security)
-					{
-						if (security == null)
-							throw new ArgumentNullException("security");
-
-						_security = security;
-					}
-
-					public override int SpeedPriority
-					{
-						get { return 0; }
-					}
-
-					public override IEnumerable<Range<DateTimeOffset>> GetSupportedRanges(CandleSeries series)
-					{
-						if (series == null)
-							throw new ArgumentNullException("series");
-
-						if (series.Security != _security)
-							yield break;
-
-						yield return new Range<DateTimeOffset>(DateTimeOffset.MinValue, DateTimeOffset.MaxValue);
-					}
-
-					public override void Start(CandleSeries series, DateTimeOffset from, DateTimeOffset to)
-					{
-					}
-
-					public override void Stop(CandleSeries series)
-					{
-						RaiseStopped(series);
-					}
-
-					public void PushNewValue(CandleSeries series, TValue value)
-					{
-						NewSourceValues(series, new[] { value });
-					}
+					lastActiveCandle = null;
+					yield return candleMessage;
 				}
+				else
+					lastActiveCandle = candleMessage;
+			}
+		}
 
-				private readonly CandleSeries _series;
-				private bool _isNewCandle;
-				private readonly IEnumerator<TValue> _valuesEnumerator;
-				private readonly EnumeratorCandleBuilderSource _builderSource;
-				private Candle _lastCandle;
-				private readonly CandleManager _candleManager;
+		if (!includeLastCandle || lastActiveCandle == null)
+			yield break;
 
-				public CandleEnumerator(CandleSeries series, IEnumerable<TValue> values)
+		lastActiveCandle.State = CandleStates.Finished;
+		yield return lastActiveCandle;
+	}
+
+	/// <summary>
+	/// Filter time-frames to find multiple smaller time-frames.
+	/// </summary>
+	/// <param name="timeFrames">All time-frames.</param>
+	/// <param name="original">Original time-frame.</param>
+	/// <returns>Multiple smaller time-frames.</returns>
+	public static IEnumerable<TimeSpan> FilterSmallerTimeFrames(this IEnumerable<TimeSpan> timeFrames, TimeSpan original)
+	{
+		return timeFrames.Where(t => t < original && (original.Ticks % t.Ticks) == 0);
+	}
+
+	/// <summary>
+	/// Determines the specified candles are same.
+	/// </summary>
+	/// <typeparam name="TCandle"><see cref="ICandleMessage"/></typeparam>
+	/// <param name="candle1">First.</param>
+	/// <param name="candle2">Second.</param>
+	/// <returns>Check result.</returns>
+	public static bool IsSame<TCandle>(this TCandle candle1, TCandle candle2)
+		where TCandle : ICandleMessage
+#pragma warning disable CS0618 // Type or member is obsolete
+		=> candle1 is not null && candle2 is not null && ((candle1 is Candle && ReferenceEquals(candle1, candle2)) || candle1.OpenTime == candle2.OpenTime);
+#pragma warning restore CS0618 // Type or member is obsolete
+
+	private static IAsyncEnumerable<CandleMessage> ToCandlesAsync<TSourceMessage>(this IAsyncEnumerable<TSourceMessage> messages, MarketDataMessage mdMsg, Func<TSourceMessage, ICandleBuilderValueTransform> createTransform, CandleBuilderProvider candleBuilderProvider = null)
+		where TSourceMessage : Message
+	{
+		if (messages is null)
+			throw new ArgumentNullException(nameof(messages));
+
+		if (createTransform is null)
+			throw new ArgumentNullException(nameof(createTransform));
+
+		return Impl(messages, mdMsg, createTransform, candleBuilderProvider);
+
+		static async IAsyncEnumerable<CandleMessage> Impl(IAsyncEnumerable<TSourceMessage> messages, MarketDataMessage mdMsg, Func<TSourceMessage, ICandleBuilderValueTransform> createTransform, CandleBuilderProvider candleBuilderProvider, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+		{
+			CandleMessage lastActiveCandle = null;
+
+			using var builder = candleBuilderProvider.CreateBuilder(mdMsg.DataType2.MessageType);
+
+			var subscription = new CandleBuilderSubscription(mdMsg);
+			var isFinishedOnly = mdMsg.IsFinishedOnly;
+
+			ICandleBuilderValueTransform transform = null;
+
+			await foreach (var message in messages.WithCancellation(cancellationToken))
+			{
+				transform ??= createTransform(message);
+
+				if (!transform.Process(message))
+					continue;
+
+				foreach (var candle in builder.Process(subscription, transform))
 				{
-					if (series == null)
-						throw new ArgumentNullException("series");
-
-					if (values == null)
-						throw new ArgumentNullException("values");
-
-					_series = series;
-					_series.ProcessCandle += SeriesOnProcessCandle;
-
-					_valuesEnumerator = values.GetEnumerator();
-
-					_candleManager = new CandleManager();
-
-					_builderSource = new EnumeratorCandleBuilderSource(series.Security);
-					_candleManager.Sources.OfType<ICandleBuilder>().ForEach(b => b.Sources.Add(_builderSource));
-
-					_candleManager.Start(series);
-				}
-
-				private void SeriesOnProcessCandle(Candle candle)
-				{
-					_lastCandle = candle;
-
-					if (candle.State != CandleStates.Finished)
-						return;
-
-					Current = candle;
-					_isNewCandle = true;
-				}
-
-				public override bool MoveNext()
-				{
-					while (!_isNewCandle)
+					if (candle.State == CandleStates.Finished)
 					{
-						if (!_valuesEnumerator.MoveNext())
-							break;
-
-						_builderSource.PushNewValue(_series, _valuesEnumerator.Current);
-					}
-
-					if (_isNewCandle)
-					{
-						_isNewCandle = false;
-						return true;
-					}
-
-					if (_lastCandle != null)
-					{
-						Current = _lastCandle;
-						_lastCandle = null;
-						return true;
+						lastActiveCandle = null;
+						yield return candle;
 					}
 					else
 					{
-						Current = null;
-						return false;
+						if (!isFinishedOnly)
+							lastActiveCandle = candle;
 					}
 				}
-
-				protected override void DisposeManaged()
-				{
-					Reset();
-					_series.ProcessCandle -= SeriesOnProcessCandle;
-					_series.Stop();
-					_candleManager.Dispose();
-
-					base.DisposeManaged();
-				}
 			}
 
-			private readonly IEnumerableEx<TValue> _values;
-
-			public CandleEnumerable(CandleSeries series, IEnumerableEx<TValue> values)
-				: base(() => new CandleEnumerator(series, values))
-			{
-				_values = values;
-			}
-
-			int IEnumerableEx.Count
-			{
-				get { return _values.Count; }
-			}
+			if (lastActiveCandle != null)
+				yield return lastActiveCandle;
 		}
+	}
 
-		/// <summary>
-		/// Построить свечи из коллекции тиковых сделок.
-		/// </summary>
-		/// <typeparam name="TCandle">Тип свечек.</typeparam>
-		/// <param name="trades">Тиковые сделки.</param>
-		/// <param name="arg">Параметр свечи.</param>
-		/// <returns>Свечи.</returns>
-		public static IEnumerable<TCandle> ToCandles<TCandle>(this IEnumerableEx<Trade> trades, object arg)
-			where TCandle : Candle
+	/// <summary>
+	/// To create candles from the tick trades collection.
+	/// </summary>
+	/// <param name="executions">Tick data.</param>
+	/// <param name="subscription">Market data subscription.</param>
+	/// <param name="candleBuilderProvider">Candle builders provider.</param>
+	/// <returns>Candles.</returns>
+	public static IAsyncEnumerable<CandleMessage> ToCandles(this IAsyncEnumerable<ExecutionMessage> executions, Subscription subscription, CandleBuilderProvider candleBuilderProvider = null)
+	{
+		if (subscription is null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		return ToCandles(executions, subscription.MarketData, candleBuilderProvider);
+	}
+
+	/// <summary>
+	/// To create candles from the tick trades collection.
+	/// </summary>
+	/// <param name="executions">Tick data.</param>
+	/// <param name="mdMsg">Market data subscription.</param>
+	/// <param name="candleBuilderProvider">Candle builders provider.</param>
+	/// <returns>Candles.</returns>
+	public static IAsyncEnumerable<CandleMessage> ToCandles(this IAsyncEnumerable<ExecutionMessage> executions, MarketDataMessage mdMsg, CandleBuilderProvider candleBuilderProvider = null)
+	{
+		return executions.ToCandlesAsync(mdMsg, execMsg =>
 		{
-			var firstTrade = trades.FirstOrDefault();
-
-			if (firstTrade == null)
-				return Enumerable.Empty<TCandle>();
-
-			return trades.ToCandles(new CandleSeries(typeof(TCandle), firstTrade.Security, arg)).Cast<TCandle>();
-		}
-
-		/// <summary>
-		/// Построить свечи из коллекции тиковых сделок.
-		/// </summary>
-		/// <param name="trades">Тиковые сделки.</param>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Свечи.</returns>
-		public static IEnumerableEx<Candle> ToCandles(this IEnumerableEx<Trade> trades, CandleSeries series)
-		{
-			return new CandleEnumerable<Trade>(series, trades);
-		}
-
-		/// <summary>
-		/// Построить свечи из коллекции тиковых сделок.
-		/// </summary>
-		/// <param name="trades">Тиковые сделки.</param>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Свечи.</returns>
-		public static IEnumerableEx<CandleMessage> ToCandles(this IEnumerableEx<ExecutionMessage> trades, CandleSeries series)
-		{
-			return trades
-				.ToEntities<ExecutionMessage, Trade>(series.Security)
-				.ToCandles(series)
-				.ToMessages<Candle, CandleMessage>();
-		}
-
-		/// <summary>
-		/// Построить свечи из коллекции стаканов.
-		/// </summary>
-		/// <param name="depths">Стаканы.</param>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Свечи.</returns>
-		public static IEnumerableEx<Candle> ToCandles(this IEnumerableEx<MarketDepth> depths, CandleSeries series)
-		{
-			return new CandleEnumerable<MarketDepth>(series, depths);
-		}
-
-		/// <summary>
-		/// Построить свечи из коллекции стаканов.
-		/// </summary>
-		/// <param name="depths">Стаканы.</param>
-		/// <param name="series">Серия свечек.</param>
-		/// <returns>Свечи.</returns>
-		public static IEnumerableEx<CandleMessage> ToCandles(this IEnumerableEx<QuoteChangeMessage> depths, CandleSeries series)
-		{
-			return depths
-				.ToEntities<QuoteChangeMessage, MarketDepth>(series.Security)
-				.ToCandles(series)
-				.ToMessages<Candle, CandleMessage>();
-		}
-
-		/// <summary>
-		/// Построить тики из свечек.
-		/// </summary>
-		/// <param name="candles">Свечи.</param>
-		/// <returns>Сделки.</returns>
-		public static IEnumerableEx<Trade> ToTrades(this IEnumerableEx<Candle> candles)
-		{
-			var candle = candles.FirstOrDefault();
-
-			if (candle == null)
-				return Enumerable.Empty<Trade>().ToEx();
-
-			return candles
-				.ToMessages<Candle, CandleMessage>()
-				.ToTrades(candle.Security.VolumeStep ?? 1m)
-				.ToEntities<ExecutionMessage, Trade>(candle.Security);
-		}
-
-		/// <summary>
-		/// Построить тиковые сделки из свечек.
-		/// </summary>
-		/// <param name="candles">Свечи.</param>
-		/// <param name="volumeStep">Шаг объема.</param>
-		/// <returns>Тиковые сделки.</returns>
-		public static IEnumerableEx<ExecutionMessage> ToTrades(this IEnumerableEx<CandleMessage> candles, decimal volumeStep)
-		{
-			return new TradeEnumerable(candles, volumeStep);
-		}
-
-		/// <summary>
-		/// Построить тиковые сделки из свечи.
-		/// </summary>
-		/// <param name="candleMsg">Свеча.</param>
-		/// <param name="volumeStep">Шаг объема.</param>
-		/// <param name="decimals">Количество знаком после запятой у объема.</param>
-		/// <returns>Тиковые сделки.</returns>
-		public static IEnumerable<ExecutionMessage> ToTrades(this CandleMessage candleMsg, decimal volumeStep, int decimals)
-		{
-			if (candleMsg == null)
-				throw new ArgumentNullException("candleMsg");
-
-			var vol = MathHelper.Round(candleMsg.TotalVolume / 4, volumeStep, decimals, MidpointRounding.AwayFromZero);
-			var isUptrend = candleMsg.ClosePrice >= candleMsg.OpenPrice;
-
-			ExecutionMessage o = null;
-			ExecutionMessage h = null;
-			ExecutionMessage l = null;
-			ExecutionMessage c = null;
-
-			if (candleMsg.OpenPrice == candleMsg.ClosePrice && 
-				candleMsg.LowPrice == candleMsg.HighPrice && 
-				candleMsg.OpenPrice == candleMsg.LowPrice ||
-				candleMsg.TotalVolume == 1)
-			{
-				// все цены в свече равны или объем равен 1 - считаем ее за один тик
-				o = CreateTick(candleMsg, Sides.Buy, candleMsg.OpenPrice, candleMsg.TotalVolume, candleMsg.OpenInterest);
-			}
-			else if (candleMsg.TotalVolume == 2)
-			{
-				h = CreateTick(candleMsg, Sides.Buy, candleMsg.HighPrice, 1);
-				l = CreateTick(candleMsg, Sides.Sell, candleMsg.LowPrice, 1, candleMsg.OpenInterest);
-			}
-			else if (candleMsg.TotalVolume == 3)
-			{
-				o = CreateTick(candleMsg, isUptrend ? Sides.Buy : Sides.Sell, candleMsg.OpenPrice, 1);
-				h = CreateTick(candleMsg, Sides.Buy, candleMsg.HighPrice, 1);
-				l = CreateTick(candleMsg, Sides.Sell, candleMsg.LowPrice, 1, candleMsg.OpenInterest);
-			}
+			if (execMsg.DataType == DataType.Ticks)
+				return new TickCandleBuilderValueTransform();
+			else if (execMsg.DataType == DataType.OrderLog)
+				return new OrderLogCandleBuilderValueTransform();
 			else
+				throw new ArgumentOutOfRangeException(nameof(execMsg), execMsg.DataType, LocalizedStrings.InvalidValue);
+		}, candleBuilderProvider);
+	}
+
+	/// <summary>
+	/// To create candles from the order books collection.
+	/// </summary>
+	/// <param name="depths">Market depths.</param>
+	/// <param name="subscription">Market data subscription.</param>
+	/// <param name="type">Type of candle depth based data.</param>
+	/// <param name="candleBuilderProvider">Candle builders provider.</param>
+	/// <returns>Candles.</returns>
+	public static IAsyncEnumerable<CandleMessage> ToCandles(this IAsyncEnumerable<QuoteChangeMessage> depths, Subscription subscription, Level1Fields type = Level1Fields.SpreadMiddle, CandleBuilderProvider candleBuilderProvider = null)
+	{
+		if (subscription is null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		return ToCandles(depths, subscription.MarketData, type, candleBuilderProvider);
+	}
+
+	/// <summary>
+	/// To create candles from the order books collection.
+	/// </summary>
+	/// <param name="depths">Market depths.</param>
+	/// <param name="mdMsg">Market data subscription.</param>
+	/// <param name="type">Type of candle depth based data.</param>
+	/// <param name="candleBuilderProvider">Candle builders provider.</param>
+	/// <returns>Candles.</returns>
+	public static IAsyncEnumerable<CandleMessage> ToCandles(this IAsyncEnumerable<QuoteChangeMessage> depths, MarketDataMessage mdMsg, Level1Fields type = Level1Fields.SpreadMiddle, CandleBuilderProvider candleBuilderProvider = null)
+	{
+		return depths.ToCandlesAsync(mdMsg, quoteMsg => new QuoteCandleBuilderValueTransform(mdMsg.PriceStep, mdMsg.VolumeStep) { Type = type }, candleBuilderProvider);
+	}
+
+	/// <summary>
+	/// To create tick trades from candles.
+	/// </summary>
+	/// <param name="candles">Candles.</param>
+	/// <param name="volumeStep">Volume step.</param>
+	/// <returns>Tick trades.</returns>
+	public static IAsyncEnumerable<ExecutionMessage> ToTrades<TCandle>(this IAsyncEnumerable<TCandle> candles, decimal volumeStep)
+		where TCandle : ICandleMessage
+	{
+		if (candles is null)
+			throw new ArgumentNullException(nameof(candles));
+
+		return Impl(candles, volumeStep);
+
+		static async IAsyncEnumerable<ExecutionMessage> Impl(IAsyncEnumerable<TCandle> candles, decimal volumeStep, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+		{
+			var decimals = volumeStep.GetCachedDecimals();
+			var ticks = new (Sides? side, decimal price, decimal volume, DateTime time)[4];
+
+			await foreach (var candle in candles.WithCancellation(cancellationToken))
 			{
-				o = CreateTick(candleMsg, isUptrend ? Sides.Buy : Sides.Sell, candleMsg.OpenPrice, vol);
-				h = CreateTick(candleMsg, Sides.Buy, candleMsg.HighPrice, vol);
-				l = CreateTick(candleMsg, Sides.Sell, candleMsg.LowPrice, vol);
-				c = CreateTick(candleMsg, isUptrend ? Sides.Buy : Sides.Sell, candleMsg.ClosePrice, candleMsg.TotalVolume - 3 * vol, candleMsg.OpenInterest);
-			}
+				candle.ConvertToTrades(volumeStep, decimals, ticks);
 
-			var ticks = candleMsg.ClosePrice > candleMsg.OpenPrice
-					? new[] { o, l, h, c }
-					: new[] { o, h, l, c };
-
-			return ticks.Where(t => t != null);
-		}
-
-		private static ExecutionMessage CreateTick(CandleMessage candleMsg, Sides side, decimal price, decimal volume, decimal? openInterest = null)
-		{
-			return new ExecutionMessage
-			{
-				LocalTime = candleMsg.LocalTime,
-				SecurityId = candleMsg.SecurityId,
-				ServerTime = candleMsg.OpenTime,
-				//TradeId = _tradeIdGenerator.Next,
-				TradePrice = price,
-				Volume = volume,
-				Side = side,
-				ExecutionType = ExecutionTypes.Tick,
-				OpenInterest = openInterest
-			};
-		}
-		
-		private sealed class TradeEnumerable : SimpleEnumerable<ExecutionMessage>, IEnumerableEx<ExecutionMessage>
-		{
-			private sealed class TradeEnumerator : IEnumerator<ExecutionMessage>
-			{
-				private readonly decimal _volumeStep;
-				private readonly IEnumerator<CandleMessage> _valuesEnumerator;
-				private IEnumerator<ExecutionMessage> _currCandleEnumerator;
-				private readonly int _decimals;
-
-				public TradeEnumerator(IEnumerable<CandleMessage> candles, decimal volumeStep)
+				foreach (var t in ticks)
 				{
-					_volumeStep = volumeStep;
-					_decimals = volumeStep.GetCachedDecimals();
-					_valuesEnumerator = candles.GetEnumerator();
-					_valuesEnumerator.MoveNext();
-				}
-
-				private IEnumerator<ExecutionMessage> CreateEnumerator(CandleMessage candleMsg)
-				{
-					return candleMsg.ToTrades(_volumeStep, _decimals).GetEnumerator();
-				}
-
-				public bool MoveNext()
-				{
-					if (_currCandleEnumerator == null)
-					{
-						if (_valuesEnumerator.MoveNext())
-						{
-							_currCandleEnumerator = CreateEnumerator(_valuesEnumerator.Current);
-						}
-						else
-						{
-							Current = null;
-							return false;
-						}
-					}
-
-					if (_currCandleEnumerator.MoveNext())
-					{
-						Current = _currCandleEnumerator.Current;
-						return true;
-					}
-
-					if (_valuesEnumerator.MoveNext())
-					{
-						_currCandleEnumerator = CreateEnumerator(_valuesEnumerator.Current);
-
-						_currCandleEnumerator.MoveNext();
-						Current = _currCandleEnumerator.Current;
-
-						return true;
-					}
-					
-					Current = null;
-					return false;
-				}
-
-				public void Reset()
-				{
-					_valuesEnumerator.Reset();
-					Current = null;
-				}
-
-				public void Dispose()
-				{
-					Reset();
-					_valuesEnumerator.Dispose();
-				}
-
-				public ExecutionMessage Current { get; private set; }
-
-				object IEnumerator.Current
-				{
-					get { return Current; }
-				}
-			}
-
-			public TradeEnumerable(IEnumerableEx<CandleMessage> candles, decimal volumeStep)
-				: base(() => new TradeEnumerator(candles, volumeStep))
-			{
-				if (candles == null)
-					throw new ArgumentNullException("candles");
-
-				_values = candles;
-			}
-
-			private readonly IEnumerableEx<CandleMessage> _values;
-
-			public int Count
-			{
-				get { return _values.Count * 4; }
-			}
-		}
-
-		/// <summary>
-		/// Зарегистрирована ли группировка свечек по определённому признаку.
-		/// </summary>
-		/// <typeparam name="TCandle">Тип свечек.</typeparam>
-		/// <param name="manager">Менеджер свечек.</param>
-		/// <param name="security">Инструмент, для которого зарегистрирована группировка.</param>
-		/// <param name="arg">Параметр свечи.</param>
-		/// <returns><see langword="true"/>, если зарегистрирована. Иначе, <see langword="false"/>.</returns>
-		public static bool IsCandlesRegistered<TCandle>(this ICandleManager manager, Security security, object arg)
-			where TCandle : Candle
-		{
-			return manager.GetSeries<TCandle>(security, arg) != null;
-		}
-
-		/// <summary>
-		/// Получить время формирования свечи.
-		/// </summary>
-		/// <param name="timeFrame">Тайм-фрейм, по которому необходимо получить время формирования свечи.</param>
-		/// <param name="currentTime">Текущее время, входящее в диапазон временных рамок.</param>
-		/// <returns>Время формирования свечи.</returns>
-		public static DateTime GetCandleTime(this TimeSpan timeFrame, DateTime currentTime)
-		{
-			return timeFrame.GetCandleBounds(currentTime).Min;
-		}
-
-		/// <summary>
-		/// Получить временные рамки свечи.
-		/// </summary>
-		/// <param name="timeFrame">Тайм-фрейм, по которому необходимо получить временные рамки.</param>
-		/// <param name="currentTime">Текущее время, входящее в диапазон временных рамок.</param>
-		/// <returns>Временные рамки свечи.</returns>
-		public static Range<DateTime> GetCandleBounds(this TimeSpan timeFrame, DateTime currentTime)
-		{
-			return timeFrame.GetCandleBounds(currentTime, ExchangeBoard.Associated);
-		}
-
-		/// <summary>
-		/// Получить временные рамки свечи относительно времени работы биржи.
-		/// </summary>
-		/// <param name="timeFrame">Тайм-фрейм, по которому необходимо получить временные рамки.</param>
-		/// <param name="currentTime">Текущее время, входящее в диапазон временных рамок.</param>
-		/// <param name="board">Информация о площадке, из которой будет взято время работы <see cref="ExchangeBoard.WorkingTime"/>.</param>
-		/// <returns>Временные рамки свечи.</returns>
-		public static Range<DateTime> GetCandleBounds(this TimeSpan timeFrame, DateTime currentTime, ExchangeBoard board)
-		{
-			if (board == null)
-				throw new ArgumentNullException("board");
-
-			return timeFrame.GetCandleBounds(currentTime, board.WorkingTime);
-		}
-
-		private static readonly long _weekTf = TimeSpan.FromDays(7).Ticks;
-
-		/// <summary>
-		/// Получить временные рамки свечи относительно режиме работы биржи.
-		/// </summary>
-		/// <param name="timeFrame">Тайм-фрейм, по которому необходимо получить временные рамки.</param>
-		/// <param name="currentTime">Текущее время, входящее в диапазон временных рамок.</param>
-		/// <param name="time">Информация о режиме работы биржи.</param>
-		/// <returns>Временные рамки свечи.</returns>
-		public static Range<DateTime> GetCandleBounds(this TimeSpan timeFrame, DateTime currentTime, WorkingTime time)
-		{
-			if (time == null)
-				throw new ArgumentNullException("time");
-
-			if (timeFrame.Ticks == _weekTf)
-			{
-				var monday = currentTime.StartOfWeek(DayOfWeek.Monday);
-
-				var endDay = currentTime.Date;
-
-				while (endDay.DayOfWeek != DayOfWeek.Sunday)
-				{
-					var nextDay = endDay.AddDays(1);
-
-					if (nextDay.Month != endDay.Month)
+					if (t == default)
 						break;
 
-					endDay = nextDay;
+					yield return t.ToTickMessage(candle.SecurityId, candle.LocalTime);
 				}
-
-				return new Range<DateTime>(monday, endDay.EndOfDay());
 			}
-			else if (timeFrame.Ticks == TimeHelper.TicksPerMonth)
+		}
+	}
+
+	/// <summary>
+	/// Compress candles to bigger time-frame candles.
+	/// </summary>
+	/// <param name="source">Smaller time-frame candles.</param>
+	/// <param name="compressor">Compressor of candles from smaller time-frames to bigger.</param>
+	/// <param name="includeLastCandle">Output last active candle as finished.</param>
+	/// <returns>Bigger time-frame candles.</returns>
+	public static IAsyncEnumerable<CandleMessage> Compress(this IAsyncEnumerable<CandleMessage> source, BiggerTimeFrameCandleCompressor compressor, bool includeLastCandle)
+	{
+		if (source == null)
+			throw new ArgumentNullException(nameof(source));
+
+		if (compressor == null)
+			throw new ArgumentNullException(nameof(compressor));
+
+		return Impl(source, compressor, includeLastCandle);
+
+		static async IAsyncEnumerable<CandleMessage> Impl(IAsyncEnumerable<CandleMessage> source, BiggerTimeFrameCandleCompressor compressor, bool includeLastCandle, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+		{
+			CandleMessage lastActiveCandle = null;
+
+			await foreach (var message in source.WithCancellation(cancellationToken))
 			{
-				var month = new DateTime(currentTime.Year, currentTime.Month, 1);
-				return new Range<DateTime>(month, (month + TimeSpan.FromDays(month.DaysInMonth())).EndOfDay());
-			}
-
-			var period = time.GetPeriod(currentTime);
-
-			// http://stocksharp.com/forum/yaf_postsm13887_RealtimeEmulationTrader---niepravil-nyie-sviechi.aspx#post13887
-			// отсчет свечек идет от начала сессии и игнорируются клиринги
-			var startTime = period != null && period.Times.Length > 0 ? period.Times[0].Min : TimeSpan.Zero;
-
-			var length = (currentTime.TimeOfDay - startTime).To<long>();
-			var beginTime = currentTime.Date + (startTime + length.Floor(timeFrame.Ticks).To<TimeSpan>());
-
-			//последняя свеча должна заканчиваться в конец торговой сессии
-			var tempEndTime = beginTime.TimeOfDay + timeFrame;
-			TimeSpan stopTime;
-
-			if (period != null && period.Times.Length > 0)
-			{
-				var last = period.Times.LastOrDefault(t => tempEndTime > t.Min);
-				stopTime = last == null ? TimeSpan.MaxValue : last.Max;
-			}
-			else
-				stopTime = TimeSpan.MaxValue;
-
-			var endTime = beginTime + timeFrame.Min(stopTime - beginTime.TimeOfDay);
-
-			// если currentTime попало на клиринг
-			if (endTime < beginTime)
-				endTime = beginTime.Date + tempEndTime;
-
-			var days = timeFrame.Days > 1 ? timeFrame.Days - 1 : 0;
-
-			var min = beginTime.Truncate(TimeSpan.TicksPerMillisecond);
-			var max = endTime.Truncate(TimeSpan.TicksPerMillisecond).AddDays(days);
-
-			return new Range<DateTime>(min, max);
-		}
-
-		/// <summary>
-		/// Получить длину свечи.
-		/// </summary>
-		/// <param name="candle">Свеча, для которой необходимо получить длины.</param>
-		/// <returns>Длина свечи.</returns>
-		public static decimal GetLength(this Candle candle)
-		{
-			if (candle == null)
-				throw new ArgumentNullException("candle");
-
-			return candle.HighPrice - candle.LowPrice;
-		}
-
-		/// <summary>
-		/// Получить тело свечи.
-		/// </summary>
-		/// <param name="candle">Свеча, для которой необходимо получить тело.</param>
-		/// <returns>Тело свечи.</returns>
-		public static decimal GetBody(this Candle candle)
-		{
-			if (candle == null)
-				throw new ArgumentNullException("candle");
-
-			return (candle.OpenPrice - candle.ClosePrice).Abs();
-		}
-
-		/// <summary>
-		/// Получить длину верхней тени свечи.
-		/// </summary>
-		/// <param name="candle">Свеча, для которой необходимо получить длины верхней тени.</param>
-		/// <returns>Длина верхней тени свечи. Если 0, то тень отсутствует.</returns>
-		public static decimal GetTopShadow(this Candle candle)
-		{
-			if (candle == null)
-				throw new ArgumentNullException("candle");
-
-			return candle.HighPrice - candle.OpenPrice.Max(candle.ClosePrice);
-		}
-
-		/// <summary>
-		/// Получить длину нижней тени свечи.
-		/// </summary>
-		/// <param name="candle">Свеча, для которой необходимо получить длины нижней тени.</param>
-		/// <returns>Длина нижней тени свечи. Если 0, то тень отсутствует.</returns>
-		public static decimal GetBottomShadow(this Candle candle)
-		{
-			if (candle == null)
-				throw new ArgumentNullException("candle");
-
-			return candle.OpenPrice.Min(candle.ClosePrice) - candle.LowPrice;
-		}
-
-		//
-		// http://en.wikipedia.org/wiki/Candlestick_chart
-		//
-
-		/// <summary>
-		/// Белая ли или черная свеча.
-		/// </summary>
-		/// <param name="candle">Свеча, для которой необходимо определить цвет.</param>
-		/// <returns><see langword="true"/>, если свеча белая, <see langword="false"/>, если черная, и null, если свеча плоская.</returns>
-		public static bool? IsWhiteOrBlack(this Candle candle)
-		{
-			if (candle == null)
-				throw new ArgumentNullException("candle");
-
-			if (candle.OpenPrice == candle.ClosePrice)
-				return null;
-
-			return candle.OpenPrice < candle.ClosePrice;
-		}
-
-		/// <summary>
-		/// Бестеневая ли свеча тени.
-		/// </summary>
-		/// <param name="candle">Свеча, для которой необходимо определить наличие теней.</param>
-		/// <returns><see langword="true"/>, если свеча не имеет теней, <see langword="false"/>, если имеет.</returns>
-		public static bool IsMarubozu(this Candle candle)
-		{
-			if (candle == null)
-				throw new ArgumentNullException("candle");
-
-			return candle.GetLength() == candle.GetBody();
-		}
-
-		/// <summary>
-		/// Нейтральная ли свеча сделкам.
-		/// </summary>
-		/// <remarks>
-		/// Нейтральность определяется как ситуация, когда в период свечи ни покупатели ни продавцы не создали тренд.
-		/// </remarks>
-		/// <param name="candle">Свеча, для которой необходимо рассчитать, нейтральна ли она.</param>
-		/// <returns><see langword="true"/>, если свеча нейтральна, <see langword="false"/>, если не нейтральная.</returns>
-		public static bool IsSpinningTop(this Candle candle)
-		{
-			return !candle.IsMarubozu() && (candle.GetBottomShadow() == candle.GetTopShadow());
-		}
-
-		/// <summary>
-		/// Является ли свеча молотом.
-		/// </summary>
-		/// <param name="candle">Свеча, которую необходимо проверить на паттерн.</param>
-		/// <returns><see langword="true"/>, если является, <see langword="false"/>, если нет.</returns>
-		public static bool IsHammer(this Candle candle)
-		{
-			return !candle.IsMarubozu() && (candle.GetBottomShadow() == 0 || candle.GetTopShadow() == 0);
-		}
-
-		/// <summary>
-		/// Является ли свеча стрекозой или надгробьем.
-		/// </summary>
-		/// <param name="candle">Свеча, которую необходимо проверить на паттерн.</param>
-		/// <returns><see langword="true"/>, если стрекоза, <see langword="false"/>, если надгробье, <see langword="null"/> - ни то, ни другое.</returns>
-		public static bool? IsDragonflyOrGravestone(this Candle candle)
-		{
-			if (candle.IsWhiteOrBlack() == null)
-			{
-				if (candle.GetTopShadow() == 0)
-					return true;
-				else if (candle.GetBottomShadow() == 0)
-					return false;
-			}
-
-			return null;
-		}
-
-		/// <summary>
-		/// Бычья ли или медвежья свеча.
-		/// </summary>
-		/// <param name="candle">Свеча, которую необходимо проверить на тренд.</param>
-		/// <returns><see langword="true"/>, если бычья, <see langword="false"/>, если медвежья, <see langword="null"/> - ни то, ни другое.</returns>
-		public static bool? IsBullishOrBearish(this Candle candle)
-		{
-			if (candle == null)
-				throw new ArgumentNullException("candle");
-
-			var isWhiteOrBlack = candle.IsWhiteOrBlack();
-
-			switch (isWhiteOrBlack)
-			{
-				case true:
-					if (candle.GetBottomShadow() >= candle.GetBody())
-						return true;
-					break;
-				case false:
-					if (candle.GetTopShadow() >= candle.GetBody())
-						return true;
-					break;
-			}
-
-			return null;
-		}
-
-		/// <summary>
-		/// Получить количество временных интервалов в пределах заданного отрезка времени.
-		/// </summary>
-		/// <param name="security">Инструмент, по которому вычисляется время работы биржи через свойство <see cref="Security.Board"/>.</param>
-		/// <param name="range">Заданный отрезок времени, для которого нужно получить количество временных интервалов.</param>
-		/// <param name="timeFrame">Размер временного интервала.</param>
-		/// <returns>Полученное количество временных интервалов.</returns>
-		public static long GetTimeFrameCount(this Security security, Range<DateTimeOffset> range, TimeSpan timeFrame)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			return security.Board.GetTimeFrameCount(range, timeFrame);
-		}
-
-		/// <summary>
-		/// Получить количество временных интервалов в пределах заданного отрезка времени.
-		/// </summary>
-		/// <param name="board">Информация о площадке, по которому вычисляется время работы через свойство <see cref="ExchangeBoard.WorkingTime"/>.</param>
-		/// <param name="range">Заданный отрезок времени, для которого нужно получить количество временных интервалов.</param>
-		/// <param name="timeFrame">Размер временного интервала.</param>
-		/// <returns>Полученное количество временных интервалов.</returns>
-		public static long GetTimeFrameCount(this ExchangeBoard board, Range<DateTimeOffset> range, TimeSpan timeFrame)
-		{
-			if (board == null)
-				throw new ArgumentNullException("board");
-
-			if (range == null)
-				throw new ArgumentNullException("range");
-
-			var workingTime = board.WorkingTime;
-
-			var to = board.Exchange.ToExchangeTime(range.Max);
-			var from = board.Exchange.ToExchangeTime(range.Min);
-
-			var days = (int)(to.Date - from.Date).TotalDays;
-
-			var period = workingTime.GetPeriod(from);
-
-			if (period == null || period.Times.IsEmpty())
-			{
-				return (to - from).Ticks / timeFrame.Ticks;
-			}
-
-			if (days == 0)
-			{
-				return workingTime.GetTimeFrameCount(from, new Range<TimeSpan>(from.TimeOfDay, to.TimeOfDay), timeFrame);
-			}
-
-			var totalCount = workingTime.GetTimeFrameCount(from, new Range<TimeSpan>(from.TimeOfDay, TimeHelper.LessOneDay), timeFrame);
-			totalCount += workingTime.GetTimeFrameCount(to, new Range<TimeSpan>(TimeSpan.Zero, to.TimeOfDay), timeFrame);
-
-			if (days <= 1)
-				return totalCount;
-
-			var fullDayLength = period.Times.Sum(r => r.Length.Ticks);
-			totalCount += TimeSpan.FromTicks((days - 1) * fullDayLength).Ticks / timeFrame.Ticks;
-
-			return totalCount;
-		}
-
-		private static long GetTimeFrameCount(this WorkingTime workingTime, DateTime date, Range<TimeSpan> fromToRange, TimeSpan timeFrame)
-		{
-			if (workingTime == null)
-				throw new ArgumentNullException("workingTime");
-
-			if (fromToRange == null)
-				throw new ArgumentNullException("fromToRange");
-
-			var period = workingTime.GetPeriod(date);
-
-			if (period == null)
-				return 0;
-
-			return period.Times
-						.Select(fromToRange.Intersect)
-						.Where(intersection => intersection != null)
-						.Sum(intersection => intersection.Length.Ticks / timeFrame.Ticks);
-		}
-
-		internal static CandleSeries CheckSeries(this Candle candle)
-		{
-			if (candle == null)
-				throw new ArgumentNullException("candle");
-
-			var series = candle.Series;
-
-			if (series == null)
-				throw new ArgumentException("candle");
-
-			return series;
-		}
-
-		internal static bool CheckTime(this CandleSeries series, DateTimeOffset time)
-		{
-			if (series == null)
-				throw new ArgumentNullException("series");
-
-			return series.Security.Board.IsTradeTime(time) && time >= series.From && time < series.To;
-		}
-
-		/// <summary>
-		/// Рассчитать <see cref="ValueArea"/> для группы свечек.
-		/// </summary>
-		/// <param name="candles">Свечи.</param>
-		/// <returns><see cref="ValueArea"/>.</returns>
-		public static ValueArea GetValueArea(this IEnumerable<Candle> candles)
-		{
-			var va = new ValueArea(candles.SelectMany(c => c.VolumeProfileInfo.PriceLevels));
-			va.Calculate();
-			return va;
-		}
-
-		/// <summary>
-		/// Запустить таймер получения из переданного <paramref name="connector"/> свечек реального времени.
-		/// </summary>
-		/// <typeparam name="TConnector">Тип подключения, реализующего <see cref="IExternalCandleSource"/>.</typeparam>
-		/// <param name="connector">Подключение, реализующее <see cref="IExternalCandleSource"/>.</param>
-		/// <param name="registeredSeries">Все зарегистрированные серии свечек.</param>
-		/// <param name="offset">Временной отступ для нового запроса получение новой свечи. Необходим для того, чтобы сервер успел сформировать данные в своем хранилище свечек.</param>
-		/// <param name="requestNewCandles">Обработчик, получающий новые свечи.</param>
-		/// <param name="interval">Периодичность обновления данных.</param>
-		/// <returns>Созданный таймер.</returns>
-		public static Timer StartRealTime<TConnector>(this TConnector connector, CachedSynchronizedSet<CandleSeries> registeredSeries, TimeSpan offset, Action<CandleSeries, Range<DateTimeOffset>> requestNewCandles, TimeSpan interval)
-			where TConnector : class, IConnector, IExternalCandleSource
-		{
-			if (connector == null)
-				throw new ArgumentNullException("connector");
-
-			if (registeredSeries == null)
-				throw new ArgumentNullException("registeredSeries");
-
-			if (requestNewCandles == null)
-				throw new ArgumentNullException("requestNewCandles");
-
-			return ThreadingHelper.Timer(() =>
-			{
-				if (connector.ConnectionState != ConnectionStates.Connected)
-					return;
-
-				lock (registeredSeries.SyncRoot)
+				foreach (var candleMessage in compressor.Process(message))
 				{
-					foreach (var series in registeredSeries.Cache)
+					if (candleMessage.State == CandleStates.Finished)
 					{
-						var tf = (TimeSpan)series.Arg;
-						var time = connector.CurrentTime.LocalDateTime;
-            			var bounds = tf.GetCandleBounds(time, series.Security.Board);
-
-						var beginTime = time - bounds.Min < offset ? bounds.Min - tf : bounds.Min;
-						var finishTime = bounds.Max;
-
-						requestNewCandles(series, new Range<DateTimeOffset>(beginTime, finishTime));
+						lastActiveCandle = null;
+						yield return candleMessage;
 					}
+					else
+						lastActiveCandle = candleMessage;
 				}
-			})
-			.Interval(interval);
+			}
+
+			if (!includeLastCandle || lastActiveCandle == null)
+				yield break;
+
+			lastActiveCandle.State = CandleStates.Finished;
+			yield return lastActiveCandle;
 		}
 	}
 }

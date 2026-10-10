@@ -1,199 +1,224 @@
-﻿namespace StockSharp.Algo.Statistics
+namespace StockSharp.Algo.Statistics;
+
+/// <summary>
+/// The interface, describing statistic parameter.
+/// </summary>
+public interface IStatisticParameter : IAsyncPersistable, INotifyPropertyChanged, IDisposable
 {
-	using System;
-
-	using Ecng.Common;
-	using Ecng.ComponentModel;
-	using Ecng.Serialization;
+	/// <summary>
+	/// Parameter name.
+	/// </summary>
+	string Name { get; }
 
 	/// <summary>
-	/// Интерфейс, описывающий параметр статистики.
+	/// Type.
 	/// </summary>
-	public interface IStatisticParameter : IPersistable
+	StatisticParameterTypes Type { get; }
+
+	/// <summary>
+	/// <see cref="Value"/> type.
+	/// </summary>
+	Type ValueType { get; }
+
+	/// <summary>
+	/// The current value of the parameter.
+	/// </summary>
+	object Value { get; }
+
+	/// <summary>
+	/// The displayed parameter name.
+	/// </summary>
+	string DisplayName { get; }
+
+	/// <summary>
+	/// The parameter description.
+	/// </summary>
+	string Description { get; }
+
+	/// <summary>
+	/// Category.
+	/// </summary>
+	string Category { get; }
+
+	/// <summary>
+	/// Order.
+	/// </summary>
+	int Order { get; }
+
+	/// <summary>
+	/// To reset the parameter value.
+	/// </summary>
+	void Reset();
+}
+
+/// <summary>
+/// The interface, describing statistic parameter with initial value.
+/// </summary>
+public interface IBeginValueStatisticParameter
+{
+	/// <summary>
+	/// The initial value of the parameter.
+	/// </summary>
+	decimal BeginValue { get; set; }	
+}
+
+/// <summary>
+/// The interface, describing statistic parameter with risk-free rate.
+/// </summary>
+public interface IRiskFreeRateStatisticParameter
+{
+	/// <summary>
+	/// Annual risk-free rate (e.g., 0.03 = 3%).
+	/// </summary>
+	decimal RiskFreeRate { get; set; }
+}
+
+/// <summary>
+/// The interface, describing statistic parameter.
+/// </summary>
+/// <typeparam name="TValue">The type of the parameter value.</typeparam>
+public interface IStatisticParameter<TValue> : IStatisticParameter
+{
+	/// <summary>
+	/// The current value of the parameter.
+	/// </summary>
+	new TValue Value { get; }
+}
+
+/// <summary>
+/// The base statistics parameter.
+/// </summary>
+/// <typeparam name="TValue">The type of the parameter value.</typeparam>
+public abstract class BaseStatisticParameter<TValue> : NotifiableObject, IStatisticParameter<TValue>
+	where TValue : IComparable<TValue>
+{
+	private bool _disposed;
+
+	/// <summary>
+	/// Initialize <see cref="BaseStatisticParameter{T}"/>.
+	/// </summary>
+	/// <param name="type"><see cref="IStatisticParameter.Type"/></param>
+	protected BaseStatisticParameter(StatisticParameterTypes type)
 	{
-		/// <summary>
-		/// Название параметра.
-		/// </summary>
-		string Name { get; set; }
+		Type = type;
 
-		/// <summary>
-		/// Текущее значение параметра.
-		/// </summary>
-		object Value { get; }
+		var type2 = GetType();
+		Name = type2.Name.Remove("Parameter");
 
-		/// <summary>
-		/// Отображаемое название параметра.
-		/// </summary>
-		string DisplayName { get; }
+		ChangeNameAndDescription();
+		Order = type2.GetAttribute<DisplayAttribute>()?.Order ?? default;
 
-		/// <summary>
-		/// Описание параметра.
-		/// </summary>
-		string Description { get; }
+		LocalizedStrings.ActiveLanguageChanged += ChangeNameAndDescription;
+	}
 
-		/// <summary>
-		/// Категория.
-		/// </summary>
-		string Category { get; }
+	private void ChangeNameAndDescription()
+	{
+		var type2 = GetType();
 
-		/// <summary>
-		/// Событие изменения <see cref="Value"/>.
-		/// </summary>
-		event Action ValueChanged;
+		DisplayName = type2.GetDisplayName(GetReadableName(Name));
+		Description = type2.GetDescription(DisplayName);
+		Category = type2.GetCategory();
 
-		/// <summary>
-		/// Сбросить значение параметра.
-		/// </summary>
-		void Reset();
+		NotifyChanged(nameof(DisplayName));
+		NotifyChanged(nameof(Description));
+		NotifyChanged(nameof(Category));
+	}
+
+	/// <inheritdoc />
+	public string Name { get; }
+
+	/// <inheritdoc />
+	public StatisticParameterTypes Type { get; }
+
+	/// <inheritdoc />
+	public string DisplayName { get; private set; }
+
+	/// <inheritdoc />
+	public string Description { get; private set; }
+
+	/// <inheritdoc />
+	public string Category { get; private set; }
+
+	/// <inheritdoc />
+	public int Order { get; }
+
+	private TValue _value;
+
+	/// <inheritdoc />
+	public virtual TValue Value
+	{
+		get => _value;
+		protected set
+		{
+			if (_value.CompareTo(value) == 0)
+				return;
+
+			_value = value;
+			this.Notify(nameof(Value));
+		}
+	}
+
+	private static string GetReadableName(string name)
+	{
+		var index = 1;
+
+		while (index < (name.Length - 1))
+		{
+			if (char.IsUpper(name[index]))
+			{
+				name = name.Insert(index, " ");
+				index += 2;
+			}
+			else
+				index++;
+		}
+
+		return name;
+	}
+
+	object IStatisticParameter.Value => Value;
+
+	/// <inheritdoc />
+	public Type ValueType => typeof(TValue);
+
+	/// <inheritdoc />
+	public virtual void Reset() => Value = default;
+
+	/// <summary>
+	/// To load the state of statistic parameter.
+	/// </summary>
+	/// <param name="storage">Storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public virtual Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		Value = storage.GetValue(nameof(Value), default(TValue));
+
+		return Task.CompletedTask;
 	}
 
 	/// <summary>
-	/// Интерфейс, описывающий параметр статистики.
+	/// To save the state of statistic parameter.
 	/// </summary>
-	/// <typeparam name="TValue">Тип значения параметра.</typeparam>
-	public interface IStatisticParameter<TValue> : IStatisticParameter
+	/// <param name="storage">Storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public virtual Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
 	{
-		/// <summary>
-		/// Текущее значение параметра.
-		/// </summary>
-		new TValue Value { get; }
+		storage.SetValue(nameof(Value), Value);
+
+		return Task.CompletedTask;
 	}
 
-	/// <summary>
-	/// Базовый параметр статистики.
-	/// </summary>
-	/// <typeparam name="TValue">Тип значения параметра.</typeparam>
-	public abstract class BaseStatisticParameter<TValue> : NotifiableObject, IStatisticParameter<TValue>
-		where TValue : IComparable<TValue>
+	/// <inheritdoc />
+	public void Dispose()
 	{
-		/// <summary>
-		/// Инициализировать <see cref="BaseStatisticParameter{TValue}"/>.
-		/// </summary>
-		protected BaseStatisticParameter()
-		{
-			var type = GetType();
-			_name = type.Name.Replace("Parameter", string.Empty);
+		if (_disposed)
+			return;
 
-			DisplayName = type.GetDisplayName(GetReadableName(_name));
-			Description = type.GetDescription(DisplayName);
-			Category = type.GetCategory();
-		}
+		_disposed = true;
+		LocalizedStrings.ActiveLanguageChanged -= ChangeNameAndDescription;
 
-		private string _name;
-
-		/// <summary>
-		/// Название параметра.
-		/// </summary>
-		public string Name
-		{
-			get { return _name; }
-			set
-			{
-				if (_name == value)
-					return;
-
-				_name = value;
-				this.Notify("Name");
-			}
-		}
-
-		/// <summary>
-		/// Отображаемое название параметра.
-		/// </summary>
-		public string DisplayName { get; private set; }
-
-		/// <summary>
-		/// Описание параметра.
-		/// </summary>
-		public string Description { get; private set; }
-
-		/// <summary>
-		/// Категория.
-		/// </summary>
-		public string Category { get; private set; }
-
-		private TValue _value;
-
-		/// <summary>
-		/// Текущее значение параметра.
-		/// </summary>
-		public virtual TValue Value
-		{
-			get { return _value; }
-			protected set
-			{
-				if (_value.CompareTo(value) == 0)
-					return;
-
-				_value = value;
-				RaiseValueChanged();
-			}
-		}
-
-		private static string GetReadableName(string name)
-		{
-			var index = 1;
-
-			while (index < (name.Length - 1))
-			{
-				if (char.IsUpper(name[index]))
-				{
-					name = name.Insert(index, " ");
-					index += 2;
-				}
-				else
-					index++;
-			}
-
-			return name;
-		}
-
-		/// <summary>
-		/// Текущее значение параметра.
-		/// </summary>
-		object IStatisticParameter.Value
-		{
-			get { return Value; }
-		}
-
-		/// <summary>
-		/// Событие изменения <see cref="Value"/>.
-		/// </summary>
-		public virtual event Action ValueChanged;
-
-		/// <summary>
-		/// Сбросить значение параметра.
-		/// </summary>
-		public virtual void Reset()
-		{
-			Value = default(TValue);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="ValueChanged"/>.
-		/// </summary>
-		private void RaiseValueChanged()
-		{
-			ValueChanged.SafeInvoke();
-			this.Notify("Value");
-		}
-
-		/// <summary>
-		/// Загрузить состояние параметра статистики.
-		/// </summary>
-		/// <param name="storage">Хранилище.</param>
-		public virtual void Load(SettingsStorage storage)
-		{
-			Value = storage.GetValue("Value", default(TValue));
-		}
-	
-		/// <summary>
-		/// Сохранить состояние параметра статистики.
-		/// </summary>
-		/// <param name="storage">Хранилище.</param>
-		public virtual void Save(SettingsStorage storage)
-		{
-			storage.SetValue("Value", Value);
-		}
+		GC.SuppressFinalize(this);
 	}
 }

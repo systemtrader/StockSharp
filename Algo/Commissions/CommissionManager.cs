@@ -1,95 +1,114 @@
-namespace StockSharp.Algo.Commissions
+namespace StockSharp.Algo.Commissions;
+
+/// <summary>
+/// The commission calculating manager.
+/// </summary>
+public class CommissionManager : ICommissionManager
 {
-	using System;
-	using System.Linq;
-
-	using Ecng.Collections;
-	using Ecng.Serialization;
-
-	using MoreLinq;
-
-	using StockSharp.Messages;
+	private readonly Lock _syncRoot = new();
 
 	/// <summary>
-	/// Менеджер расчета комиссии.
+	/// Initializes a new instance of the <see cref="CommissionManager"/>.
 	/// </summary>
-	public class CommissionManager : ICommissionManager
+	public CommissionManager()
 	{
-		/// <summary>
-		/// Создать <see cref="CommissionManager"/>.
-		/// </summary>
-		public CommissionManager()
-		{
-		}
+	}
 
-		private readonly CachedSynchronizedSet<ICommissionRule> _rules = new CachedSynchronizedSet<ICommissionRule>();
+	private readonly CachedSynchronizedSet<ICommissionRule> _rules = new(true);
 
-		/// <summary>
-		/// Список правил вычисления комиссии.
-		/// </summary>
-		public ISynchronizedCollection<ICommissionRule> Rules
-		{
-			get { return _rules; }
-		}
+	/// <inheritdoc />
+	public ISynchronizedCollection<ICommissionRule> Rules => _rules;
 
-		/// <summary>
-		/// Суммарное значение комиссии.
-		/// </summary>
-		public virtual decimal Commission { get; private set; }
+	/// <inheritdoc />
+	public virtual decimal Commission { get; private set; }
 
-		/// <summary>
-		/// Сбросить состояние.
-		/// </summary>
-		public virtual void Reset()
-		{
+	/// <inheritdoc />
+	public virtual void Reset()
+	{
+		using (_syncRoot.EnterScope())
 			Commission = 0;
-			_rules.Cache.ForEach(r => r.Reset());
-		}
 
-		/// <summary>
-		/// Рассчитать комиссию.
-		/// </summary>
-		/// <param name="message">Сообщение, содержащее информацию по заявке или собственной сделке.</param>
-		/// <returns>Комиссия. Если комиссию рассчитать невозможно, то будет возвращено <see langword="null"/>.</returns>
-		public virtual decimal? ProcessExecution(ExecutionMessage message)
+		_rules.Cache.ForEach(r => r.Reset());
+	}
+
+	/// <inheritdoc />
+	public virtual async ValueTask<decimal?> ProcessAsync(Message message, CancellationToken cancellationToken)
+	{
+		switch (message.Type)
 		{
-			if (_rules.Count == 0)
+			case MessageTypes.Reset:
+			{
+				Reset();
 				return null;
+			}
+			case MessageTypes.Execution:
+			{
+				if (_rules.Count == 0)
+					return null;
 
-			var commission = _rules.Cache.Sum(rule => rule.ProcessExecution(message));
+				var execMsg = (ExecutionMessage)message;
 
-			if (commission != null)
-				Commission += commission.Value;
+				decimal? commission = null;
 
-			return commission;
+				foreach (var rule in _rules.Cache)
+				{
+					var ruleCom = await rule.ProcessAsync(execMsg, cancellationToken);
+
+					if (ruleCom != null)
+						commission = (commission ?? 0) + ruleCom.Value;
+				}
+
+				if (commission != null)
+				{
+					using (_syncRoot.EnterScope())
+						Commission += commission.Value;
+				}
+
+				return commission;
+			}
+			default:
+				return null;
 		}
+	}
 
-		/// <summary>
-		/// Загрузить настройки.
-		/// </summary>
-		/// <param name="storage">Хранилище.</param>
-		public void Load(SettingsStorage storage)
-		{
-			Rules.AddRange(storage.GetValue<SettingsStorage[]>("Rules").Select(s => s.LoadEntire<ICommissionRule>()));
-		}
+	/// <summary>
+	/// Load settings.
+	/// </summary>
+	/// <param name="storage">Storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		var rules = new List<ICommissionRule>();
 
-		/// <summary>
-		/// Сохранить настройки.
-		/// </summary>
-		/// <param name="storage">Хранилище.</param>
-		public void Save(SettingsStorage storage)
-		{
-			storage.SetValue("Rules", Rules.Select(r => r.SaveEntire(false)).ToArray());
-		}
+		foreach (var s in storage.GetValue<SettingsStorage[]>(nameof(Rules)))
+			rules.Add(await s.LoadEntireAsync<ICommissionRule>(cancellationToken));
 
-		string ICommissionRule.Title
-		{
-			get { throw new NotSupportedException(); }
-		}
+		Rules.Clear();
+		Rules.AddRange(rules);
+	}
 
-		Unit ICommissionRule.Value
-		{
-			get { throw new NotSupportedException(); }
-		}
+	/// <summary>
+	/// Save settings.
+	/// </summary>
+	/// <param name="storage">Storage.</param>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="Task"/></returns>
+	public async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		var rules = new List<SettingsStorage>();
+
+		foreach (var rule in Rules)
+			rules.Add(await rule.SaveEntireAsync(false, cancellationToken));
+
+		storage.SetValue(nameof(Rules), rules.ToArray());
+	}
+
+	/// <inheritdoc />
+	public async ValueTask<ICommissionManager> CloneAsync(CancellationToken cancellationToken)
+	{
+		var clone = new CommissionManager();
+		await clone.LoadAsync(await this.SaveAsync(cancellationToken), cancellationToken);
+		return clone;
 	}
 }

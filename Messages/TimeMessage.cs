@@ -1,72 +1,61 @@
-﻿namespace StockSharp.Messages
-{
-	using System;
-	using System.Runtime.Serialization;
+namespace StockSharp.Messages;
 
-	using Ecng.Common;
+/// <summary>
+/// The message contains information about the current time.
+/// </summary>
+[DataContract]
+[Serializable]
+public class TimeMessage : Message, ITransactionIdMessage, IServerTimeMessage
+{
+	/// <summary>
+	/// Initializes a new instance of the <see cref="TimeMessage"/>.
+	/// </summary>
+	public TimeMessage()
+		: base(MessageTypes.Time)
+	{
+	}
 
 	/// <summary>
-	/// Сообщение, содержащее данные о текущем времени.
+	/// Initializes a new instance of the <see cref="TimeMessage"/>.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public sealed class TimeMessage : Message
+	/// <param name="type">Message type.</param>
+	protected TimeMessage(MessageTypes type)
+		: base(type)
 	{
-		/// <summary>
-		/// Создать <see cref="TimeMessage"/>.
-		/// </summary>
-		public TimeMessage()
-			: base(MessageTypes.Time)
+	}
+
+	/// <inheritdoc />
+	[DataMember]
+	public long TransactionId { get; set; }
+
+	/// <summary>
+	/// ID of the original message <see cref="TransactionId"/> for which this message is a response.
+	/// </summary>
+	[DataMember]
+	public string OriginalTransactionId { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public DateTime ServerTime { get; set; }
+
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		return base.ToString() + $",ID={TransactionId},Response={OriginalTransactionId}";
+	}
+
+	/// <summary>
+	/// Create a copy of <see cref="TimeMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone()
+	{
+		return new TimeMessage
 		{
-		}
-
-		/// <summary>
-		/// Идентификатор запроса.
-		/// </summary>
-		[DataMember]
-		public string TransactionId { get; set; }
-
-		/// <summary>
-		/// Идентификатор первоначального сообщения <see cref="TimeMessage.TransactionId"/>,
-		/// для которого данное сообщение является ответом.
-		/// </summary>
-		[DataMember]
-		public string OriginalTransactionId { get; set; }
-
-		///// <summary>
-		///// Временной сдвиг от текущего времени. Используется в случае, если сервер брокера самостоятельно
-		///// указывает сдвиг во времени.
-		///// </summary>
-		//public TimeSpan? Shift { get; set; }
-
-		/// <summary>
-		/// Серверное время.
-		/// </summary>
-		[DataMember]
-		public DateTimeOffset ServerTime { get; set; }
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",ID={0},Response={1}".Put(TransactionId, OriginalTransactionId);
-		}
-
-		/// <summary>
-		/// Создать копию объекта <see cref="TimeMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			return new TimeMessage
-			{
-				TransactionId = TransactionId,
-				OriginalTransactionId = OriginalTransactionId,
-				LocalTime = LocalTime,
-				ServerTime = ServerTime,
-			};
-		}
+			TransactionId = TransactionId,
+			OriginalTransactionId = OriginalTransactionId,
+			LocalTime = LocalTime,
+			ServerTime = ServerTime,
+		};
 	}
 }

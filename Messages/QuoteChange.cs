@@ -1,138 +1,198 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// Change actions.
+/// </summary>
+[DataContract]
+[Serializable]
+public enum QuoteChangeActions : byte
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Runtime.Serialization;
-	using System.Xml.Serialization;
-
-	using Ecng.Common;
-	using Ecng.Serialization;
-
-	using StockSharp.Localization;
+	/// <summary>
+	/// New quote for <see cref="QuoteChange.StartPosition"/>.
+	/// </summary>
+	[EnumMember]
+	New,
 
 	/// <summary>
-	/// Котировка стакана, представляющая бид или оффер.
+	/// Update quote for <see cref="QuoteChange.StartPosition"/>.
 	/// </summary>
-	[System.Runtime.Serialization.DataContract]
-	[Serializable]
-	[DisplayNameLoc(LocalizedStrings.Str273Key)]
-	[DescriptionLoc(LocalizedStrings.Str274Key)]
-	public class QuoteChange : Equatable<QuoteChange>, IExtendableEntity
+	[EnumMember]
+	Update,
+
+	/// <summary>
+	/// Delete quotes from <see cref="QuoteChange.StartPosition"/> till <see cref="QuoteChange.EndPosition"/>.
+	/// </summary>
+	[EnumMember]
+	Delete,
+}
+
+/// <summary>
+/// Quote conditions.
+/// </summary>
+[DataContract]
+[Serializable]
+public enum QuoteConditions : byte
+{
+	/// <summary>
+	/// Active.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.ActiveKey)]
+	Active,
+
+	/// <summary>
+	/// Indicative.
+	/// </summary>
+	[EnumMember]
+	[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.IndicativeKey)]
+	Indicative,
+}
+
+/// <summary>
+/// Market depth quote representing bid or ask.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="QuoteChange"/>.
+/// </remarks>
+/// <param name="price">Quote price.</param>
+/// <param name="volume">Quote volume.</param>
+/// <param name="ordersCount">Orders count.</param>
+/// <param name="condition">Quote condition.</param>
+[DataContract]
+[Serializable]
+public struct QuoteChange(decimal price, decimal volume, int? ordersCount = null, QuoteConditions condition = default)
+{
+
+	/// <summary>
+	/// Quote price.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.PriceKey,
+		Description = LocalizedStrings.QuotePriceKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public decimal Price { get; set; } = price;
+
+	/// <summary>
+	/// Quote volume.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.VolumeKey,
+		Description = LocalizedStrings.QuoteVolumeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public decimal Volume { get; set; } = volume;
+
+	/// <summary>
+	/// Electronic board code.
+	/// </summary>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.BoardKey,
+		Description = LocalizedStrings.BoardCodeKey,
+		GroupName = LocalizedStrings.GeneralKey)]
+	public string BoardCode { get; set; } = null;
+
+	/// <summary>
+	/// Orders count.
+	/// </summary>
+	[DataMember]
+	public int? OrdersCount { get; set; } = ordersCount;
+
+	/// <summary>
+	/// Start position, related for <see cref="Action"/>.
+	/// </summary>
+	[DataMember]
+	public int? StartPosition { get; set; } = null;
+
+	/// <summary>
+	/// End position, related for <see cref="Action"/>.
+	/// </summary>
+	[DataMember]
+	public int? EndPosition { get; set; } = null;
+
+	/// <summary>
+	/// Change action.
+	/// </summary>
+	[DataMember]
+	public QuoteChangeActions? Action { get; set; } = null;
+
+	/// <summary>
+	/// Quote condition.
+	/// </summary>
+	[DataMember]
+	public QuoteConditions Condition { get; set; } = condition;
+
+	private QuoteChange[] _innerQuotes = null;
+
+	/// <summary>
+	/// Collection of enclosed quotes, which are combined into a single quote.
+	/// </summary>
+	public QuoteChange[] InnerQuotes
 	{
-		/// <summary>
-		/// Создать <see cref="QuoteChange"/>.
-		/// </summary>
-		public QuoteChange()
+		readonly get => _innerQuotes;
+		set
 		{
-		}
+			var wasNonNull = _innerQuotes != null;
 
-		/// <summary>
-		/// Создать <see cref="QuoteChange"/>.
-		/// </summary>
-		/// <param name="side">Направление (покупка или продажа).</param>
-		/// <param name="price">Цена котировки.</param>
-		/// <param name="volume">Объем котировки.</param>
-		public QuoteChange(Sides side, decimal price, decimal volume)
-		{
-			Side = side;
-			Price = price;
-			Volume = volume;
-		}
+			_innerQuotes = value;
 
-		/// <summary>
-		/// Цена котировки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.PriceKey)]
-		[DescriptionLoc(LocalizedStrings.Str275Key)]
-		[MainCategory]
-		public decimal Price { get; set; }
+			if (_innerQuotes is null)
+			{
+				if (wasNonNull)
+				{
+					Volume = default;
+					OrdersCount = default;
+				}
+			}
+			else
+			{
+				var volume = 0m;
+				var ordersCount = 0;
 
-		/// <summary>
-		/// Объем котировки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.VolumeKey)]
-		[DescriptionLoc(LocalizedStrings.Str276Key)]
-		[MainCategory]
-		public decimal Volume { get; set; }
+				foreach (var item in value)
+				{
+					volume += item.Volume;
 
-		/// <summary>
-		/// Направление (покупка или продажа).
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.Str128Key)]
-		[DescriptionLoc(LocalizedStrings.Str277Key)]
-		[MainCategory]
-		public Sides Side { get; set; }
+					if (item.OrdersCount != null)
+						ordersCount += item.OrdersCount.Value;
+				}
 
-		/// <summary>
-		/// Код электронной площадки.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.BoardKey)]
-		[DescriptionLoc(LocalizedStrings.BoardCodeKey)]
-		[MainCategory]
-		public string BoardCode { get; set; }
-
-		[field: NonSerialized]
-		private IDictionary<object, object> _extensionInfo;
-
-		/// <summary>
-		/// Расширенная информация по котировке.
-		/// </summary>
-		/// <remarks>
-		/// Необходима в случае хранения в программе дополнительной информации, ассоциированной с котировкой.
-		/// Например, количество собственных контрактов в стакане, сумму лучшей покупки-продажи.
-		/// </remarks>
-		[Ignore]
-		[XmlIgnore]
-		[DisplayNameLoc(LocalizedStrings.ExtendedInfoKey)]
-		[DescriptionLoc(LocalizedStrings.Str427Key)]
-		[MainCategory]
-		public IDictionary<object, object> ExtensionInfo
-		{
-			get { return _extensionInfo; }
-			set { _extensionInfo = value; }
-		}
-
-		/// <summary>
-		/// Создать копию объекта <see cref="QuoteChange" />.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override QuoteChange Clone()
-		{
-			var clone = new QuoteChange(Side, Price, Volume);
-			this.CopyExtensionInfo(clone);
-			return clone;
-		}
-
-		/// <summary>
-		/// Сравнить две котировки на эквивалентность.
-		/// </summary>
-		/// <param name="other">Другая котировки, с которой необходимо сравнивать.</param>
-		/// <returns><see langword="true"/>, если другая котировки равна текущей, иначе, <see langword="false"/>.</returns>
-		protected override bool OnEquals(QuoteChange other)
-		{
-			return Price == other.Price && Side == other.Side;
-		}
-
-		/// <summary>
-		/// Рассчитать хеш-код объекта <see cref="QuoteChange" />.
-		/// </summary>
-		/// <returns>Хеш-код.</returns>
-		public override int GetHashCode()
-		{
-			return Price.GetHashCode() ^ Side.GetHashCode();
-		}
-
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return "{0} {1} {2}".Put(Side == Sides.Buy ? LocalizedStrings.Bid : LocalizedStrings.Ask, Price, Volume);
+				Volume = volume;
+				OrdersCount = ordersCount.DefaultAsNull();
+			}
 		}
 	}
+
+	/// <summary>
+	/// Create a copy that shares nothing with this quote.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	/// <remarks>
+	/// The struct itself is copied by assignment, but <see cref="InnerQuotes"/> is an array and two
+	/// copies would otherwise write into one set of quotes.
+	/// </remarks>
+	public readonly QuoteChange Clone()
+	{
+		var clone = this;
+
+		if (_innerQuotes is not null)
+		{
+			var inner = new QuoteChange[_innerQuotes.Length];
+
+			for (var i = 0; i < inner.Length; i++)
+				inner[i] = _innerQuotes[i].Clone();
+
+			// Assigned to the field so the already copied Volume and OrdersCount are kept as they are.
+			clone._innerQuotes = inner;
+		}
+
+		return clone;
+	}
+
+	/// <inheritdoc />
+	public override readonly string ToString() => $"{Price} {Volume}";
 }

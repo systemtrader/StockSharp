@@ -1,189 +1,185 @@
-﻿namespace StockSharp.Algo.Positions
+namespace StockSharp.Algo.Positions;
+
+/// <summary>
+/// The position calculation manager.
+/// </summary>
+/// <remarks>
+/// Initializes a new instance of the <see cref="PositionManager"/>.
+/// </remarks>
+/// <param name="byOrders">To calculate the position on realized volume for orders (<see langword="true" />) or by trades (<see langword="false" />).</param>
+/// <param name="state">State storage.</param>
+public class PositionManager(bool byOrders, IPositionManagerState state) : BaseLogReceiver, IPositionManager
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Linq;
-	using Ecng.Common;
-	using Ecng.Collections;
+	private readonly IPositionManagerState _state = state ?? throw new ArgumentNullException(nameof(state));
 
-	using MoreLinq;
+    /// <summary>
+    /// To calculate the position on realized volume for orders (<see langword="true" />) or by trades (<see langword="false" />).
+    /// </summary>
+    public bool ByOrders { get; } = byOrders;
 
-	using StockSharp.BusinessEntities;
-
-	/// <summary>
-	/// Менеджер расчета позиции.
-	/// </summary>
-	public class PositionManager : IPositionManager
+    /// <inheritdoc />
+    public virtual PositionChangeMessage ProcessMessage(Message message)
 	{
-		private readonly object _syncRoot = new object();
-		private readonly Dictionary<Order, decimal> _byOrderPositions = new Dictionary<Order, decimal>();
-
-		/// <summary>
-		/// Создать <see cref="PositionManager"/>.
-		/// </summary>
-		/// <param name="byOrders">Расчитывать позицию по реализованному объему у заявок (true) или по сделкам (false).</param>
-		public PositionManager(bool byOrders)
+		decimal EnsureGetOrderBalance<TMessage>(TMessage msg, Sides side, decimal volume, decimal balance)
+			where TMessage : Message, ITransactionIdMessage, ISecurityIdMessage, IPortfolioNameMessage
 		{
-			ByOrders = byOrders;
+			LogDebug("{0} bal_new {1}/{2}.", msg.TransactionId, balance, volume);
+			return _state.AddOrGetOrder(msg.TransactionId, msg.SecurityId, msg.PortfolioName, side, volume, balance);
 		}
 
-		/// <summary>
-		/// Расчитывать позицию по реализованному объему у заявок (true) или по сделкам (false).
-		/// </summary>
-		public bool ByOrders { get; private set; }
+		void ProcessRegOrder(OrderRegisterMessage regMsg)
+			=> EnsureGetOrderBalance(regMsg, regMsg.Side, regMsg.Volume, regMsg.Volume);
 
-		/// <summary>
-		/// Суммарное значение позиции.
-		/// </summary>
-		public virtual decimal Position { get; set; }
-
-		private readonly CachedSynchronizedDictionary<Tuple<Security, Portfolio>, Position> _positions = new CachedSynchronizedDictionary<Tuple<Security, Portfolio>, Position>();
-
-		/// <summary>
-		/// Позиции, сгруппированные по инструментам и портфелям.
-		/// </summary>
-		public IEnumerable<Position> Positions
+		PositionChangeMessage UpdatePositions(SecurityId secId, string portfolioName, decimal diff, DateTime time)
 		{
-			get { return _positions.CachedValues; }
-			set
+			if (portfolioName.IsEmpty())
 			{
-				if (value == null)
-					throw new ArgumentNullException("value");
+				LogWarning("Position change for {0} cannot be attributed to a portfolio.", secId);
+				return null;
+			}
 
-				lock (_syncRoot)
-					Position = value.Sum(p => p.CurrentValue);
+			var newPosition = _state.UpdatePosition(secId, portfolioName, diff);
 
-				Dictionary<Tuple<Security, Portfolio>, decimal> positions;
+			return new PositionChangeMessage
+			{
+				SecurityId = secId,
+				PortfolioName = portfolioName,
+				ServerTime = time,
+				BuildFrom = DataType.Transactions,
+			}.Add(PositionChangeTypes.CurrentValue, newPosition);
+		}
 
-				lock (_positions.SyncRoot)
+		switch (message.Type)
+		{
+			case MessageTypes.Reset:
+			{
+				_state.Clear();
+				break;
+			}
+
+			case MessageTypes.OrderRegister:
+			case MessageTypes.OrderReplace:
+			{
+				ProcessRegOrder((OrderRegisterMessage)message);
+				break;
+			}
+
+			case MessageTypes.Execution:
+			{
+				var execMsg = (ExecutionMessage)message;
+
+				if (execMsg.IsMarketData())
+					break;
+
+				var isOrderInfo = execMsg.HasOrderInfo();
+
+				SecurityId infoSecId = default;
+				string infoPfName = null;
+				Sides infoSide = default;
+				decimal infoBalance = 0;
+				var hasInfo = false;
+
+				if (isOrderInfo)
 				{
-					positions = _positions.ToDictionary(p => p.Key, p => -p.Value.CurrentValue);
-
-					foreach (var position in value)
+					if (execMsg.TransactionId != 0)
 					{
-						var key = Tuple.Create(position.Security, position.Portfolio);
-
-						var pos = positions.TryGetValue2(key);
-
-						if (pos.HasValue)
-							positions[key] = pos.Value + position.CurrentValue;
+						// The order is introduced here, and position state keys it by side. One that
+						// states none cannot be tracked, so its fills fall back to what they name.
+						if (execMsg.Side is Sides orderSide)
+						{
+							infoBalance = EnsureGetOrderBalance(execMsg, orderSide, execMsg.OrderVolume ?? 0, execMsg.Balance ?? 0);
+							infoSecId = execMsg.SecurityId;
+							infoPfName = execMsg.PortfolioName;
+							infoSide = orderSide;
+							hasInfo = true;
+						}
 						else
-							positions[key] = position.CurrentValue;
+							LogWarning("Order {0} states no side.", execMsg.TransactionId);
+					}
+					else
+					{
+						hasInfo = _state.TryGetOrder(execMsg.OriginalTransactionId, out infoSecId, out infoPfName, out infoSide, out infoBalance);
 					}
 				}
-
-				positions.ForEach(p => ChangePosition(p.Key.Item1, p.Key.Item2, p.Value));
-			}
-		}
-
-		/// <summary>
-		/// Событие появления новой позиций в <see cref="IPositionManager.Positions"/>.
-		/// </summary>
-		public event Action<Position> NewPosition;
-
-		/// <summary>
-		/// Событие изменения позиции в <see cref="IPositionManager.Positions"/>.
-		/// </summary>
-		public event Action<Position> PositionChanged;
-
-		/// <summary>
-		/// Рассчитать позицию по заявке.
-		/// </summary>
-		/// <param name="order">Заявка.</param>
-		/// <returns>Позиция по заявке.</returns>
-		public decimal ProcessOrder(Order order)
-		{
-			if (!ByOrders)
-				return 0;
-
-			decimal position;
-
-			lock (_syncRoot)
-			{
-				var newPosition = order.GetPosition();
-
-				decimal oldPosition;
-
-				if (_byOrderPositions.TryGetValue(order, out oldPosition))
+				else if (execMsg.OriginalTransactionId != 0 && execMsg.HasTradeInfo())
 				{
-					if (newPosition != oldPosition)
-						_byOrderPositions[order] = newPosition;
+					hasInfo = _state.TryGetOrder(execMsg.OriginalTransactionId, out infoSecId, out infoPfName, out infoSide, out infoBalance);
+				}
 
-					position = newPosition - oldPosition;
+				var canUpdateOrder = isOrderInfo && hasInfo;
+
+				decimal? balDiff = null;
+
+				if (canUpdateOrder)
+				{
+					var oldBalance = execMsg.TransactionId != 0 ? execMsg.OrderVolume : infoBalance;
+					balDiff = execMsg.Balance is { } newBalance ? oldBalance - newBalance : null;
+					if (balDiff.HasValue && balDiff != 0)
+					{
+						_state.UpdateOrderBalance(execMsg.TransactionId != 0 ? execMsg.TransactionId : execMsg.OriginalTransactionId, execMsg.Balance.Value);
+						LogDebug("{0} bal_upd {1}.", execMsg.TransactionId != 0 ? execMsg.TransactionId : execMsg.OriginalTransactionId, execMsg.Balance.Value);
+					}
+
+					if (execMsg.OrderState?.IsFinal() == true)
+						_state.RemoveOrder(execMsg.TransactionId != 0 ? execMsg.TransactionId : execMsg.OriginalTransactionId);
+				}
+
+				if (ByOrders)
+				{
+					if (!canUpdateOrder)
+						break;
+
+					if (balDiff.HasValue && balDiff != 0)
+					{
+						var posDiff = infoSide == Sides.Buy ? balDiff.Value : -balDiff.Value;
+						return UpdatePositions(infoSecId, infoPfName, posDiff, execMsg.ServerTime);
+					}
 				}
 				else
 				{
-					_byOrderPositions.Add(order, newPosition);
-					position = newPosition;
+					if (!execMsg.HasTradeInfo())
+						break;
+
+					var tradeVol = execMsg.TradeVolume;
+
+					if (tradeVol == null)
+						break;
+
+					if (tradeVol == 0)
+					{
+						LogWarning("Trade {0}/{1} of order {2} has zero volume.", execMsg.TradeId, execMsg.TradeStringId, execMsg.OriginalTransactionId);
+						break;
+					}
+
+					// The order this fill belongs to knows the direction even when the fill does not
+					// state one. Without either the volume cannot be signed, and adding it unsigned
+					// would drift the position by twice the trade.
+					if ((execMsg.Side ?? (hasInfo ? infoSide : null)) is not Sides tradeSide)
+					{
+						LogWarning("Trade {0}/{1} of order {2} states no side.", execMsg.TradeId, execMsg.TradeStringId, execMsg.OriginalTransactionId);
+						break;
+					}
+
+					if (tradeSide == Sides.Sell)
+						tradeVol = -tradeVol;
+
+					var secId = hasInfo ? infoSecId : execMsg.SecurityId;
+					var portfolioName = hasInfo ? infoPfName : execMsg.PortfolioName;
+
+					return UpdatePositions(secId, portfolioName, tradeVol.Value, execMsg.ServerTime);
 				}
-				
-				//TODO:PYH: Если для Done-заявки ProcessOrder придет 2 раза(в Квике) то будет сделка-дубль.
-				//Избежать можно храня где-то oldState заявки и исключая такие варианты.
-				//
-				// mika: пока подключения не доделаны, временно отключил
-				//
-				//if (order.State == OrderStates.Done)
-				//    _byOrderPositions.Remove(order);
-				
-				Position += position;
-			}
-			
-			ChangePosition(order.Security, order.Portfolio, position);
-			return position;
-		}
 
-		/// <summary>
-		/// Обнулить позицию.
-		/// </summary>
-		public virtual void Reset()
-		{
-			_positions.Clear();
-
-			lock (_syncRoot)
-			{
-				_byOrderPositions.Clear();
-				Position = 0;
+				break;
 			}
 		}
 
-		/// <summary>
-		/// Рассчитать позицию по сделке.
-		/// </summary>
-		/// <param name="trade">Сделка.</param>
-		/// <returns>Позиция по сделке.</returns>
-		public virtual decimal ProcessMyTrade(MyTrade trade)
-		{
-			if (ByOrders)
-				return 0;
+		return null;
+	}
 
-			var position = trade.GetPosition();
-
-			lock (_syncRoot)
-				Position += position;
-
-			ChangePosition(trade.Order.Security, trade.Order.Portfolio, position);
-
-			return position;
-		}
-
-		private void ChangePosition(Security security, Portfolio portfolio, decimal diff)
-		{
-			if (security == null)
-				throw new ArgumentNullException("security");
-
-			if (portfolio == null)
-				throw new ArgumentNullException("portfolio");
-
-			bool isNew;
-			var position = _positions.SafeAdd(Tuple.Create(security, portfolio),
-			    key => new Position { Security = key.Item1, Portfolio = key.Item2 }, out isNew);
-
-			position.CurrentValue += diff;
-
-			if (isNew)
-				NewPosition.SafeInvoke(position);
-			else
-				PositionChanged.SafeInvoke(position);
-		}
+	/// <inheritdoc />
+	public ValueTask<IPositionManager> CloneAsync(CancellationToken cancellationToken)
+	{
+		var newState = _state.GetType().CreateInstance<IPositionManagerState>();
+		return new(new PositionManager(ByOrders, newState));
 	}
 }

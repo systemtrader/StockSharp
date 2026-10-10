@@ -1,49 +1,41 @@
-namespace StockSharp.Algo.PnL
+namespace StockSharp.Algo.PnL;
+
+/// <summary>
+/// Information on trade, its closed volume and its profitability.
+/// </summary>
+public class PnLInfo
 {
-	using System;
+	/// <summary>
+	/// Initializes a new instance of the <see cref="PnLInfo"/>.
+	/// </summary>
+	/// <param name="serverTime"><see cref="ServerTime"/>.</param>
+	/// <param name="closedVolume">The volume of position, which was closed by own trade.</param>
+	/// <param name="pnL">The profit, realized by this trade.</param>
+	public PnLInfo(DateTime serverTime, decimal closedVolume, decimal pnL)
+	{
+		if (closedVolume < 0)
+			throw new ArgumentOutOfRangeException(nameof(closedVolume), closedVolume, LocalizedStrings.InvalidValue);
 
-	using StockSharp.Messages;
-
-	using StockSharp.Localization;
+		ServerTime = serverTime;
+		ClosedVolume = closedVolume;
+		PnL = pnL;
+	}
 
 	/// <summary>
-	/// Информация о сделке, закрытый ее объем и ее прибыльность.
+	/// Time.
 	/// </summary>
-	public class PnLInfo
-	{
-		/// <summary>
-		/// Создать <see cref="PnLInfo"/>.
-		/// </summary>
-		/// <param name="trade">Собственная сделка.</param>
-		/// <param name="closedVolume">Объем позиции, который был закрыт собственной сделкой.</param>
-		/// <param name="pnL">Реализованная данной сделкой прибыль.</param>
-		public PnLInfo(ExecutionMessage trade, decimal closedVolume, decimal pnL)
-		{
-			if (trade == null)
-				throw new ArgumentNullException("trade");
+	public DateTime ServerTime { get; }
 
-			if (closedVolume < 0)
-				throw new ArgumentOutOfRangeException("closedVolume", closedVolume, LocalizedStrings.Str946);
+	/// <summary>
+	/// The volume of position, which was closed by own trade.
+	/// </summary>
+	/// <remarks>
+	/// For example, in strategy position was 2. The trade for -5 contracts. Closed position 2.
+	/// </remarks>
+	public decimal ClosedVolume { get; }
 
-			Trade = trade;
-			ClosedVolume = closedVolume;
-			PnL = pnL;
-		}
-
-		/// <summary>
-		/// Собственная сделка.
-		/// </summary>
-		public ExecutionMessage Trade { get; private set; }
-
-		/// <summary>
-		/// Объем позиции, который был закрыт собственной сделкой.
-		/// </summary>
-		/// <remarks>Например, в стратегии позиция была 2, Сделка на -5 контрактов. Закрытая позиция 2.</remarks>
-		public decimal ClosedVolume { get; private set; }
-
-		/// <summary>
-		/// Реализованная данной сделкой прибыль.
-		/// </summary>
-		public decimal PnL { get; private set; }
-	}
+	/// <summary>
+	/// The profit, realized by this trade.
+	/// </summary>
+	public decimal PnL { get; }
 }

@@ -1,493 +1,1084 @@
-namespace StockSharp.Algo
+namespace StockSharp.Algo;
+
+using StockSharp.Algo.Basket;
+using StockSharp.Algo.Candles;
+using StockSharp.Algo.Candles.Compression;
+using StockSharp.Algo.Commissions;
+using StockSharp.Algo.Latency;
+using StockSharp.Algo.PnL;
+using StockSharp.Algo.Slippage;
+using StockSharp.Algo.Testing;
+using StockSharp.Algo.Positions;
+
+/// <summary>
+/// The interface describing the list of adapters to trading systems with which the aggregator operates.
+/// </summary>
+public interface IInnerAdapterList : ISynchronizedCollection<IMessageAdapter>, INotifyList<IMessageAdapter>
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Linq;
-
-	using Ecng.Collections;
-	using Ecng.Common;
-
-	using MoreLinq;
-
-	using StockSharp.Logging;
-	using StockSharp.Messages;
-	using StockSharp.Localization;
+	/// <summary>
+	/// Internal adapters sorted by operation speed.
+	/// </summary>
+	IEnumerable<IMessageAdapter> SortedAdapters { get; }
 
 	/// <summary>
-	/// Интерфейс, описывающий список адаптеров к торговым системам, с которыми оперирует агрегатор.
+	/// The indexer through which speed priorities (the smaller the value, then adapter is faster) for internal adapters are set.
 	/// </summary>
-	public interface IInnerAdapterList : ISynchronizedCollection<IMessageAdapter>, INotifyList<IMessageAdapter>
-	{
-		/// <summary>
-		/// Внутренние адаптеры, отсортированные по скорости работы.
-		/// </summary>
-		IEnumerable<IMessageAdapter> SortedAdapters { get; }
+	/// <param name="adapter">The internal adapter.</param>
+	/// <returns>The adapter priority. If the -1 value is set the adapter is considered to be off.</returns>
+	int this[IMessageAdapter adapter] { get; set; }
+}
 
-		/// <summary>
-		/// Индексатор, через который задаются приоритеты скорости (чем меньше значение, те быстрее адаптер) на внутренние адаптеры.
-		/// </summary>
-		/// <param name="adapter">Внутренний адаптер.</param>
-		/// <returns>Приоритет адаптера. Если задается значение -1, то адаптер считается выключенным.</returns>
-		int this[IMessageAdapter adapter] { get; set; }
+/// <summary>
+/// Adapter-aggregator that allows simultaneously to operate multiple adapters connected to different trading systems.
+/// </summary>
+[Display(ResourceType = typeof(LocalizedStrings), Name = LocalizedStrings.BasketKey)]
+public class BasketMessageAdapter : BaseLogReceiver, IMessageAdapterWrapper
+{
+	private sealed class InnerAdapterList(BasketMessageAdapter parent) : CachedSynchronizedList<IMessageAdapter>, IInnerAdapterList
+	{
+		private readonly BasketMessageAdapter _parent = parent ?? throw new ArgumentNullException(nameof(parent));
+		private readonly Dictionary<IMessageAdapter, int> _enables = [];
+
+		public IEnumerable<IMessageAdapter> SortedAdapters
+		{
+			get
+			{
+				using var _ = EnterScope();
+
+				return this
+					.Select(a => (Adapter: a, Priority: _enables.TryGetValue(a, out var p) ? p : -1))
+					.Where(x => x.Priority != -1)
+					.OrderBy(x => x.Priority)
+					.Select(x => x.Adapter);
+			}
+		}
+
+		protected override bool OnAdding(IMessageAdapter item)
+		{
+			_enables.Add(item, 0);
+			return base.OnAdding(item);
+		}
+
+		protected override bool OnInserting(int index, IMessageAdapter item)
+		{
+			_enables.Add(item, 0);
+			return base.OnInserting(index, item);
+		}
+
+		protected override bool OnRemoving(IMessageAdapter item)
+		{
+			_enables.Remove(item);
+
+			if (item.Parent == _parent)
+				item.Parent = null;
+
+			using (_parent._connectedResponseLock.Lock())
+				_parent._routingManager?.OnAdapterRemoved(item);
+
+			return base.OnRemoving(item);
+		}
+
+		protected override bool OnClearing()
+		{
+			_enables.Clear();
+
+			_parent._adapterWrappers.CachedKeys.ForEach(a =>
+			{
+				if (a.Parent == _parent)
+					a.Parent = null;
+			});
+			_parent._adapterWrappers.Clear();
+
+			using (_parent._connectedResponseLock.Lock())
+				_parent._routingManager?.OnAdaptersCleared();
+
+			return base.OnClearing();
+		}
+
+		public int this[IMessageAdapter adapter]
+		{
+			get
+			{
+				using (EnterScope())
+					return _enables.TryGetValue2(adapter) ?? -1;
+			}
+			set
+			{
+				if (value < -1)
+					throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
+
+				using (EnterScope())
+				{
+					if (!Contains(adapter))
+						Add(adapter);
+
+					_enables[adapter] = value;
+				}
+			}
+		}
+	}
+
+	private readonly CachedSynchronizedDictionary<IMessageAdapter, IMessageAdapter> _adapterWrappers = [];
+	private readonly AsyncLock _connectedResponseLock = new();
+
+	private readonly IAdapterWrapperPipelineBuilder _pipelineBuilder;
+	private readonly IBasketRoutingManager _routingManager;
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="BasketMessageAdapter"/>.
+	/// </summary>
+	public BasketMessageAdapter(IdGenerator transactionIdGenerator,
+		CandleBuilderProvider candleBuilderProvider,
+		ISecurityMessageAdapterProvider securityAdapterProvider,
+		IPortfolioMessageAdapterProvider portfolioAdapterProvider,
+		IStorageBuffer buffer)
+		: this(transactionIdGenerator, candleBuilderProvider, securityAdapterProvider, portfolioAdapterProvider, buffer, null, null)
+	{
 	}
 
 	/// <summary>
-	/// Адаптер-агрегатор, позволяющий оперировать одновременно несколькими адаптерами, подключенных к разным торговым системам.
+	/// Initializes a new instance of the <see cref="BasketMessageAdapter"/> with injectable dependencies.
 	/// </summary>
-	public class BasketMessageAdapter : MessageAdapter
+	public BasketMessageAdapter(IdGenerator transactionIdGenerator,
+		CandleBuilderProvider candleBuilderProvider,
+		ISecurityMessageAdapterProvider securityAdapterProvider,
+		IPortfolioMessageAdapterProvider portfolioAdapterProvider,
+		IStorageBuffer buffer,
+		IAdapterWrapperPipelineBuilder pipelineBuilder,
+		IBasketRoutingManager routingManager)
 	{
-		private sealed class InnerAdapterList : CachedSynchronizedList<IMessageAdapter>, IInnerAdapterList
-		{
-			private readonly Dictionary<IMessageAdapter, int> _enables = new Dictionary<IMessageAdapter, int>();
+		_innerAdapters = new InnerAdapterList(this);
+		SecurityAdapterProvider = securityAdapterProvider ?? throw new ArgumentNullException(nameof(securityAdapterProvider));
+		PortfolioAdapterProvider = portfolioAdapterProvider ?? throw new ArgumentNullException(nameof(portfolioAdapterProvider));
+		Buffer = buffer;
+		StorageProcessor = new StorageProcessor(StorageSettings, candleBuilderProvider);
 
-			public IEnumerable<IMessageAdapter> SortedAdapters
+		LatencyManager = new LatencyManager(new LatencyManagerState());
+		CommissionManager = new CommissionManager();
+		SlippageManager = new SlippageManager(new SlippageManagerState());
+
+		_pipelineBuilder = pipelineBuilder ?? new AdapterWrapperPipelineBuilder();
+		_routingManager = routingManager ?? Basket.BasketRoutingManager.CreateDefault(
+			GetUnderlyingAdapter, StorageProcessor.CandleBuilderProvider,
+			() => Level1Extend, transactionIdGenerator, this);
+
+		TransactionIdGenerator = transactionIdGenerator ?? throw new ArgumentNullException(nameof(transactionIdGenerator));
+
+		SecurityAdapterProvider.Changed += SecurityAdapterProviderOnChanged;
+		PortfolioAdapterProvider.Changed += PortfolioAdapterProviderOnChanged;
+	}
+
+	/// <summary>
+	/// Gets the routing manager.
+	/// </summary>
+	public IBasketRoutingManager RoutingManager => _routingManager;
+
+	/// <summary>
+	/// The portfolio based message adapter's provider.
+	/// </summary>
+	public IPortfolioMessageAdapterProvider PortfolioAdapterProvider { get; }
+
+	/// <summary>
+	/// Storage buffer.
+	/// </summary>
+	public IStorageBuffer Buffer { get; }
+
+	/// <summary>
+	/// The security based message adapter's provider.
+	/// </summary>
+	public ISecurityMessageAdapterProvider SecurityAdapterProvider { get; }
+
+	private readonly InnerAdapterList _innerAdapters;
+
+	/// <summary>
+	/// Adapters with which the aggregator operates.
+	/// </summary>
+	public IInnerAdapterList InnerAdapters => _innerAdapters;
+
+	private INativeIdStorageProvider _nativeIdStorage = new InMemoryNativeIdStorageProvider();
+
+	/// <summary>
+	/// Security native identifier storage provider.
+	/// </summary>
+	public INativeIdStorageProvider NativeIdStorage
+	{
+		get => _nativeIdStorage;
+		set => _nativeIdStorage = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	private ISecurityMappingStorageProvider _mappingProvider;
+
+	/// <summary>
+	/// Security identifier mappings storage provider.
+	/// </summary>
+	public ISecurityMappingStorageProvider MappingProvider
+	{
+		get => _mappingProvider;
+		set => _mappingProvider = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	/// <summary>
+	/// Orders registration delay calculation manager.
+	/// </summary>
+	public ILatencyManager LatencyManager { get; set; }
+
+	/// <summary>
+	/// The profit-loss manager.
+	/// </summary>
+	public IPnLManager PnLManager { get; set; }
+
+	/// <summary>
+	/// The commission calculating manager.
+	/// </summary>
+	public ICommissionManager CommissionManager { get; set; }
+
+	/// <summary>
+	/// Slippage manager.
+	/// </summary>
+	public ISlippageManager SlippageManager { get; set; }
+
+	/// <summary>
+	/// Storage settings.
+	/// </summary>
+	public StorageCoreSettings StorageSettings { get; } = new();
+
+	/// <inheritdoc />
+	public bool GenerateOrderBookFromLevel1 { get; set; } = true;
+
+	/// <inheritdoc />
+	public IdGenerator TransactionIdGenerator
+	{
+		get => _routingManager.TransactionIdGenerator;
+		set => _routingManager.TransactionIdGenerator = value ?? throw new ArgumentNullException(nameof(value));
+	}
+
+	IEnumerable<MessageTypeInfo> IMessageAdapter.PossibleSupportedMessages => GetSortedAdapters().SelectMany(a => a.PossibleSupportedMessages).DistinctBy(i => i.Type);
+
+	IEnumerable<MessageTypes> IMessageAdapter.SupportedInMessages
+	{
+		get => GetSortedAdapters().SelectMany(a => a.SupportedInMessages).Distinct();
+		set { }
+	}
+
+	IEnumerable<MessageTypes> IMessageAdapter.NotSupportedResultMessages => GetSortedAdapters().SelectMany(a => a.NotSupportedResultMessages).Distinct();
+
+    IAsyncEnumerable<DataType> IMessageAdapter.GetSupportedMarketDataTypesAsync(SecurityId securityId, DateTime? from, DateTime? to)
+    {
+		return Impl().Distinct();
+
+		async IAsyncEnumerable<DataType> Impl([EnumeratorCancellation]CancellationToken cancellationToken = default)
+		{
+			foreach (var adapter in GetSortedAdapters())
 			{
-				get { return Cache.Where(t => this[t] != -1).OrderBy(t => this[t]); }
+				await foreach (var date in adapter.GetSupportedMarketDataTypesAsync(securityId, from, to).WithEnforcedCancellation(cancellationToken))
+					yield return date;
+			}
+		}
+    }
+
+    IEnumerable<Level1Fields> IMessageAdapter.CandlesBuildFrom => GetSortedAdapters().SelectMany(a => a.CandlesBuildFrom).Distinct();
+
+	bool IMessageAdapter.CheckTimeFrameByRequest => false;
+
+	ReConnectionSettings IMessageAdapter.ReConnectionSettings { get; } = new ReConnectionSettings();
+
+	TimeSpan IMessageAdapter.HeartbeatInterval { get; set; }
+
+	string IMessageAdapter.StorageName => nameof(BasketMessageAdapter).Remove(nameof(MessageAdapter));
+
+	bool IMessageAdapter.IsNativeIdentifiersPersistable => false;
+
+	bool IMessageAdapter.IsNativeIdentifiers => false;
+
+	bool IMessageAdapter.IsFullCandlesOnly => GetSortedAdapters().All(a => a.IsFullCandlesOnly);
+
+	bool IMessageAdapter.IsSupportSubscriptions => true;
+
+	bool IMessageAdapter.IsSupportCandlesUpdates(MarketDataMessage subscription) => GetSortedAdapters().Any(a => a.IsSupportCandlesUpdates(subscription));
+
+	bool IMessageAdapter.IsSupportCandlesPriceLevels(MarketDataMessage subscription) => GetSortedAdapters().Any(a => a.IsSupportCandlesPriceLevels(subscription));
+
+	IEnumerable<int> IMessageAdapter.SupportedOrderBookDepths => GetSortedAdapters().SelectMany(a => a.SupportedOrderBookDepths).Distinct().OrderBy();
+
+	bool IMessageAdapter.IsSupportOrderBookIncrements => GetSortedAdapters().Any(a => a.IsSupportOrderBookIncrements);
+
+	bool IMessageAdapter.IsSupportExecutionsPnL => GetSortedAdapters().Any(a => a.IsSupportExecutionsPnL);
+
+	MessageAdapterCategories IMessageAdapter.Categories => GetSortedAdapters().Select(a => a.Categories).JoinMask();
+
+	Type IMessageAdapter.OrderConditionType => null;
+
+	bool IMessageAdapter.HeartbeatBeforeConnect => false;
+
+	Uri IMessageAdapter.Icon => GetType().TryGetIconUrl();
+
+	bool IMessageAdapter.IsAutoReplyOnTransactonalUnsubscription => GetSortedAdapters().All(a => a.IsAutoReplyOnTransactonalUnsubscription);
+
+	IOrderLogMarketDepthBuilder IMessageAdapter.CreateOrderLogMarketDepthBuilder(SecurityId securityId)
+		=> new OrderLogMarketDepthBuilder(securityId);
+
+	bool IMessageAdapter.IsAllDownloadingSupported(DataType dataType) => GetSortedAdapters().Any(a => a.IsAllDownloadingSupported(dataType));
+
+	bool IMessageAdapter.IsSecurityRequired(DataType dataType) => GetSortedAdapters().Any(a => a.IsSecurityRequired(dataType));
+
+	bool IMessageAdapter.EnqueueSubscriptions
+	{
+		get => GetSortedAdapters().Any(a => a.EnqueueSubscriptions);
+		set { }
+	}
+
+	/// <inheritdoc />
+	public bool IsSecurityNewsOnly => GetSortedAdapters().All(a => a.IsSecurityNewsOnly);
+
+	/// <summary>
+	/// Restore subscription on reconnect.
+	/// </summary>
+	public bool IsRestoreSubscriptionOnErrorReconnect { get; set; } = true;
+
+	/// <summary>
+	/// Suppress reconnecting errors.
+	/// </summary>
+	public bool SuppressReconnectingErrors { get; set; } = true;
+
+	/// <summary>
+	/// Use <see cref="CandleBuilderMessageAdapter"/>.
+	/// </summary>
+	public bool SupportCandlesCompression { get; set; } = true;
+
+	/// <summary>
+	/// Use <see cref="Level1ExtendBuilderAdapter"/>.
+	/// </summary>
+	public bool Level1Extend { get; set; }
+
+	/// <summary>
+	/// <see cref="CandleBuilderMessageAdapter.SendFinishedCandlesImmediatelly"/>.
+	/// </summary>
+	public bool SendFinishedCandlesImmediatelly { get; set; }
+
+	/// <summary>
+	/// Use <see cref="OrderLogMessageAdapter"/>.
+	/// </summary>
+	public bool SupportBuildingFromOrderLog { get; set; } = true;
+
+	/// <summary>
+	/// Use <see cref="StorageMessageAdapter"/>.
+	/// </summary>
+	public bool SupportStorage { get; set; } = true;
+
+	/// <summary>
+	/// Use <see cref="OrderBookTruncateMessageAdapter"/>.
+	/// </summary>
+	public bool SupportOrderBookTruncate { get; set; } = true;
+
+	/// <summary>
+	/// When <see langword="true"/>, the <see cref="OrderBookIncrementMessageAdapter"/> is never added
+	/// to the pipeline — even when the inner adapter reports <see cref="IMessageAdapter.IsSupportOrderBookIncrements"/>.
+	/// </summary>
+	public bool SuppressOrderBookIncrements { get; set; }
+
+	/// <summary>
+	/// Use <see cref="LookupTrackingMessageAdapter"/>.
+	/// </summary>
+	public bool SupportLookupTracking { get; set; } = true;
+
+	/// <summary>
+	/// Use <see cref="OfflineMessageAdapter"/>.
+	/// </summary>
+	public bool SupportOffline { get; set; }
+
+	/// <summary>
+	/// Do not add extra adapters.
+	/// </summary>
+	public bool IgnoreExtraAdapters { get; set; }
+
+	/// <summary>
+	/// Use <see cref="SubscriptionSecurityAllMessageAdapter"/>.
+	/// </summary>
+	public bool SupportSecurityAll { get; set; } = true;
+
+	/// <summary>
+	/// Use <see cref="TransactionOrderingMessageAdapter"/>.
+	/// </summary>
+	public bool IsSupportTransactionLog { get; set; } = true;
+
+	/// <summary>
+	/// To call the <see cref="ConnectMessage"/> event when the first adapter connects to <see cref="InnerAdapters"/>.
+	/// </summary>
+	public bool ConnectDisconnectEventOnFirstAdapter
+	{
+		get => _routingManager.ConnectDisconnectEventOnFirstAdapter;
+		set => _routingManager.ConnectDisconnectEventOnFirstAdapter = value;
+	}
+
+	/// <summary>
+	/// Storage processor.
+	/// </summary>
+	public IStorageProcessor StorageProcessor { get; }
+
+	/// <inheritdoc />
+	public bool UseInChannel { get; set; } = true;
+
+	/// <inheritdoc />
+	public bool UseOutChannel { get; set; } = true;
+
+	/// <summary>
+	/// <see cref="IFillGapsBehaviour"/>
+	/// </summary>
+	public IFillGapsBehaviour FillGapsBehaviour { get; set; }
+
+	TimeSpan IMessageAdapter.IterationInterval => default;
+	TimeSpan? IMessageAdapter.LookupTimeout => default;
+	string IMessageAdapter.FeatureName => string.Empty;
+	bool? IMessageAdapter.IsPositionsEmulationRequired => null;
+	bool IMessageAdapter.IsReplaceCommandEditCurrent => false;
+	string[] IMessageAdapter.AssociatedBoards => [];
+	bool IMessageAdapter.ExtraSetup => false;
+
+	/// <summary>
+	/// To get adapters <see cref="IInnerAdapterList.SortedAdapters"/> sorted by the specified priority.
+	/// </summary>
+	protected IEnumerable<IMessageAdapter> GetSortedAdapters() => _innerAdapters.SortedAdapters;
+
+	private IMessageAdapter[] Wrappers => _adapterWrappers.CachedValues;
+
+	TimeSpan IMessageAdapter.DisconnectTimeout => default;
+	int IMessageAdapter.MaxParallelMessages { get => default; set => throw new NotSupportedException(); }
+	TimeSpan IMessageAdapter.FaultDelay { get => default; set => throw new NotSupportedException(); }
+	IMessageAdapter IMessageAdapterWrapper.InnerAdapter
+	{
+		get => null;
+		set => throw new NotSupportedException();
+	}
+
+	private async ValueTask ProcessReset(ResetMessage message, bool isConnect, CancellationToken cancellationToken)
+	{
+		await Wrappers.Select(async a =>
+		{
+			a.TryRemoveWrapper<ChannelMessageAdapter>()?.Dispose();
+			await a.SendInMessageAsync(message, cancellationToken);
+			a.Dispose();
+		}).WhenAll();
+
+		_adapterWrappers.Clear();
+
+		using (await _connectedResponseLock.LockAsync(cancellationToken))
+			_routingManager.Reset(!isConnect);
+	}
+
+	private ValueTask<IMessageAdapter> CreateWrappers(IMessageAdapter adapter, CancellationToken cancellationToken)
+	{
+		var config = new AdapterWrapperConfiguration
+		{
+			SupportOffline = SupportOffline,
+			IgnoreExtraAdapters = IgnoreExtraAdapters,
+			SupportCandlesCompression = SupportCandlesCompression,
+			SupportBuildingFromOrderLog = SupportBuildingFromOrderLog,
+			SupportOrderBookTruncate = SupportOrderBookTruncate,
+			SuppressOrderBookIncrements = SuppressOrderBookIncrements,
+			SupportLookupTracking = SupportLookupTracking,
+			IsSupportTransactionLog = IsSupportTransactionLog,
+			SupportSecurityAll = SupportSecurityAll,
+			SupportStorage = SupportStorage,
+			GenerateOrderBookFromLevel1 = GenerateOrderBookFromLevel1,
+			Level1Extend = Level1Extend,
+			IsRestoreSubscriptionOnErrorReconnect = IsRestoreSubscriptionOnErrorReconnect,
+			SuppressReconnectingErrors = SuppressReconnectingErrors,
+			SendFinishedCandlesImmediatelly = SendFinishedCandlesImmediatelly,
+			UseChannels = this.UseChannels(),
+			LatencyManager = LatencyManager,
+			SlippageManager = SlippageManager,
+			PnLManager = PnLManager,
+			CommissionManager = CommissionManager,
+			NativeIdStorage = NativeIdStorage,
+			MappingProvider = MappingProvider,
+			StorageProcessor = StorageProcessor,
+			Buffer = Buffer,
+			FillGapsBehaviour = FillGapsBehaviour,
+			IsHeartbeatOn = IsHeartbeatOn,
+			SendOutErrorAsync = SendOutErrorAsync,
+			Parent = this,
+		};
+
+		return _pipelineBuilder.BuildAsync(adapter, config, cancellationToken);
+	}
+
+	private readonly Dictionary<IMessageAdapter, bool> _heartbeatFlags = [];
+
+	private bool IsHeartbeatOn(IMessageAdapter adapter)
+		=> _heartbeatFlags.TryGetValue2(adapter) ?? true;
+
+	/// <summary>
+	/// Apply on/off heartbeat mode for the specified adapter.
+	/// </summary>
+	public void ApplyHeartbeat(IMessageAdapter adapter, bool on)
+		=> _heartbeatFlags[adapter] = on;
+
+	private static IMessageAdapter GetUnderlyingAdapter(IMessageAdapter adapter)
+	{
+		if (adapter == null)
+			throw new ArgumentNullException(nameof(adapter));
+
+		if (adapter is IMessageAdapterWrapper wrapper)
+		{
+			return wrapper is IEmulationMessageAdapter
+				? wrapper
+				: GetUnderlyingAdapter(wrapper.InnerAdapter);
+		}
+
+		return adapter;
+	}
+
+	/// <inheritdoc />
+	ValueTask IMessageTransport.SendInMessageAsync(Message message, CancellationToken cancellationToken)
+		=> OnSendInMessageAsync(message, cancellationToken);
+
+	/// <summary>
+	/// Send message.
+	/// </summary>
+	protected virtual ValueTask OnSendInMessageAsync(Message message, CancellationToken cancellationToken)
+	{
+		try
+		{
+			return InternalSendInMessage(message, cancellationToken);
+		}
+		catch (Exception ex)
+		{
+			return SendOutMessageAsync(message.CreateErrorResponse(ex, this, _routingManager.GetSubscribers), cancellationToken);
+		}
+	}
+
+	private async ValueTask InternalSendInMessage(Message message, CancellationToken cancellationToken)
+	{
+		LogDebug("In: {0}", message);
+
+		if (message is ITransactionIdMessage transIdMsg && transIdMsg.TransactionId == 0)
+			throw new ArgumentException(message.ToString());
+
+		if (message.IsBack())
+		{
+			var adapter = message.Adapter ?? throw new InvalidOperationException();
+
+			if (adapter == this)
+				message.UndoBack();
+			else
+			{
+				await ProcessBackMessage(adapter, message, cancellationToken);
+				return;
+			}
+		}
+
+		switch (message.Type)
+		{
+			case MessageTypes.Reset:
+				await ProcessReset((ResetMessage)message, false, cancellationToken);
+				break;
+
+			case MessageTypes.Connect:
+			case MessageTypes.ChangePassword:
+				await ProcessConnect(message, cancellationToken);
+				break;
+
+			case MessageTypes.Disconnect:
+				await ProcessDisconnect(message, cancellationToken);
+				break;
+
+			case MessageTypes.OrderRegister:
+			{
+				var ordMsg = (OrderMessage)message;
+				await ProcessPortfolioMessage(ordMsg.PortfolioName, ordMsg, cancellationToken);
+				break;
+			}
+			case MessageTypes.OrderReplace:
+			case MessageTypes.OrderCancel:
+			{
+				var ordMsg = (OrderMessage)message;
+				await ProcessOrderMessage(ordMsg.TransactionId, ordMsg.OriginalTransactionId, ordMsg, cancellationToken);
+				break;
+			}
+			case MessageTypes.OrderGroupCancel:
+			{
+				var groupMsg = (OrderGroupCancelMessage)message;
+				if (groupMsg.PortfolioName.IsEmpty())
+					await ProcessOtherMessage(message, cancellationToken);
+				else
+					await ProcessPortfolioMessage(groupMsg.PortfolioName, groupMsg, cancellationToken);
+				break;
 			}
 
-			protected override bool OnAdding(IMessageAdapter item)
+			case MessageTypes.MarketData:
 			{
-				_enables.Add(item, 0);
-				return base.OnAdding(item);
+				var result = await _routingManager.ProcessInMessageAsync(message, a => _adapterWrappers.TryGetValue(a), cancellationToken);
+				await ApplyRoutingResult(result, cancellationToken);
+				break;
 			}
 
-			protected override bool OnInserting(int index, IMessageAdapter item)
+			default:
+				await ProcessOtherMessage(message, cancellationToken);
+				break;
+		}
+	}
+
+	private async ValueTask ProcessConnect(Message message, CancellationToken cancellationToken)
+	{
+		await ProcessReset(new ResetMessage(), true, cancellationToken);
+
+		_routingManager.BeginConnect();
+
+		foreach (var adapter in GetSortedAdapters())
+		{
+			using (await _connectedResponseLock.LockAsync(cancellationToken))
+				_routingManager.InitializeAdapter(adapter);
+
+			var wrapper = await CreateWrappers(adapter, cancellationToken);
+
+			wrapper.NewOutMessageAsync += (m, ct) => OnInnerAdapterNewOutMessage(adapter, m, ct);
+
+			_adapterWrappers.Add(adapter, wrapper);
+		}
+
+		if (Wrappers.Length == 0)
+			throw new InvalidOperationException(LocalizedStrings.AtLeastOneConnectionMustBe);
+
+		await Wrappers.Select(w =>
+		{
+			LogInfo("Connecting '{0}'.", GetUnderlyingAdapter(w));
+			return w.SendInMessageAsync(message, cancellationToken);
+		}).WhenAll();
+	}
+
+	private async ValueTask ProcessDisconnect(Message message, CancellationToken cancellationToken)
+	{
+		IDictionary<IMessageAdapter, IMessageAdapter> adapters;
+
+		using (await _connectedResponseLock.LockAsync(cancellationToken))
+		{
+			_routingManager.BeginDisconnect();
+			adapters = _routingManager.GetAdaptersToDisconnect(a => _adapterWrappers.TryGetValue(a));
+		}
+
+		await adapters.Select(a =>
+		{
+			LogInfo("Disconnecting '{0}'.", a.Value);
+			return a.Key.SendInMessageAsync(message, cancellationToken);
+		}).WhenAll();
+	}
+
+	private ValueTask ProcessBackMessage(IMessageAdapter adapter, Message message, CancellationToken cancellationToken)
+	{
+		if (message.BackMode == MessageBackModes.Chain)
+			adapter = _adapterWrappers[GetUnderlyingAdapter(adapter)];
+
+		if (message is ISubscriptionMessage subscrMsg)
+			_routingManager.ProcessBackMessage(adapter, subscrMsg, a => _adapterWrappers.TryGetValue(a));
+
+		return adapter.SendInMessageAsync(message, cancellationToken);
+	}
+
+	private async ValueTask ProcessOtherMessage(Message message, CancellationToken cancellationToken)
+	{
+		if (message.Adapter != null && message is not ISubscriptionMessage)
+		{
+			await message.Adapter.SendInMessageAsync(message, cancellationToken);
+			return;
+		}
+
+		var result = await _routingManager.ProcessInMessageAsync(message, a => _adapterWrappers.TryGetValue(a), cancellationToken);
+		await ApplyRoutingResult(result, cancellationToken);
+	}
+
+	private async ValueTask ApplyRoutingResult(Basket.RoutingInResult result, CancellationToken cancellationToken)
+	{
+		foreach (var (adapter, msg) in result.RoutingDecisions)
+		{
+			LogDebug("Send to {0}: {1}", adapter, msg);
+			await adapter.SendInMessageAsync(msg, cancellationToken);
+		}
+
+		foreach (var outMsg in result.OutMessages)
+			await SendOutMessageAsync(outMsg, cancellationToken);
+
+		foreach (var loopMsg in result.LoopbackMessages)
+			await ((IMessageTransport)this).SendInMessageAsync(loopMsg.LoopBack(this), cancellationToken);
+	}
+
+	private async ValueTask ApplyRoutingOutResult(Basket.RoutingOutResult result, CancellationToken cancellationToken)
+	{
+		if (result.TransformedMessage != null)
+			await SendOutMessageAsync(result.TransformedMessage, cancellationToken);
+
+		foreach (var extra in result.ExtraMessages)
+			await SendOutMessageAsync(extra, cancellationToken);
+
+		foreach (var loopMsg in result.LoopbackMessages)
+			await ((IMessageTransport)this).SendInMessageAsync(loopMsg.LoopBack(this), cancellationToken);
+	}
+
+	private async ValueTask ProcessPortfolioMessage(string portfolioName, OrderMessage message, CancellationToken cancellationToken)
+	{
+		var adapter = message.Adapter;
+
+		if (adapter == null)
+		{
+			var underlyingAdapter = _routingManager.GetPortfolioAdapter(portfolioName, a => a);
+
+			if (underlyingAdapter != null)
 			{
-				_enables.Add(item, 0);
-				return base.OnInserting(index, item);
+				adapter = _adapterWrappers.TryGetValue(underlyingAdapter)
+					?? throw new InvalidOperationException(LocalizedStrings.ConnectionIsNotConnected.Put(underlyingAdapter));
+			}
+			else
+			{
+				var result = await _routingManager.ProcessInMessageAsync(message, a => _adapterWrappers.TryGetValue(a), cancellationToken);
+				if (result.IsPended)
+					return;
+
+				adapter = result.RoutingDecisions.FirstOrDefault().Adapter;
 			}
 
-			protected override bool OnRemoving(IMessageAdapter item)
+			if (adapter == null)
 			{
-				_enables.Remove(item);
-				return base.OnRemoving(item);
-			}
-
-			protected override bool OnClearing()
-			{
-				_enables.Clear();
-				return base.OnClearing();
-			}
-
-			public int this[IMessageAdapter adapter]
-			{
-				get
-				{
-					lock (SyncRoot)
-						return _enables.TryGetValue2(adapter) ?? -1;
-				}
-				set
-				{
-					if (value < -1)
-						throw new ArgumentOutOfRangeException();
-
-					lock (SyncRoot)
-					{
-						if (!Contains(adapter))
-							Add(adapter);
-
-						_enables[adapter] = value;
-						//_portfolioTraders.Clear();
-					}
-				}
+				LogDebug("No adapter for {0}", message);
+				await SendOutMessageAsync(message.CreateReply(new InvalidOperationException(LocalizedStrings.NoAdapterFoundFor.Put(message))), cancellationToken);
+				return;
 			}
 		}
 
-		private readonly SynchronizedPairSet<Tuple<SecurityId, MarketDataTypes>, IEnumerator<IMessageAdapter>> _subscriptionQueue = new SynchronizedPairSet<Tuple<SecurityId, MarketDataTypes>, IEnumerator<IMessageAdapter>>();
-		private readonly SynchronizedDictionary<Tuple<SecurityId, MarketDataTypes>, IMessageAdapter> _subscriptions = new SynchronizedDictionary<Tuple<SecurityId, MarketDataTypes>, IMessageAdapter>();
-		//private readonly SynchronizedDictionary<IMessageAdapter, RefPair<bool, Exception>> _adapterStates = new SynchronizedDictionary<IMessageAdapter, RefPair<bool, Exception>>();
-		private readonly SynchronizedDictionary<IMessageAdapter, IMessageAdapter> _hearbeatAdapters = new SynchronizedDictionary<IMessageAdapter, IMessageAdapter>();
-		private readonly CachedSynchronizedDictionary<MessageTypes, CachedSynchronizedList<IMessageAdapter>> _connectedAdapters = new CachedSynchronizedDictionary<MessageTypes, CachedSynchronizedList<IMessageAdapter>>();
-		private bool _isFirstConnect;
-		private readonly InnerAdapterList _innerAdapters;
+		if (message is OrderRegisterMessage regMsg)
+			_routingManager.AddOrderAdapter(regMsg.TransactionId, GetUnderlyingAdapter(adapter));
 
-		/// <summary>
-		/// Адаптеры, с которыми оперирует агрегатор.
-		/// </summary>
-		public IInnerAdapterList InnerAdapters
+		await adapter.SendInMessageAsync(message, cancellationToken);
+	}
+
+	private async ValueTask ProcessOrderMessage(long transId, long originId, Message message, CancellationToken cancellationToken)
+	{
+		IMessageAdapter adapter = null;
+
+		if (_routingManager.TryGetOrderAdapter(originId, out var orderAdapter))
+			adapter = orderAdapter;
+
+		if (adapter == null && message is OrderMessage ordMsg && !ordMsg.PortfolioName.IsEmpty())
 		{
-			get { return _innerAdapters; }
+			var underlyingAdapter = _routingManager.GetPortfolioAdapter(ordMsg.PortfolioName, a => a);
+			if (underlyingAdapter != null)
+				adapter = underlyingAdapter;
 		}
 
-		/// <summary>
-		/// Портфели, которые используются для отправки транзакций.
-		/// </summary>
-		public IDictionary<string, IMessageAdapter> Portfolios { get; private set; }
-
-		/// <summary>
-		/// Создать <see cref="BasketMessageAdapter"/>.
-		/// </summary>
-		/// <param name="transactionIdGenerator">Генератор идентификаторов транзакций.</param>
-		public BasketMessageAdapter(IdGenerator transactionIdGenerator)
-			: base(transactionIdGenerator)
+		if (adapter is null || !_adapterWrappers.TryGetValue(adapter, out var wrapper))
 		{
-			_innerAdapters = new InnerAdapterList();
-			Portfolios = new SynchronizedDictionary<string, IMessageAdapter>(StringComparer.InvariantCultureIgnoreCase);
-		}
-
-		/// <summary>
-		/// Поддерживаемые типы сообщений, который может обработать адаптер.
-		/// </summary>
-		public override MessageTypes[] SupportedMessages
-		{
-			get { return GetSortedAdapters().SelectMany(a => a.SupportedMessages).ToArray(); }
-		}
-
-		/// <summary>
-		/// Требуется ли дополнительное сообщение <see cref="PortfolioLookupMessage"/> для получения списка портфелей и позиций.
-		/// </summary>
-		public override bool PortfolioLookupRequired
-		{
-			get { return GetSortedAdapters().Any(a => a.PortfolioLookupRequired); }
-		}
-
-		/// <summary>
-		/// Требуется ли дополнительное сообщение <see cref="OrderStatusMessage"/> для получения списка заявок и собственных сделок.
-		/// </summary>
-		public override bool OrderStatusRequired
-		{
-			get { return GetSortedAdapters().Any(a => a.OrderStatusRequired); }
-		}
-
-		/// <summary>
-		/// Требуется ли дополнительное сообщение <see cref="SecurityLookupMessage"/> для получения списка инструментов.
-		/// </summary>
-		public override bool SecurityLookupRequired
-		{
-			get { return GetSortedAdapters().Any(a => a.SecurityLookupRequired); }
-		}
-
-		/// <summary>
-		/// Поддерживается ли торговой системой поиск портфелей.
-		/// </summary>
-		protected override bool IsSupportNativePortfolioLookup
-		{
-			get { return true; }
-		}
-
-		/// <summary>
-		/// Поддерживается ли торговой системой поиск инструментов.
-		/// </summary>
-		protected override bool IsSupportNativeSecurityLookup
-		{
-			get { return true; }
-		}
-
-		/// <summary>
-		/// Создать для заявки типа <see cref="OrderTypes.Conditional"/> условие, которое поддерживается подключением.
-		/// </summary>
-		/// <returns>Условие для заявки. Если подключение не поддерживает заявки типа <see cref="OrderTypes.Conditional"/>, то будет возвращено null.</returns>
-		public override OrderCondition CreateOrderCondition()
-		{
-			throw new NotSupportedException();
-		}
-
-		/// <summary>
-		/// Проверить, установлено ли еще соединение. Проверяется только в том случае, если было успешно установлено подключение.
-		/// </summary>
-		/// <returns><see langword="true"/>, если соединение еще установлено, <see langword="false"/>, если торговая система разорвала подключение.</returns>
-		public override bool IsConnectionAlive()
-		{
-			throw new NotSupportedException();
-		}
-
-		private void ProcessReset(Message message)
-		{
-			_hearbeatAdapters.Values.ForEach(a =>
+			LogError(LocalizedStrings.UnknownTransactionId, originId);
+			await SendOutMessageAsync(new ExecutionMessage
 			{
-				a.SendInMessage(message);
-				a.Dispose();
-			});
-
-			_connectedAdapters.Clear();
-			_hearbeatAdapters.Clear();
-			_subscriptionQueue.Clear();
-			_subscriptions.Clear();
+				DataTypeEx = DataType.Transactions,
+				HasOrderInfo = true,
+				OriginalTransactionId = transId,
+				Error = new InvalidOperationException(LocalizedStrings.UnknownTransactionId.Put(originId)),
+			}, cancellationToken);
+			return;
 		}
 
-		/// <summary>
-		/// Отправить сообщение.
-		/// </summary>
-		/// <param name="message">Сообщение.</param>
-		protected override void OnSendInMessage(Message message)
+		if (message is OrderReplaceMessage replace)
+			_routingManager.AddOrderAdapter(replace.TransactionId, adapter);
+
+		await wrapper.SendInMessageAsync(message, cancellationToken);
+	}
+
+	/// <summary>
+	/// Try find adapter by portfolio name.
+	/// </summary>
+	public bool TryGetAdapter(string porfolioName, out IMessageAdapter adapter)
+	{
+		adapter = _routingManager.GetPortfolioAdapter(porfolioName, a => a);
+		return adapter != null;
+	}
+
+	/// <inheritdoc />
+	public event Func<Message, CancellationToken, ValueTask> NewOutMessageAsync;
+
+	/// <summary>
+	/// The embedded adapter event handler.
+	/// </summary>
+	protected virtual async ValueTask OnInnerAdapterNewOutMessage(IMessageAdapter innerAdapter, Message message, CancellationToken cancellationToken)
+	{
+		List<Message> extra = null;
+
+		if (!message.IsBack())
 		{
+			message.Adapter ??= innerAdapter;
+
 			switch (message.Type)
 			{
-				case MessageTypes.Reset:
-					ProcessReset(message);
-					break;
+				case MessageTypes.Time:
+					return;
 
 				case MessageTypes.Connect:
-					if (_isFirstConnect)
-						_isFirstConnect = false;
-					else
-						ProcessReset(new ResetMessage());
-
-					_hearbeatAdapters.AddRange(GetSortedAdapters().ToDictionary(a => a, a =>
-					{
-						var hearbeatAdapter = (IMessageAdapter)new HeartbeatAdapter(a);
-						hearbeatAdapter.Parent = this;
-						hearbeatAdapter.NewOutMessage += m => OnInnerAdapterNewMessage(a, m);
-						return hearbeatAdapter;
-					}));
-
-					if (_hearbeatAdapters.Count == 0)
-						throw new InvalidOperationException(LocalizedStrings.Str3650);
-
-					_hearbeatAdapters.Values.ForEach(a => a.SendInMessage(message));
+					extra = [];
+					await ProcessConnectResponse(innerAdapter, (ConnectMessage)message, extra, cancellationToken);
 					break;
 
 				case MessageTypes.Disconnect:
-					_connectedAdapters
-						.CachedValues
-						.SelectMany(c => c.Cache)
-						.Distinct()
-						.ForEach(a => a.SendInMessage(message));
+					extra = [];
+					await ProcessDisconnectResponse(innerAdapter, (DisconnectMessage)message, extra, cancellationToken);
 					break;
+
+				case MessageTypes.SubscriptionResponse:
+				case MessageTypes.SubscriptionFinished:
+				case MessageTypes.SubscriptionOnline:
+				{
+					var result = await _routingManager.ProcessOutMessageAsync(innerAdapter, message, a => _adapterWrappers.TryGetValue(a), cancellationToken);
+					await ApplyRoutingOutResult(result, cancellationToken);
+					return;
+				}
 
 				case MessageTypes.Portfolio:
+				case MessageTypes.PositionChange:
 				{
-					var pfMsg = (PortfolioMessage)message;
-					ProcessPortfolioMessage(pfMsg.PortfolioName, pfMsg);
+					var pfMsg = (IPortfolioNameMessage)message;
+
+					if (!_routingManager.ApplyParentLookupId((ISubscriptionIdMessage)message))
+						return;
+
+					PortfolioAdapterProvider.SetAdapter(pfMsg.PortfolioName, GetUnderlyingAdapter(innerAdapter));
 					break;
 				}
 
-				case MessageTypes.OrderRegister:
-				case MessageTypes.OrderReplace:
-				case MessageTypes.OrderCancel:
-				case MessageTypes.OrderGroupCancel:
+				case MessageTypes.Security:
 				{
-					var ordMsg = (OrderMessage)message;
-					ProcessPortfolioMessage(ordMsg.PortfolioName, ordMsg);
+					var secMsg = (SecurityMessage)message;
+
+					if (!_routingManager.ApplyParentLookupId(secMsg))
+						return;
+
+					SecurityAdapterProvider.SetAdapter(secMsg.SecurityId, null, GetUnderlyingAdapter(innerAdapter).Id);
 					break;
 				}
 
-				case MessageTypes.OrderPairReplace:
+				case MessageTypes.Execution:
 				{
-					var ordMsg = (OrderPairReplaceMessage)message;
-					ProcessPortfolioMessage(ordMsg.Message1.PortfolioName, ordMsg);
-					break;
-				}
+					var execMsg = (ExecutionMessage)message;
 
-				case MessageTypes.MarketData:
-				{
-					var adapters = _connectedAdapters.TryGetValue(message.Type);
+					if (!_routingManager.ApplyParentLookupId(execMsg))
+						return;
 
-					if (adapters == null)
-						throw new InvalidOperationException(LocalizedStrings.Str629Params.Put(message.Type));
+					if (execMsg.DataType == DataType.Transactions && execMsg.TransactionId != default && execMsg.HasOrderInfo)
+						_routingManager.AddOrderAdapter(execMsg.TransactionId, innerAdapter);
 
-					var mdMsg = (MarketDataMessage)message;
-					
-					switch (mdMsg.DataType)
-					{
-						case MarketDataTypes.News:
-							adapters.Cache.ForEach(a => a.SendInMessage(mdMsg));
-							break;
-
-						default:
-						{
-							var key = Tuple.Create(mdMsg.SecurityId, mdMsg.DataType);
-
-							if (mdMsg.IsSubscribe)
-							{
-								if (_subscriptionQueue.ContainsKey(key))
-									return;
-
-								var enumerator = adapters.Cache.Cast<IMessageAdapter>().GetEnumerator();
-
-								_subscriptionQueue.Add(key, enumerator);
-
-								ProcessSubscriptionAction(enumerator, mdMsg);
-							}
-							else
-							{
-								var adapter = _subscriptions.TryGetValue(key);
-
-								if (adapter != null)
-								{
-									_subscriptions.Remove(key);
-									adapter.SendInMessage(message);
-								}
-							}
-
-							break;
-						}
-					}
-					
 					break;
 				}
 
 				default:
 				{
-					var adapters = _connectedAdapters.TryGetValue(message.Type);
-
-					if (adapters == null)
-						throw new InvalidOperationException(LocalizedStrings.Str629Params.Put(message.Type));
-
-					adapters.Cache.ForEach(a => a.SendInMessage(message));
-					break;
+					var result = await _routingManager.ProcessOutMessageAsync(innerAdapter, message, a => _adapterWrappers.TryGetValue(a), cancellationToken);
+					await ApplyRoutingOutResult(result, cancellationToken);
+					return;
 				}
 			}
 		}
 
-		private void ProcessPortfolioMessage(string portfolioName, Message message)
+		if (message != null)
+			await SendOutMessageAsync(message, cancellationToken);
+
+		if (extra != null)
 		{
-			var adapter = Portfolios.TryGetValue(portfolioName);
+			foreach (var m in extra)
+				await SendOutMessageAsync(m, cancellationToken);
+		}
+	}
 
-			if (adapter == null)
-			{
-				var adapters = _connectedAdapters.TryGetValue(message.Type);
+	private async ValueTask ProcessConnectResponse(IMessageAdapter innerAdapter, ConnectMessage message, List<Message> extra, CancellationToken cancellationToken)
+	{
+		var underlyingAdapter = GetUnderlyingAdapter(innerAdapter);
+		var wrapper = _adapterWrappers[underlyingAdapter];
+		var error = message.Error;
 
-				if (adapters == null || adapters.Count != 1)
-					throw new InvalidOperationException(LocalizedStrings.Str623Params.Put(portfolioName));
+		if (error != null)
+			LogError(LocalizedStrings.ConnectionErrorFor, underlyingAdapter, error);
+		else
+			LogInfo("Connected to '{0}'.", underlyingAdapter);
 
-				adapter = adapters.Cache.First();
-			}
-			else
-				adapter = _hearbeatAdapters[adapter];
+		Message[] notSupportedMsgs;
 
-			adapter.SendInMessage(message);
+		using (await _connectedResponseLock.LockAsync(cancellationToken))
+		{
+			var (outMsgs, pendingToLoopback, notSupported) = await _routingManager.ProcessConnectAsync(
+				underlyingAdapter, wrapper, innerAdapter.SupportedInMessages, error, cancellationToken);
+
+			extra.AddRange(outMsgs);
+			extra.AddRange(pendingToLoopback.Select(m => m.LoopBack(this)));
+			notSupportedMsgs = notSupported;
 		}
 
-		/// <summary>
-		/// Обработчик события <see cref="IMessageChannel.NewOutMessage"/> вложенного адаптера.
-		/// </summary>
-		/// <param name="innerAdapter">Вложенный адаптер.</param>
-		/// <param name="message">Сообщение.</param>
-		protected virtual void OnInnerAdapterNewMessage(IMessageAdapter innerAdapter, Message message)
+		foreach (var notSupportedMsg in notSupportedMsgs)
 		{
-			if (message.IsBack)
-			{
-				message.IsBack = false;
-				innerAdapter.SendInMessage(message);
-				return;
-			}
+			// A message held while the adapters connected and then left with nowhere to go is answered on
+			// its own terms - an order by its transaction, a subscription by its response - because a bare
+			// error names nothing and leaves the caller waiting for an answer that never comes.
+			var noAdapter = new InvalidOperationException(LocalizedStrings.NoAdapterFoundFor.Put(notSupportedMsg.Type));
 
-			message.Adapter = innerAdapter;
-
-			switch (message.Type)
-			{
-				case MessageTypes.Connect:
-					ProcessConnectMessage(innerAdapter, (ConnectMessage)message);
-					return;
-
-				case MessageTypes.Disconnect:
-					ProcessDisconnectMessage(innerAdapter, (DisconnectMessage)message);
-					return;
-
-				case MessageTypes.MarketData:
-					ProcessMarketDataMessage(innerAdapter, (MarketDataMessage)message);
-					return;
-			}
-
-			SendOutMessage(message);
+			await SendOutMessageAsync(notSupportedMsg.CreateErrorResponse(noAdapter, this, _routingManager.GetSubscribers), cancellationToken);
 		}
 
-		private void ProcessConnectMessage(IMessageAdapter innerAdapter, ConnectMessage message)
+		message.Adapter = underlyingAdapter;
+	}
+
+	private async ValueTask ProcessDisconnectResponse(IMessageAdapter innerAdapter, DisconnectMessage message, List<Message> extra, CancellationToken cancellationToken)
+	{
+		var underlyingAdapter = GetUnderlyingAdapter(innerAdapter);
+		var wrapper = _adapterWrappers[underlyingAdapter];
+		var error = message.Error;
+
+		if (error == null)
+			LogInfo("Disconnected from '{0}'.", underlyingAdapter);
+		else
+			LogError(LocalizedStrings.ErrorDisconnectFor, underlyingAdapter, error);
+
+		using (await _connectedResponseLock.LockAsync(cancellationToken))
 		{
-			if (message.Error != null)
-				this.AddErrorLog(LocalizedStrings.Str625Params, innerAdapter.GetType().Name, message.Error);
+			var msgs = _routingManager.ProcessDisconnect(underlyingAdapter, wrapper, innerAdapter.SupportedInMessages, error);
+			extra.AddRange(msgs);
+		}
 
-			var adapter = _hearbeatAdapters[innerAdapter];
+		message.Adapter = underlyingAdapter;
+	}
 
-			foreach (var supportedMessage in adapter.SupportedMessages)
+	private ValueTask SendOutErrorAsync(Exception error, CancellationToken cancellationToken)
+		=> SendOutMessageAsync(error.ToErrorMessage(), cancellationToken);
+
+	/// <inheritdoc />
+	public ValueTask SendOutMessageAsync(Message message, CancellationToken cancellationToken)
+		=> OnSendOutMessageAsync(message, cancellationToken);
+
+	/// <summary>
+	/// Send outgoing message and raise <see cref="NewOutMessageAsync"/> event.
+	/// </summary>
+	protected virtual ValueTask OnSendOutMessageAsync(Message message, CancellationToken cancellationToken)
+	{
+		message.Adapter ??= this;
+		return NewOutMessageAsync.InvokeAsync(message, cancellationToken);
+	}
+
+	private void SecurityAdapterProviderOnChanged((SecurityId, DataType) key, Guid adapterId, bool isAdd)
+		=> _routingManager.OnSecurityAdapterProviderChanged(key, adapterId, isAdd,
+			id => InnerAdapters.SyncGet(c => c.FindById(id)));
+
+	private void PortfolioAdapterProviderOnChanged(string portfolioName, Guid adapterId, bool isAdd)
+		=> _routingManager.OnPortfolioAdapterProviderChanged(portfolioName, adapterId, isAdd,
+			id => InnerAdapters.SyncGet(c => c.FindById(id)));
+
+	/// <inheritdoc />
+	public override async Task SaveAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		(IMessageAdapter adapter, int priority)[] adapters;
+
+		using (InnerAdapters.EnterScope())
+			adapters = [.. InnerAdapters.Select(a => (a, InnerAdapters[a]))];
+
+		var settings = new List<SettingsStorage>();
+
+		foreach (var (adapter, priority) in adapters)
+		{
+			var s = new SettingsStorage();
+			s.SetValue("AdapterType", adapter.GetType().GetTypeName(false));
+			s.SetValue("AdapterSettings", await adapter.SaveAsync(cancellationToken));
+			s.SetValue("Priority", priority);
+			settings.Add(s);
+		}
+
+		storage.SetValue(nameof(InnerAdapters), settings.ToArray());
+
+		await base.SaveAsync(storage, cancellationToken);
+	}
+
+	/// <inheritdoc />
+	public override async Task LoadAsync(SettingsStorage storage, CancellationToken cancellationToken)
+	{
+		var loaded = new List<(IMessageAdapter adapter, int priority)>();
+		var adapters = new Dictionary<Guid, IMessageAdapter>();
+
+		foreach (var s in storage.GetValue<IEnumerable<SettingsStorage>>(nameof(InnerAdapters)))
+		{
+			try
 			{
-				_connectedAdapters.SafeAdd(supportedMessage).Add(adapter);
+				var adapter = s.GetValue<Type>("AdapterType").CreateAdapter(TransactionIdGenerator);
+				await adapter.LoadAsync(s, "AdapterSettings", cancellationToken);
+				loaded.Add((adapter, s.GetValue<int>("Priority")));
 			}
-
-			SendOutMessage(message);
-		}
-
-		private void ProcessDisconnectMessage(IMessageAdapter innerAdapter, DisconnectMessage message)
-		{
-			if (message.Error != null)
-				this.AddErrorLog(LocalizedStrings.Str627Params, innerAdapter.GetType().Name, message.Error);
-
-			SendOutMessage(message);
-		}
-
-		private void ProcessSubscriptionAction(IEnumerator<IMessageAdapter> enumerator, MarketDataMessage message)
-		{
-			if (enumerator.MoveNext())
-				enumerator.Current.SendInMessage(message);
-			else
+			catch (Exception e) when (e is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
 			{
-				_subscriptionQueue.RemoveByValue(enumerator);
-				RaiseSubscriptionFailed(null, message.TransactionId, new ArgumentException(LocalizedStrings.Str629Params.Put(message.SecurityId + " " + message.DataType), "message"));
+				LogError(e);
 			}
 		}
 
-		private void ProcessMarketDataMessage(IMessageAdapter adapter, MarketDataMessage message)
+		using (InnerAdapters.EnterScope())
 		{
-			var key = Tuple.Create(message.SecurityId, message.DataType);
-			
-			var enumerator = _subscriptionQueue.TryGetValue(key);
-			//var cancel = tuple != null && tuple.Second;
+			InnerAdapters.Clear();
 
-			if (message.Error == null)
+			foreach (var (adapter, priority) in loaded)
 			{
-				if (message.IsNotSupported)
+				try
 				{
-					if (enumerator != null)
-						ProcessSubscriptionAction(enumerator, message);
-					else
-						RaiseSubscriptionFailed(adapter, 0, new InvalidOperationException(LocalizedStrings.Str633Params.Put(message.SecurityId, message.DataType)));
+					InnerAdapters[adapter] = priority;
+					adapters.Add(adapter.Id, adapter);
 				}
-				else
+				catch (Exception e)
 				{
-					this.AddDebugLog(LocalizedStrings.Str630Params, message.SecurityId, adapter);
-					_subscriptionQueue.Remove(key);
-					RaiseMarketDataMessage(adapter, 0, null);
+					LogError(e);
 				}
-
-				//if (!cancel)
-				//	return;
-
-				////в процессе подписки пользователь отменил ее - надо отписаться от получения данных
-				//var cancelMessage = (MarketDataMessage)message.Clone();
-				//cancelMessage.IsSubscribe = false;
-				//adapter.SendInMessage(cancelMessage);
 			}
-			else
-			{
-				//this.AddDebugLog(LocalizedStrings.Str631Params, adapter, message.SecurityId, message.DataType, message.Error);
-				_subscriptionQueue.Remove(key);
-				RaiseSubscriptionFailed(adapter, 0, message.Error);
-			}
+
+			_routingManager.LoadSecurityAdapters(
+				SecurityAdapterProvider.Adapters
+					.Where(p => adapters.ContainsKey(p.Value))
+					.Select(p => (p.Key, adapters[p.Value])));
+
+			_routingManager.LoadPortfolioAdapters(
+				PortfolioAdapterProvider.Adapters
+					.Where(p => adapters.ContainsKey(p.Value))
+					.Select(p => (p.Key, adapters[p.Value])));
 		}
 
-		private void RaiseMarketDataMessage(IMessageAdapter adapter, long originalTransactionId, Exception error)
+		await base.LoadAsync(storage, cancellationToken);
+	}
+
+	/// <summary>
+	/// To release allocated resources.
+	/// </summary>
+	protected override void DisposeManaged()
+	{
+		SecurityAdapterProvider.Changed -= SecurityAdapterProviderOnChanged;
+		PortfolioAdapterProvider.Changed -= PortfolioAdapterProviderOnChanged;
+		Wrappers.ForEach(a => a.Parent = null);
+		base.DisposeManaged();
+	}
+
+	/// <summary>
+	/// Create a copy of <see cref="BasketMessageAdapter"/>.
+	/// </summary>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns>Copy.</returns>
+	public async ValueTask<IMessageAdapter> CloneAsync(CancellationToken cancellationToken)
+	{
+		var clone = new BasketMessageAdapter(TransactionIdGenerator, StorageProcessor.CandleBuilderProvider, SecurityAdapterProvider, PortfolioAdapterProvider, Buffer)
 		{
-			SendOutMessage(new MarketDataMessage
-			{
-				OriginalTransactionId = originalTransactionId,
-				Error = error,
-				Adapter = adapter,
-			});
-		}
+			SupportCandlesCompression = SupportCandlesCompression,
+			Level1Extend = Level1Extend,
+			SuppressReconnectingErrors = SuppressReconnectingErrors,
+			IsRestoreSubscriptionOnErrorReconnect = IsRestoreSubscriptionOnErrorReconnect,
+			SupportStorage = SupportStorage,
+			SupportBuildingFromOrderLog = SupportBuildingFromOrderLog,
+			SupportOrderBookTruncate = SupportOrderBookTruncate,
+			SuppressOrderBookIncrements = SuppressOrderBookIncrements,
+			SupportOffline = SupportOffline,
+			IgnoreExtraAdapters = IgnoreExtraAdapters,
+			NativeIdStorage = NativeIdStorage,
+			ConnectDisconnectEventOnFirstAdapter = ConnectDisconnectEventOnFirstAdapter,
+			UseInChannel = UseInChannel,
+			UseOutChannel = UseOutChannel,
+			IsSupportTransactionLog = IsSupportTransactionLog,
+			FillGapsBehaviour = FillGapsBehaviour,
+			GenerateOrderBookFromLevel1 = GenerateOrderBookFromLevel1,
+		};
 
-		private void RaiseSubscriptionFailed(IMessageAdapter adapter, long originalTransactionId, Exception error)
-		{
-			//_subscriptionQueue.Remove(Tuple.Create(message.SecurityId, message.DataType));
-			//this.AddDebugLog(LocalizedStrings.Str634Params, message.SecurityId, message.DataType, error);
-			RaiseMarketDataMessage(adapter, originalTransactionId, error);
-		}
-
-		//private void SendOutMessage(Message message)
-		//{
-		//	//if (message.LocalTime.IsDefault())
-		//	//	message.LocalTime = adapter.CurrentTime.LocalDateTime;
-
-		//	SendOutMessage(message);
-		//}
-
-		/// <summary>
-		/// Получить адаптеры <see cref="IInnerAdapterList.SortedAdapters"/>, отсортированные в зависимости от заданного приоритета. По-умолчанию сортировка отсутствует.
-		/// </summary>
-		/// <returns>Отсортированные адаптеры.</returns>
-		protected IEnumerable<IMessageAdapter> GetSortedAdapters()
-		{
-			return _innerAdapters.SortedAdapters;
-		}
+		await clone.LoadAsync(await this.SaveAsync(cancellationToken), cancellationToken);
+		return clone;
 	}
 }

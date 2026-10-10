@@ -1,288 +1,295 @@
-namespace StockSharp.Algo.Derivatives
+namespace StockSharp.Algo.Derivatives;
+
+/// <summary>
+/// The model for calculating Greeks values by the Black-Scholes formula.
+/// </summary>
+public class BlackScholes : IBlackScholes
 {
-	using System;
-
-	using Ecng.Common;
-
-	using StockSharp.BusinessEntities;
-	using StockSharp.Messages;
-	using StockSharp.Localization;
+	/// <summary>
+	/// Base constructor for inherited models.
+	/// </summary>
+	/// <param name="dataProvider">The market data provider.</param>
+	/// <param name="expirationTime">Explicit option expiration moment. If <c>null</c>, midnight of <see cref="Security.ExpiryDate"/> is used when available.</param>
+	protected BlackScholes(IMarketDataProvider dataProvider, DateTime? expirationTime = null)
+	{
+		DataProvider = dataProvider ?? throw new ArgumentNullException(nameof(dataProvider));
+		ExpirationTime = expirationTime;
+	}
 
 	/// <summary>
-	/// Модель расчета значений "греков" по формуле Блэка-Шоулза.
+	/// Initializes a new instance of <see cref="BlackScholes"/> for a specific option with its underlying asset.
 	/// </summary>
-	public class BlackScholes : IBlackScholes
+	/// <param name="option">Options contract.</param>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="dataProvider">The market data provider.</param>
+	/// <param name="expirationTime">Explicit option expiration moment. If <c>null</c>, midnight of <see cref="Security.ExpiryDate"/> is used when available.</param>
+	public BlackScholes(Security option, Security underlyingAsset, IMarketDataProvider dataProvider, DateTime? expirationTime = null)
+		: this(dataProvider, expirationTime)
 	{
-		/// <summary>
-		/// Инициализировать <see cref="BlackScholes"/>.
-		/// </summary>
-		/// <param name="securityProvider">Поставщик информации об инструментах.</param>
-		/// <param name="dataProvider">Поставщик маркет-данных.</param>
-		protected BlackScholes(ISecurityProvider securityProvider, IMarketDataProvider dataProvider)
+		Option = option ?? throw new ArgumentNullException(nameof(option));
+		_underlyingAsset = underlyingAsset ?? throw new ArgumentNullException(nameof(underlyingAsset));
+	}
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="BlackScholes"/> for an underlying asset only (non-option models).
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="dataProvider">The market data provider.</param>
+	/// <param name="expirationTime">Explicit option expiration moment. If <c>null</c>, midnight of <see cref="Security.ExpiryDate"/> is used when available.</param>
+	protected BlackScholes(Security underlyingAsset, IMarketDataProvider dataProvider, DateTime? expirationTime = null)
+		: this(dataProvider, expirationTime)
+	{
+		_underlyingAsset = underlyingAsset ?? throw new ArgumentNullException(nameof(underlyingAsset));
+	}
+
+	/// <summary>
+	/// The market data provider.
+	/// </summary>
+	public virtual IMarketDataProvider DataProvider { get; }
+
+	/// <summary>
+	/// Explicit expiration moment. If <c>null</c>, midnight of <see cref="Security.ExpiryDate"/> is used when available.
+	/// </summary>
+	public DateTime? ExpirationTime { get; set; }
+
+	/// <inheritdoc />
+	public virtual Security Option { get; }
+
+	/// <inheritdoc />
+	public decimal RiskFree { get; set; }
+
+	/// <inheritdoc />
+	public virtual decimal Dividend { get; set; }
+
+	private int _roundDecimals = -1;
+
+	/// <summary>
+	/// The number of decimal places at calculated values. The default is -1, which means no values rounding.
+	/// </summary>
+	public virtual int RoundDecimals
+	{
+		get => _roundDecimals;
+		set
 		{
-			if (securityProvider == null)
-				throw new ArgumentNullException("securityProvider");
+			if (value < -1)
+				throw new ArgumentOutOfRangeException(nameof(value), value, LocalizedStrings.InvalidValue);
 
-			if (dataProvider == null)
-				throw new ArgumentNullException("dataProvider");
-
-			SecurityProvider = securityProvider;
-			DataProvider = dataProvider;
+			_roundDecimals = value;
 		}
+	}
 
-		/// <summary>
-		/// Создать <see cref="BlackScholes"/>.
-		/// </summary>
-		/// <param name="option">Опцион.</param>
-		/// <param name="securityProvider">Поставщик информации об инструментах.</param>
-		/// <param name="dataProvider">Поставщик маркет-данных.</param>
-		public BlackScholes(Security option, ISecurityProvider securityProvider, IMarketDataProvider dataProvider)
-			: this(securityProvider, dataProvider)
-		{
-			if (option == null)
-				throw new ArgumentNullException("option");
+	private Security _underlyingAsset;
 
-			Option = option;
-		}
+	/// <summary>
+	/// Underlying asset.
+	/// </summary>
+	public virtual Security UnderlyingAsset
+	{
+		get => _underlyingAsset;
+		set => _underlyingAsset = value;
+	}
 
-		/// <summary>
-		/// Поставщик информации об инструментах.
-		/// </summary>
-		public ISecurityProvider SecurityProvider { get; private set; }
+	/// <summary>
+	/// The standard deviation by default.
+	/// </summary>
+	public decimal DefaultDeviation => Option is null ? 0 : ((decimal?)DataProvider.GetSecurityValue(Option, Level1Fields.ImpliedVolatility) ?? 0) / 100;
 
-		/// <summary>
-		/// Поставщик маркет-данных.
-		/// </summary>
-		public virtual IMarketDataProvider DataProvider { get; private set; }
+	/// <summary>
+	/// The time before expiration calculation.
+	/// </summary>
+	/// <param name="currentTime">The current time.</param>
+	/// <returns>The time remaining until expiration. If the value is equal to <see langword="null" />, then the value calculation currently is impossible.</returns>
+	public virtual double? GetExpirationTimeLine(DateTime currentTime)
+	{
+		var expTime = ExpirationTime;
 
-		/// <summary>
-		/// Опцион.
-		/// </summary>
-		public virtual Security Option { get; private set; }
+		if (expTime == null && Option != null && Option.ExpiryDate != null)
+			expTime = Option.ExpiryDate.Value.Date; // midnight by default
 
-		/// <summary>
-		/// Безрисковая процентная ставка.
-		/// </summary>
-		public decimal RiskFree { get; set; }
+		if (expTime == null)
+			return null;
 
-		/// <summary>
-		/// Размер дивиденда по акциям.
-		/// </summary>
-		public virtual decimal Dividend { get; set; }
+		return DerivativesHelper.GetExpirationTimeLine(expTime.Value, currentTime);
+	}
 
-		private int _roundDecimals = -1;
+	/// <summary>
+	/// To get the price of the underlying asset.
+	/// </summary>
+	/// <param name="assetPrice">The price of the underlying asset if it is specified.</param>
+	/// <returns>The price of the underlying asset. If the value is equal to <see langword="null" />, then the value calculation currently is impossible.</returns>
+	public decimal? GetAssetPrice(decimal? assetPrice = null)
+	{
+		if (assetPrice != null)
+			return (decimal)assetPrice;
 
-		/// <summary>
-		/// Количество знаков после запятой у вычисляемых значений. По-умолчанию равно -1, что означает не округлять значения.
-		/// </summary>
-		public virtual int RoundDecimals
-		{
-			get { return _roundDecimals; }
-			set
-			{
-				if (value < -1)
-					throw new ArgumentOutOfRangeException("value", value, LocalizedStrings.Str702);
+		return (decimal?)DataProvider.GetSecurityValue(UnderlyingAsset, Level1Fields.LastTradePrice);
+	}
 
-				_roundDecimals = value;
-			}
-		}
+	/// <summary>
+	/// Option type.
+	/// </summary>
+	protected OptionTypes OptionType
+		=> Option is null
+			? throw new InvalidOperationException(LocalizedStrings.NoData)
+			: Option.OptionType ?? throw new InvalidOperationException(LocalizedStrings.OrderTypeMissed.Put(Option));
 
-		private Security _underlyingAsset;
+	/// <summary>
+	/// To round to <see cref="RoundDecimals"/>.
+	/// </summary>
+	/// <param name="value">The initial value.</param>
+	/// <returns>The rounded value.</returns>
+	protected decimal? TryRound(decimal? value)
+	{
+		if (value != null && RoundDecimals >= 0)
+			value = value.Value.Round(RoundDecimals);
 
-		/// <summary>
-		/// Базовый актив.
-		/// </summary>
-		public virtual Security UnderlyingAsset
-		{
-			get { return _underlyingAsset ?? (_underlyingAsset = Option.GetUnderlyingAsset(SecurityProvider)); }
-		}
+		return value;
+	}
 
-		/// <summary>
-		/// Стандартное отклонение по-умолчанию.
-		/// </summary>
-		public decimal DefaultDeviation
-		{
-			get { return ((decimal?)DataProvider.GetSecurityValue(Option, Level1Fields.ImpliedVolatility) ?? 0) / 100; }
-		}
+	/// <inheritdoc />
+	public virtual decimal? Premium(DateTime currentTime, decimal? deviation = null, decimal? assetPrice = null)
+	{
+		deviation = deviation ?? DefaultDeviation;
+		assetPrice = GetAssetPrice(assetPrice);
 
-		/// <summary>
-		/// Расчет времени до экспирации.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <returns>Время, оставшееся до экспирации.</returns>
-		public virtual double GetExpirationTimeLine(DateTimeOffset currentTime)
-		{
-			return DerivativesHelper.GetExpirationTimeLine(Option.GetExpirationTime(), currentTime);
-		}
+		if (assetPrice == null)
+			return null;
 
-		/// <summary>
-		/// Получить цену базового актива.
-		/// </summary>
-		/// <param name="assetPrice">Цена базового актива, если она задана.</param>
-		/// <returns>Цена базового актива.</returns>
-		public decimal GetAssetPrice(decimal? assetPrice = null)
-		{
-			if (assetPrice != null)
-				return (decimal)assetPrice;
+		var timeToExp = GetExpirationTimeLine(currentTime);
 
-			var price = (decimal?)DataProvider.GetSecurityValue(UnderlyingAsset, Level1Fields.LastTradePrice);
-			return price ?? 0;
-		}
+		if (timeToExp == null)
+			return null;
 
-		/// <summary>
-		/// Тип опциона.
-		/// </summary>
-		protected OptionTypes OptionType
-		{
-			get
-			{
-				var type = Option.OptionType;
+		return TryRound(CalcPremium(deviation.Value, assetPrice.Value, timeToExp.Value));
+	}
 
-				if (type == null)
-					throw new InvalidOperationException(LocalizedStrings.Str703Params.Put(Option));
+	/// <summary>
+	/// To calculate the option premium from the model inputs already resolved by <see cref="Premium"/>.
+	/// </summary>
+	/// <param name="deviation">Standard deviation.</param>
+	/// <param name="assetPrice">Underlying asset price.</param>
+	/// <param name="timeToExp">The option period before the expiration.</param>
+	/// <returns>The option premium.</returns>
+	protected virtual decimal CalcPremium(decimal deviation, decimal assetPrice, double timeToExp)
+		=> DerivativesHelper.Premium(OptionType, GetStrike(), assetPrice, RiskFree, Dividend, deviation, timeToExp, D1(deviation, assetPrice, timeToExp));
 
-				return type.Value;
-			}
-		}
+	/// <inheritdoc />
+	public virtual decimal? Delta(DateTime currentTime, decimal? deviation = null, decimal? assetPrice = null)
+	{
+		assetPrice = GetAssetPrice(assetPrice);
 
-		/// <summary>
-		/// Округлить до <see cref="RoundDecimals"/>.
-		/// </summary>
-		/// <param name="value">Исходное значение.</param>
-		/// <returns>Округленное значение.</returns>
-		protected decimal TryRound(decimal value)
-		{
-			if (RoundDecimals >= 0)
-				value = Math.Round(value, RoundDecimals);
+		if (assetPrice == null)
+			return null;
 
-			return value;
-		}
+		var timeToExp = GetExpirationTimeLine(currentTime);
 
-		/// <summary>
-		/// Рассчитать премию опциона.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="deviation">Стандартное отклонение. Если оно не указано, то используется <see cref="DefaultDeviation"/>.</param>
-		/// <param name="assetPrice">Цена базового актива. Если цена не указана, то получается цена последней сделки из <see cref="UnderlyingAsset"/>.</param>
-		/// <returns>Премия опциона.</returns>
-		public virtual decimal Premium(DateTimeOffset currentTime, decimal? deviation = null, decimal? assetPrice = null)
-		{
-			deviation = deviation ?? DefaultDeviation;
-			assetPrice = GetAssetPrice(assetPrice);
+		if (timeToExp == null)
+			return null;
 
-			var timeToExp = GetExpirationTimeLine(currentTime);
-			return TryRound(DerivativesHelper.Premium(OptionType, GetStrike(), assetPrice.Value, RiskFree, Dividend, deviation.Value, timeToExp, D1(deviation.Value, assetPrice.Value, timeToExp)));
-		}
+		// Holding the asset until expiry forgoes what it pays out, which the premium discounts by
+		// e^(-qT) - so its slope carries the same factor.
+		var expDiv = (decimal)DerivativesHelper.ExpRate(Dividend, timeToExp.Value);
 
-		/// <summary>
-		/// Рассчитать дельту опциона.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="deviation">Стандартное отклонение. Если оно не указано, то используется <see cref="DefaultDeviation"/>.</param>
-		/// <param name="assetPrice">Цена базового актива. Если цена не указана, то получается цена последней сделки из <see cref="UnderlyingAsset"/>.</param>
-		/// <returns>Дельта опциона.</returns>
-		public virtual decimal Delta(DateTimeOffset currentTime, decimal? deviation = null, decimal? assetPrice = null)
-		{
-			assetPrice = GetAssetPrice(assetPrice);
-			return TryRound(DerivativesHelper.Delta(OptionType, assetPrice.Value, D1(deviation ?? DefaultDeviation, assetPrice.Value, GetExpirationTimeLine(currentTime))));
-		}
+		return TryRound(expDiv * DerivativesHelper.Delta(OptionType, assetPrice.Value, D1(deviation ?? DefaultDeviation, assetPrice.Value, timeToExp.Value)));
+	}
 
-		/// <summary>
-		/// Рассчитать гамму опциона.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="deviation">Стандартное отклонение. Если оно не указано, то используется <see cref="DefaultDeviation"/>.</param>
-		/// <param name="assetPrice">Цена базового актива. Если цена не указана, то получается цена последней сделки из <see cref="UnderlyingAsset"/>.</param>
-		/// <returns>Гамма опциона.</returns>
-		public virtual decimal Gamma(DateTimeOffset currentTime, decimal? deviation = null, decimal? assetPrice = null)
-		{
-			deviation = deviation ?? DefaultDeviation;
-			assetPrice = GetAssetPrice(assetPrice);
-			var timeToExp = GetExpirationTimeLine(currentTime);
-			return TryRound(DerivativesHelper.Gamma(assetPrice.Value, deviation.Value, timeToExp, D1(deviation.Value, assetPrice.Value, timeToExp)));
-		}
+	/// <inheritdoc />
+	public virtual decimal? Gamma(DateTime currentTime, decimal? deviation = null, decimal? assetPrice = null)
+	{
+		deviation = deviation ?? DefaultDeviation;
+		assetPrice = GetAssetPrice(assetPrice);
 
-		/// <summary>
-		/// Рассчитать вегу опциона.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="deviation">Стандартное отклонение. Если оно не указано, то используется <see cref="DefaultDeviation"/>.</param>
-		/// <param name="assetPrice">Цена базового актива. Если цена не указана, то получается цена последней сделки из <see cref="UnderlyingAsset"/>.</param>
-		/// <returns>Вега опциона.</returns>
-		public virtual decimal Vega(DateTimeOffset currentTime, decimal? deviation = null, decimal? assetPrice = null)
-		{
-			assetPrice = GetAssetPrice(assetPrice);
-			var timeToExp = GetExpirationTimeLine(currentTime);
-			return TryRound(DerivativesHelper.Vega(assetPrice.Value, timeToExp, D1(deviation ?? DefaultDeviation, assetPrice.Value, timeToExp)));
-		}
+		if (assetPrice == null)
+			return null;
 
-		/// <summary>
-		/// Рассчитать тету опциона.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="deviation">Стандартное отклонение. Если оно не указано, то используется <see cref="DefaultDeviation"/>.</param>
-		/// <param name="assetPrice">Цена базового актива. Если цена не указана, то получается цена последней сделки из <see cref="UnderlyingAsset"/>.</param>
-		/// <returns>Тета опциона.</returns>
-		public virtual decimal Theta(DateTimeOffset currentTime, decimal? deviation = null, decimal? assetPrice = null)
-		{
-			deviation = deviation ?? DefaultDeviation;
-			assetPrice = GetAssetPrice(assetPrice);
-			var timeToExp = GetExpirationTimeLine(currentTime);
-			return TryRound(DerivativesHelper.Theta(OptionType, GetStrike(), assetPrice.Value, RiskFree, deviation.Value, timeToExp, D1(deviation.Value, assetPrice.Value, timeToExp)));
-		}
+		var timeToExp = GetExpirationTimeLine(currentTime);
 
-		/// <summary>
-		/// Рассчитать ро опциона.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="deviation">Стандартное отклонение. Если оно не указано, то используется <see cref="DefaultDeviation"/>.</param>
-		/// <param name="assetPrice">Цена базового актива. Если цена не указана, то получается цена последней сделки из <see cref="UnderlyingAsset"/>.</param>
-		/// <returns>Ро опциона.</returns>
-		public virtual decimal Rho(DateTimeOffset currentTime, decimal? deviation = null, decimal? assetPrice = null)
-		{
-			deviation = deviation ?? DefaultDeviation;
-			assetPrice = GetAssetPrice(assetPrice);
-			var timeToExp = GetExpirationTimeLine(currentTime);
-			return TryRound(DerivativesHelper.Rho(OptionType, GetStrike(), assetPrice.Value, RiskFree, deviation.Value, timeToExp, D1(deviation.Value, assetPrice.Value, timeToExp)));
-		}
+		if (timeToExp == null)
+			return null;
 
-		/// <summary>
-		/// Рассчитать подразумеваемую волатильность.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="premium">Премия по опциону.</param>
-		/// <returns>Подразумеваевая волатильность.</returns>
-		public virtual decimal ImpliedVolatility(DateTimeOffset currentTime, decimal premium)
-		{
-			//var timeToExp = GetExpirationTimeLine();
-			return TryRound(DerivativesHelper.ImpliedVolatility(premium, diviation => Premium(currentTime, diviation)));
-		}
+		var expDiv = (decimal)DerivativesHelper.ExpRate(Dividend, timeToExp.Value);
 
-		/// <summary>
-		/// Рассчитать параметр d1 определения вероятности исполнения опциона.
-		/// </summary>
-		/// <param name="deviation">Стандартное отклонение.</param>
-		/// <param name="assetPrice">Цена базового актива.</param>
-		/// <param name="timeToExp">Период опциона до экспирации.</param>
-		/// <returns>Параметр d1.</returns>
-		protected virtual double D1(decimal deviation, decimal assetPrice, double timeToExp)
-		{
-			return DerivativesHelper.D1(assetPrice, GetStrike(), RiskFree, Dividend, deviation, timeToExp);
-		}
-		
-		/// <summary>
-		/// Создать стакан волатильности.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <returns>Стакан волатильности.</returns>
-		public virtual MarketDepth ImpliedVolatility(DateTimeOffset currentTime)
-		{
-			return DataProvider.GetMarketDepth(Option).ImpliedVolatility(this, currentTime);
-		}
+		return TryRound(expDiv * DerivativesHelper.Gamma(assetPrice.Value, deviation.Value, timeToExp.Value, D1(deviation.Value, assetPrice.Value, timeToExp.Value)));
+	}
 
-		internal decimal GetStrike()
-		{
-			return Option.Strike.Value;
-		}
+	/// <inheritdoc />
+	public virtual decimal? Vega(DateTime currentTime, decimal? deviation = null, decimal? assetPrice = null)
+	{
+		assetPrice = GetAssetPrice(assetPrice);
+
+		if (assetPrice == null)
+			return null;
+
+		var timeToExp = GetExpirationTimeLine(currentTime);
+
+		if (timeToExp == null)
+			return null;
+
+		// The premium the vega measures is discounted by the payout, so one point of volatility is
+		// worth e^(-qT) of what it adds to an asset that pays nothing out.
+		var expDiv = (decimal)DerivativesHelper.ExpRate(Dividend, timeToExp.Value);
+
+		return TryRound(expDiv * DerivativesHelper.Vega(assetPrice.Value, timeToExp.Value, D1(deviation ?? DefaultDeviation, assetPrice.Value, timeToExp.Value)));
+	}
+
+	/// <inheritdoc />
+	public virtual decimal? Theta(DateTime currentTime, decimal? deviation = null, decimal? assetPrice = null)
+	{
+		deviation = deviation ?? DefaultDeviation;
+		assetPrice = GetAssetPrice(assetPrice);
+
+		if (assetPrice == null)
+			return null;
+
+		var timeToExp = GetExpirationTimeLine(currentTime);
+
+		if (timeToExp == null)
+			return null;
+
+		return TryRound(DerivativesHelper.Theta(OptionType, GetStrike(), assetPrice.Value, RiskFree, Dividend, deviation.Value, timeToExp.Value, D1(deviation.Value, assetPrice.Value, timeToExp.Value)));
+	}
+
+	/// <inheritdoc />
+	public virtual decimal? Rho(DateTime currentTime, decimal? deviation = null, decimal? assetPrice = null)
+	{
+		deviation = deviation ?? DefaultDeviation;
+		assetPrice = GetAssetPrice(assetPrice);
+
+		if (assetPrice == null)
+			return null;
+
+		var timeToExp = GetExpirationTimeLine(currentTime);
+
+		if (timeToExp == null)
+			return null;
+
+		return TryRound(DerivativesHelper.Rho(OptionType, GetStrike(), assetPrice.Value, RiskFree, deviation.Value, timeToExp.Value, D1(deviation.Value, assetPrice.Value, timeToExp.Value)));
+	}
+
+	/// <inheritdoc />
+	public virtual decimal? ImpliedVolatility(DateTime currentTime, decimal premium)
+	{
+		//var timeToExp = GetExpirationTimeLine();
+		return TryRound(DerivativesHelper.ImpliedVolatility(premium, diviation => Premium(currentTime, diviation)));
+	}
+
+	/// <summary>
+	/// To calculate the d1 parameter of the option fulfilment probability estimating.
+	/// </summary>
+	/// <param name="deviation">Standard deviation.</param>
+	/// <param name="assetPrice">Underlying asset price.</param>
+	/// <param name="timeToExp">The option period before the expiration.</param>
+	/// <returns>The d1 parameter.</returns>
+	protected virtual double D1(decimal deviation, decimal assetPrice, double timeToExp)
+	{
+		return DerivativesHelper.D1(assetPrice, GetStrike(), RiskFree, Dividend, deviation, timeToExp);
+	}
+
+	internal decimal GetStrike()
+	{
+		if (Option is null)
+			throw new InvalidOperationException(LocalizedStrings.NoData);
+
+		return Option.Strike ?? throw new InvalidOperationException(LocalizedStrings.NoData);
 	}
 }

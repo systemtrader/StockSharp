@@ -1,515 +1,655 @@
-namespace StockSharp.Algo
+namespace StockSharp.Algo;
+
+partial class Connector
 {
-	using System;
-	using System.Collections.Generic;
-
-	using Ecng.Common;
-
-	using StockSharp.BusinessEntities;
-	using StockSharp.Logging;
-	using StockSharp.Messages;
-	using StockSharp.Localization;
-
-	partial class Connector
+	private async ValueTask ApplySubscriptionManagerActionsAsync(ConnectorSubscriptionManager.Actions actions, CancellationToken cancellationToken)
 	{
-		/// <summary>
-		/// Событие появления собственных новых сделок.
-		/// </summary>
-		public event Action<IEnumerable<MyTrade>> NewMyTrades;
+		if (actions == null)
+			throw new ArgumentNullException(nameof(actions));
 
-		/// <summary>
-		/// Событие появления всех новых сделок.
-		/// </summary>
-		public event Action<IEnumerable<Trade>> NewTrades;
-
-		/// <summary>
-		/// Событие появления новых заявок.
-		/// </summary>
-		public event Action<IEnumerable<Order>> NewOrders;
-
-		/// <summary>
-		/// Событие появления новых стоп-заявок.
-		/// </summary>
-		public event Action<IEnumerable<Order>> NewStopOrders;
-
-		/// <summary>
-		/// Событие изменения состояния заявок (снята, удовлетворена).
-		/// </summary>
-		public event Action<IEnumerable<Order>> OrdersChanged;
-
-		/// <summary>
-		/// Событие изменения стоп-заявок.
-		/// </summary>
-		public event Action<IEnumerable<Order>> StopOrdersChanged;
-
-		/// <summary>
-		/// Событие об ошибках, связанных с регистрацией заявок.
-		/// </summary>
-		public event Action<IEnumerable<OrderFail>> OrdersRegisterFailed;
-
-		/// <summary>
-		/// Событие об ошибках, связанных со снятием заявок.
-		/// </summary>
-		public event Action<IEnumerable<OrderFail>> OrdersCancelFailed;
-
-		/// <summary>
-		/// Событие об ошибках, связанных с регистрацией стоп-заявок.
-		/// </summary>
-		public event Action<IEnumerable<OrderFail>> StopOrdersRegisterFailed;
-
-		/// <summary>
-		/// Событие об ошибках, связанных со снятием стоп-заявок.
-		/// </summary>
-		public event Action<IEnumerable<OrderFail>> StopOrdersCancelFailed;
-
-		/// <summary>
-		/// Событие появления новых инструментов.
-		/// </summary>
-		public event Action<IEnumerable<Security>> NewSecurities;
-
-		/// <summary>
-		/// Событие изменения параметров инструментов.
-		/// </summary>
-		public event Action<IEnumerable<Security>> SecuritiesChanged;
-
-		/// <summary>
-		/// Событие появления новых портфелей.
-		/// </summary>
-		public event Action<IEnumerable<Portfolio>> NewPortfolios;
-
-		/// <summary>
-		/// Событие изменения параметров портфелей.
-		/// </summary>
-		public event Action<IEnumerable<Portfolio>> PortfoliosChanged;
-
-		/// <summary>
-		/// Событие появления новых позиций.
-		/// </summary>
-		public event Action<IEnumerable<Position>> NewPositions;
-
-		/// <summary>
-		/// Событие изменения параметров позиций.
-		/// </summary>
-		public event Action<IEnumerable<Position>> PositionsChanged;
-
-		/// <summary>
-		/// Событие появления новых стаканов с котировками.
-		/// </summary>
-		public event Action<IEnumerable<MarketDepth>> NewMarketDepths;
-
-		/// <summary>
-		/// Событие изменения стаканов с котировками.
-		/// </summary>
-		public event Action<IEnumerable<MarketDepth>> MarketDepthsChanged;
-
-		/// <summary>
-		/// Событие появления новых записей в логе заявок.
-		/// </summary>
-		public event Action<IEnumerable<OrderLogItem>> NewOrderLogItems;
-
-		/// <summary>
-		/// Событие, сигнализирующее об изменении текущего времени на биржевых площадках <see cref="IConnector.ExchangeBoards"/>.
-		/// Передается разница во времени, прошедшее с последнего вызова события. Первый раз событие передает значение <see cref="TimeSpan.Zero"/>.
-		/// </summary>
-		public event Action<TimeSpan> MarketTimeChanged;
-
-		/// <summary>
-		/// Событие появления новости.
-		/// </summary>
-		public event Action<News> NewNews;
-
-		/// <summary>
-		/// Событие изменения новости (например, при скачивании текста <see cref="StockSharp.BusinessEntities.News.Story"/>).
-		/// </summary>
-		public event Action<News> NewsChanged;
-
-		/// <summary>
-		/// Событие обработки нового сообщения <see cref="Message"/>.
-		/// </summary>
-		public event Action<Message, MessageDirections> NewMessage;
-
-		/// <summary>
-		/// Событие успешного подключения.
-		/// </summary>
-		public event Action Connected;
-
-		/// <summary>
-		/// Событие успешного отключения.
-		/// </summary>
-		public event Action Disconnected;
-
-		/// <summary>
-		/// Событие ошибки подключения (например, соединения было разорвано).
-		/// </summary>
-		public event Action<Exception> ConnectionError;
-
-		/// <summary>
-		/// Событие, сигнализирующее об ошибке при получении или обработке новых данных с сервера.
-		/// </summary>
-		public event Action<Exception> Error;
-
-		/// <summary>
-		/// Событие, передающее результат поиска, запущенного через метод <see cref="IConnector.LookupSecurities(StockSharp.BusinessEntities.Security)"/>.
-		/// </summary>
-		public event Action<IEnumerable<Security>> LookupSecuritiesResult;
-
-		/// <summary>
-		/// Событие, передающее результат поиска, запущенного через метод <see cref="IConnector.LookupPortfolios"/>.
-		/// </summary>
-		public event Action<IEnumerable<Portfolio>> LookupPortfoliosResult;
-
-		/// <summary>
-		/// Событие успешной регистрации инструмента для получения маркет-данных.
-		/// </summary>
-		public event Action<Security, MarketDataTypes> MarketDataSubscriptionSucceeded;
-
-		/// <summary>
-		/// Событие ошибки регистрации инструмента для получения маркет-данных.
-		/// </summary>
-		public event Action<Security, MarketDataTypes, Exception> MarketDataSubscriptionFailed;
-
-		/// <summary>
-		/// Событие изменения состояния сессии для биржевой площадки.
-		/// </summary>
-		public event Action<ExchangeBoard, SessionStates> SessionStateChanged;
-
-		/// <summary>
-		/// Событие изменения инструмента.
-		/// </summary>
-		public event Action<Security, IEnumerable<KeyValuePair<Level1Fields, object>>, DateTimeOffset, DateTime> ValuesChanged;
-
-		/// <summary>
-		/// Событие об успешном восстановлении соединения.
-		/// </summary>
-		public event Action Restored;
-
-		/// <summary>
-		/// Событие о тайм-ауте подключения.
-		/// </summary>
-		public event Action TimeOut;
-
-		/// <summary>
-		/// Вызвать событие <see cref="NewMyTrades"/>.
-		/// </summary>
-		/// <param name="trades">Мои сделки, которые нужно передать в событие.</param>
-		private void RaiseNewMyTrades(IEnumerable<MyTrade> trades)
+		foreach (var action in actions.Items)
 		{
-			NewMyTrades.SafeInvoke(trades);
+			switch (action.Type)
+			{
+				case ConnectorSubscriptionManager.Actions.Item.Types.SendInMessage:
+					await SendInMessageAsync(action.Message, cancellationToken);
+					break;
+				case ConnectorSubscriptionManager.Actions.Item.Types.AddOrderStatus:
+					_entityCache.AddOrderStatusTransactionId(action.TransactionId);
+					break;
+				case ConnectorSubscriptionManager.Actions.Item.Types.RemoveOrderStatus:
+					_entityCache.RemoveOrderStatusTransactionId(action.TransactionId);
+					break;
+				default:
+					throw new ArgumentOutOfRangeException(nameof(actions), action.Type, LocalizedStrings.InvalidValue);
+			}
+		}
+	}
+
+	private void ApplySubscriptionManagerActions(ConnectorSubscriptionManager.Actions actions)
+		=> AsyncHelper.Run(() => ApplySubscriptionManagerActionsAsync(actions, default));
+
+	/// <inheritdoc />
+	public IEnumerable<Subscription> Subscriptions => _subscriptionManager.Subscriptions;
+
+	/// <inheritdoc />
+	public void Subscribe(Subscription subscription)
+		=> ApplySubscriptionManagerActions(_subscriptionManager.Subscribe(subscription));
+
+	/// <inheritdoc />
+	public void UnSubscribe(Subscription subscription)
+		=> ApplySubscriptionManagerActions(_subscriptionManager.UnSubscribe(subscription));
+
+	/// <inheritdoc />
+	[Obsolete("Use OwnTradeReceived event.")]
+	public event Action<MyTrade> NewMyTrade;
+
+	/// <inheritdoc />
+	[Obsolete("Use OrderReceived event.")]
+	public event Action<Order> NewOrder;
+
+	/// <inheritdoc />
+	[Obsolete("Use OrderReceived event.")]
+	public event Action<Order> OrderChanged;
+
+	/// <inheritdoc />
+	[Obsolete("Use OrderReceived event.")]
+	public event Action<long, Order> OrderEdited;
+
+	/// <inheritdoc />
+	[Obsolete("Use OrderRegisterFailReceived event.")]
+	public event Action<OrderFail> OrderRegisterFailed;
+
+	/// <inheritdoc />
+	[Obsolete("Use OrderCancelFailReceived event.")]
+	public event Action<OrderFail> OrderCancelFailed;
+
+	/// <inheritdoc />
+	[Obsolete("Use OrderEditFailReceived event.")]
+	public event Action<long, OrderFail> OrderEditFailed;
+
+	/// <inheritdoc />
+	public event Action<long> MassOrderCanceled;
+
+	/// <inheritdoc />
+	public event Action<long, DateTime> MassOrderCanceled2;
+
+	/// <inheritdoc />
+	public event Action<long, Exception> MassOrderCancelFailed;
+
+	/// <inheritdoc />
+	public event Action<long, Exception, DateTime> MassOrderCancelFailed2;
+
+	/// <inheritdoc />
+	[Obsolete("Use PortfolioReceived event.")]
+	public event Action<Portfolio> NewPortfolio;
+
+	/// <inheritdoc />
+	[Obsolete("Use PortfolioReceived event.")]
+	public event Action<Portfolio> PortfolioChanged;
+
+	/// <inheritdoc />
+	[Obsolete("Use PositionReceived event.")]
+	public event Action<Position> NewPosition;
+
+	/// <inheritdoc />
+	[Obsolete("Use PositionReceived event.")]
+	public event Action<Position> PositionChanged;
+
+	/// <inheritdoc />
+	[Obsolete("Use NewOutMessageAsync event.")]
+	public event Action<Message> NewMessage;
+
+	/// <inheritdoc />
+	public event Func<Message, CancellationToken, ValueTask> NewOutMessageAsync;
+
+	/// <inheritdoc />
+	public event Action<TimeSpan> CurrentTimeChanged;
+
+	/// <inheritdoc />
+	public event Action Connected;
+
+	/// <inheritdoc />
+	public event Action Disconnected;
+
+	/// <inheritdoc />
+	public event Action<Exception> ConnectionError;
+
+	/// <inheritdoc />
+	public event Action<IMessageAdapter> ConnectedEx;
+
+	/// <inheritdoc />
+	public event Action<IMessageAdapter> DisconnectedEx;
+
+	/// <inheritdoc />
+	public event Action<IMessageAdapter, Exception> ConnectionErrorEx;
+
+	/// <inheritdoc cref="IConnector" />
+	public event Action<Exception> Error;
+
+	/// <inheritdoc />
+	// TODO
+	//[Obsolete("Use SecurityReceived and SubscriptionStopped events.")]
+	public event Action<SecurityLookupMessage, IEnumerable<Security>, Exception> LookupSecuritiesResult;
+
+	/// <inheritdoc />
+	// TODO
+	//[Obsolete("Use PortfolioReceived and SubscriptionStopped events.")]
+	public event Action<PortfolioLookupMessage, IEnumerable<Portfolio>, Exception> LookupPortfoliosResult;
+
+	/// <inheritdoc />
+	// TODO
+	[Obsolete("Use SecurityReceived and SubscriptionStopped events.")]
+	public event Action<SecurityLookupMessage, IEnumerable<Security>, IEnumerable<Security>, Exception> LookupSecuritiesResult2;
+
+	/// <inheritdoc />
+	[Obsolete("Use PortfolioReceived and SubscriptionStopped events.")]
+	public event Action<PortfolioLookupMessage, IEnumerable<Portfolio>, IEnumerable<Portfolio>, Exception> LookupPortfoliosResult2;
+
+	/// <inheritdoc />
+	public event Action<Security, IEnumerable<KeyValuePair<Level1Fields, object>>, DateTime, DateTime> ValuesChanged;
+
+	/// <inheritdoc />
+	public event Action<Subscription, Level1ChangeMessage> Level1Received;
+
+	/// <inheritdoc />
+	public event Action<Subscription, IOrderBookMessage> OrderBookReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, ITickTradeMessage> TickTradeReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, IOrderLogMessage> OrderLogReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, Security> SecurityReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, ExchangeBoard> BoardReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, News> NewsReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, ICandleMessage> CandleReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, MyTrade> OwnTradeReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, Order> OrderReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, OrderFail> OrderRegisterFailReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, OrderFail> OrderCancelFailReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, OrderFail> OrderEditFailReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, Portfolio> PortfolioReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, Position> PositionReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription, DataType> DataTypeReceived;
+
+	/// <inheritdoc />
+	public event Action<Subscription> SubscriptionOnline;
+
+	/// <inheritdoc />
+	public event Action<Subscription> SubscriptionStarted;
+
+	/// <inheritdoc />
+	public event Action<Subscription, Exception> SubscriptionStopped;
+
+	/// <inheritdoc />
+	public event Action<Subscription, Exception, bool> SubscriptionFailed;
+
+	/// <inheritdoc />
+	public event Action<Subscription, object> SubscriptionReceived;
+
+	/// <inheritdoc />
+	public event Action<IMessageAdapter> ConnectionRestored;
+
+	/// <inheritdoc />
+	public event Action<IMessageAdapter> ConnectionLost;
+
+	/// <inheritdoc />
+	public event Action<long, Exception> ChangePasswordResult;
+
+	private void RaiseNewMyTrade(MyTrade trade)
+	{
+		LogInfo("New own trade: {0}", trade);
+
+		NewMyTrade?.Invoke(trade);
+	}
+
+	private void RaiseNewOrder(Order order)
+	{
+		NewOrder?.Invoke(order);
+	}
+
+	private void RaiseOrderChanged(Order order)
+	{
+		OrderChanged?.Invoke(order);
+	}
+
+	private void RaiseOrderEdited(long transactionId, Order order)
+	{
+		LogDebug("Order {0} edited by transaction {1}.", order, transactionId);
+		OrderEdited?.Invoke(transactionId, order);
+	}
+
+	private void RaiseOrderFailed(string name, long transactionId, OrderFail fail, Action<long, OrderFail> failed)
+	{
+		this.AddErrorLog(() => name + Environment.NewLine + fail.Order + Environment.NewLine + fail.Error);
+		failed?.Invoke(transactionId, fail);
+	}
+
+	private void RaiseOrderRegisterFailed(long transactionId, OrderFail fail)
+	{
+		RaiseOrderFailed(nameof(OrderRegisterFailed), transactionId, fail, (id, f) => OrderRegisterFailed?.Invoke(f));
+	}
+
+	private void RaiseOrderCancelFailed(long transactionId, OrderFail fail)
+	{
+		RaiseOrderFailed(nameof(OrderCancelFailed), transactionId, fail, (id, f) => OrderCancelFailed?.Invoke(f));
+	}
+
+	private void RaiseOrderEditFailed(long transactionId, OrderFail fail)
+	{
+		RaiseOrderFailed(nameof(OrderEditFailed), transactionId, fail, OrderEditFailed);
+	}
+
+	private void RaiseMassOrderCanceled(long transactionId, DateTime time)
+	{
+		MassOrderCanceled?.Invoke(transactionId);
+		MassOrderCanceled2?.Invoke(transactionId, time);
+	}
+
+	private void RaiseMassOrderCancelFailed(long transactionId, Exception error, DateTime time)
+	{
+		MassOrderCancelFailed?.Invoke(transactionId, error);
+		MassOrderCancelFailed2?.Invoke(transactionId, error, time);
+	}
+
+	private void RaiseNewPortfolio(Portfolio portfolio)
+	{
+		NewPortfolio?.Invoke(portfolio);
+	}
+
+	private void RaisePortfolioChanged(Portfolio portfolio)
+	{
+		PortfolioChanged?.Invoke(portfolio);
+	}
+
+	private void RaiseNewPosition(Position position)
+	{
+		NewPosition?.Invoke(position);
+	}
+
+	private void RaisePositionChanged(Position position)
+	{
+		PositionChanged?.Invoke(position);
+	}
+
+	/// <summary>
+	/// To call the event <see cref="Connected"/>.
+	/// </summary>
+	private void RaiseConnected()
+	{
+		ConnectionState = ConnectionStates.Connected;
+		Connected?.Invoke();
+	}
+
+	/// <summary>
+	/// To call the event <see cref="ConnectedEx"/>.
+	/// </summary>
+	/// <param name="adapter">Adapter, initiated event.</param>
+	private void RaiseConnectedEx(IMessageAdapter adapter)
+	{
+		ConnectedEx?.Invoke(adapter);
+	}
+
+	/// <summary>
+	/// To call the event <see cref="Disconnected"/>.
+	/// </summary>
+	private async ValueTask RaiseDisconnectedAsync(CancellationToken cancellationToken)
+	{
+		ConnectionState = ConnectionStates.Disconnected;
+		await OnDisconnectedAsync(cancellationToken);
+		Disconnected?.Invoke();
+	}
+
+	/// <summary>
+	/// Called once the connection is closed, before <see cref="Disconnected"/> is raised.
+	/// </summary>
+	/// <param name="cancellationToken"><see cref="CancellationToken"/></param>
+	/// <returns><see cref="ValueTask"/></returns>
+	protected virtual ValueTask OnDisconnectedAsync(CancellationToken cancellationToken) => default;
+
+	/// <summary>
+	/// To call the event <see cref="DisconnectedEx"/>.
+	/// </summary>
+	/// <param name="adapter">Adapter, initiated event.</param>
+	private void RaiseDisconnectedEx(IMessageAdapter adapter)
+	{
+		DisconnectedEx?.Invoke(adapter);
+	}
+
+	/// <summary>
+	/// To call the event <see cref="ConnectionError"/>.
+	/// </summary>
+	/// <param name="exception">Error connection.</param>
+	private void RaiseConnectionError(Exception exception)
+	{
+		if (exception == null)
+			throw new ArgumentNullException(nameof(exception));
+
+		ConnectionState = ConnectionStates.Failed;
+		ConnectionError?.Invoke(exception);
+
+		LogError(exception);
+	}
+
+	/// <summary>
+	/// To call the event <see cref="ConnectionErrorEx"/>.
+	/// </summary>
+	/// <param name="adapter">Adapter, initiated event.</param>
+	/// <param name="exception">Error connection.</param>
+	private void RaiseConnectionErrorEx(IMessageAdapter adapter, Exception exception)
+	{
+		if (exception == null)
+			throw new ArgumentNullException(nameof(exception));
+
+		ConnectionErrorEx?.Invoke(adapter, exception);
+	}
+
+	/// <summary>
+	/// To call the event <see cref="Error"/>.
+	/// </summary>
+	/// <param name="exception">Data processing error.</param>
+	protected void RaiseError(Exception exception)
+	{
+		if (exception is null)
+			throw new ArgumentNullException(nameof(exception));
+
+		ErrorCount++;
+		Error?.Invoke(exception);
+
+		LogError(exception);
+	}
+
+	/// <summary>
+	/// To call the event <see cref="CurrentTimeChanged"/>.
+	/// </summary>
+	/// <param name="diff">The difference in the time since the last call of the event. The first time the event passes the <see cref="TimeSpan.Zero"/> value.</param>
+	private void RaiseCurrentTimeChanged(TimeSpan diff)
+	{
+		CurrentTimeChanged?.Invoke(diff);
+	}
+
+	/// <summary>
+	/// To call the event <see cref="LookupSecuritiesResult"/>.
+	/// </summary>
+	/// <param name="message">Message.</param>
+	/// <param name="error">An error of lookup operation. The value will be <see langword="null"/> if operation complete successfully.</param>
+	/// <param name="newSecurities">Found instruments.</param>
+	private void RaiseLookupSecuritiesResult(SecurityLookupMessage message, Exception error, Security[] newSecurities)
+	{
+		LookupSecuritiesResult?.Invoke(message, newSecurities, error);
+		LookupSecuritiesResult2?.Invoke(message, [], newSecurities, error);
+	}
+
+	/// <summary>
+	/// To call the event <see cref="LookupPortfoliosResult"/>.
+	/// </summary>
+	/// <param name="message">Message.</param>
+	/// <param name="error">An error of lookup operation. The value will be <see langword="null"/> if operation complete successfully.</param>
+	/// <param name="newPortfolios">Found portfolios.</param>
+	private void RaiseLookupPortfoliosResult(PortfolioLookupMessage message, Exception error, Portfolio[] newPortfolios)
+	{
+		LookupPortfoliosResult?.Invoke(message, newPortfolios, error);
+		LookupPortfoliosResult2?.Invoke(message, [], newPortfolios, error);
+	}
+
+	private void RaiseMarketDataSubscriptionSucceeded(MarketDataMessage message, Subscription subscription)
+	{
+		if (message == null)
+			throw new ArgumentNullException(nameof(message));
+
+		if (subscription == null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		var securityId = subscription.SecurityId;
+
+		var msg = LocalizedStrings.SubscribedOk.Put(securityId, message.DataType2);
+
+		if (message.From != null && message.To != null)
+			msg += LocalizedStrings.FromTill.Put(message.From.Value, message.To.Value);
+
+		LogDebug(msg + ".");
+
+		RaiseSubscriptionStarted(subscription);
+	}
+
+	private void RaiseMarketDataSubscriptionFailed(MarketDataMessage origin, SubscriptionResponseMessage reply, Subscription subscription)
+	{
+		if (origin == null)
+			throw new ArgumentNullException(nameof(origin));
+
+		if (reply == null)
+			throw new ArgumentNullException(nameof(reply));
+
+		if (subscription == null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		var securityId = subscription.SecurityId;
+		var error = reply.Error ?? new NotSupportedException(LocalizedStrings.SubscriptionNotSupported.Put(origin));
+
+		if (reply.IsNotSupported())
+			LogWarning(LocalizedStrings.SubscriptionNotSupported, origin);
+		else
+			LogError(LocalizedStrings.SubscribedError, securityId, origin.DataType2, error.Message);
+
+		RaiseSubscriptionFailed(subscription, error, true);
+	}
+
+	private void RaiseMarketDataUnSubscriptionSucceeded(MarketDataMessage message, Subscription subscription)
+	{
+		if (message == null)
+			throw new ArgumentNullException(nameof(message));
+
+		if (subscription == null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		var securityId = subscription.SecurityId;
+
+		var msg = LocalizedStrings.UnSubscribedOk.Put(securityId,	message.DataType2);
+
+		if (message.From != null && message.To != null)
+			msg += LocalizedStrings.FromTill.Put(message.From.Value, message.To.Value);
+
+		LogDebug(msg + ".");
+
+		RaiseSubscriptionStopped(subscription, null);
+	}
+
+	private void RaiseMarketDataUnSubscriptionFailed(MarketDataMessage origin, SubscriptionResponseMessage reply, Subscription subscription)
+	{
+		if (origin == null)
+			throw new ArgumentNullException(nameof(origin));
+
+		if (reply == null)
+			throw new ArgumentNullException(nameof(reply));
+
+		if (subscription == null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		var securityId = subscription.SecurityId;
+		var error = reply.Error ?? new NotSupportedException();
+
+		LogError(LocalizedStrings.UnSubscribedError, securityId, origin.DataType2, error.Message);
+
+		RaiseSubscriptionFailed(subscription, error, false);
+	}
+
+	private void RaiseMarketDataSubscriptionFinished(SubscriptionFinishedMessage message, Subscription subscription)
+	{
+		if (message == null)
+			throw new ArgumentNullException(nameof(message));
+
+		if (subscription == null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		var securityId = subscription.SecurityId;
+
+		LogDebug(LocalizedStrings.SubscriptionFinished, securityId, message);
+
+		RaiseSubscriptionStopped(subscription, null);
+	}
+
+	private void RaiseMarketDataUnexpectedCancelled(MarketDataMessage message, Exception error, Subscription subscription)
+	{
+		if (message == null)
+			throw new ArgumentNullException(nameof(message));
+
+		if (error == null)
+			throw new ArgumentNullException(nameof(error));
+
+		if (subscription == null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		var securityId = subscription.SecurityId;
+
+		LogError(LocalizedStrings.SubscriptionUnexpectedCancelled, securityId, message.DataType2, error.Message);
+
+		RaiseSubscriptionStopped(subscription, error);
+	}
+
+	private void RaiseSubscriptionOnline(Subscription subscription)
+	{
+		if (subscription == null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		SubscriptionOnline?.Invoke(subscription);
+	}
+
+	private void RaiseSubscriptionStarted(Subscription subscription)
+	{
+		if (subscription == null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		SubscriptionStarted?.Invoke(subscription);
+	}
+
+	private void RaiseSubscriptionStopped(Subscription subscription, Exception error)
+	{
+		if (subscription == null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		ReleaseLevel1Ownership(subscription);
+
+		SubscriptionStopped?.Invoke(subscription, error);
+	}
+
+	/// <summary>
+	/// </summary>
+	protected virtual void RaiseSubscriptionFailed(Subscription subscription, Exception error, bool isSubscribe)
+	{
+		if (subscription == null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		if (error == null)
+			throw new ArgumentNullException(nameof(error));
+
+		SubscriptionFailed?.Invoke(subscription, error, isSubscribe);
+	}
+
+	private void RaiseMarketDataSubscriptionOnline(Subscription subscription)
+	{
+		if (subscription == null)
+			throw new ArgumentNullException(nameof(subscription));
+
+		var securityId = subscription.SecurityId;
+
+		LogDebug(LocalizedStrings.SubscriptionOnline, securityId, subscription.SubscriptionMessage);
+
+		RaiseSubscriptionOnline(subscription);
+	}
+
+	private ValueTask RaiseNewMessage(Message message, CancellationToken cancellationToken)
+	{
+		NewMessage?.Invoke(message);
+		return NewOutMessageAsync.InvokeAsync(message, cancellationToken);
+	}
+
+	private void RaiseValuesChanged(Security security, IEnumerable<KeyValuePair<Level1Fields, object>> changes, DateTime serverTime, DateTime localTime)
+	{
+		ValuesChanged?.Invoke(security, changes, serverTime, localTime);
+	}
+
+	private void RaiseConnectionLost(IMessageAdapter adapter)
+	{
+		ConnectionLost?.Invoke(adapter);
+	}
+
+	private void RaiseConnectionRestored(IMessageAdapter adapter)
+	{
+		ConnectionRestored?.Invoke(adapter);
+	}
+
+	private void RaiseChangePassword(long transactionId, Exception error)
+	{
+		ChangePasswordResult?.Invoke(transactionId, error);
+	}
+
+	private bool? RaiseReceived<TEntity>(TEntity entity, ISubscriptionIdMessage message, Action<Subscription, TEntity> evt)
+	{
+		return RaiseReceived(entity, message, evt, out _);
+	}
+
+	private bool? RaiseReceived<TEntity>(TEntity entity, ISubscriptionIdMessage message, Action<Subscription, TEntity> evt, out bool? anyCanOnline)
+	{
+		return RaiseReceived(entity, _subscriptionManager.GetSubscriptions(message), evt, out anyCanOnline);
+	}
+
+	private void RaiseReceived<TEntity>(TEntity entity, IEnumerable<Subscription> subscriptions, Action<Subscription, TEntity> evt)
+	{
+		RaiseReceived(entity, subscriptions, evt, out _);
+	}
+
+	private bool? RaiseReceived<TEntity>(TEntity entity, IEnumerable<Subscription> subscriptions, Action<Subscription, TEntity> evt, out bool? anyCanOnline)
+	{
+		if (subscriptions is null)
+			throw new ArgumentNullException(nameof(subscriptions));
+
+		bool? anyOnline = null;
+		anyCanOnline = null;
+
+		foreach (var subscription in subscriptions)
+		{
+			anyOnline = anyOnline == true || subscription.State == SubscriptionStates.Online;
+			anyCanOnline = anyCanOnline == true || (subscription.State == SubscriptionStates.Active && !subscription.SubscriptionMessage.IsHistoryOnly());
+
+			evt?.Invoke(subscription, entity);
+			RaiseSubscriptionReceived(subscription, entity);
 		}
 
-		/// <summary>
-		/// Вызвать событие <see cref="NewTrades"/>.
-		/// </summary>
-		/// <param name="trades">Сделки, которые нужно передать в событие.</param>
-		private void RaiseNewTrades(IEnumerable<Trade> trades)
-		{
-			NewTrades.SafeInvoke(trades);
-		}
+		return anyOnline;
+	}
 
-		/// <summary>
-		/// Вызвать событие <see cref="NewOrders"/>.
-		/// </summary>
-		/// <param name="orders">Заявки, которые нужно передать в событие.</param>
-		private void RaiseNewOrders(IEnumerable<Order> orders)
-		{
-			NewOrders.SafeInvoke(orders);
-		}
+	private void RaiseSubscriptionReceived(Subscription subscription, object arg)
+	{
+		SubscriptionReceived?.Invoke(subscription, arg);
+	}
 
-		/// <summary>
-		/// Вызвать событие <see cref="NewStopOrders"/>.
-		/// </summary>
-		/// <param name="stopOrders">Стоп-заявки, которые нужно передать в событие.</param>
-		private void RaiseNewStopOrders(IEnumerable<Order> stopOrders)
-		{
-			NewStopOrders.SafeInvoke(stopOrders);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="OrdersChanged"/>.
-		/// </summary>
-		/// <param name="orders">Заявки, которые нужно передать в событие.</param>
-		private void RaiseOrdersChanged(IEnumerable<Order> orders)
-		{
-			OrdersChanged.SafeInvoke(orders);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="StopOrdersChanged"/>.
-		/// </summary>
-		/// <param name="stopOrders">Стоп-заявки, которые нужно передать в событие.</param>
-		private void RaiseStopOrdersChanged(IEnumerable<Order> stopOrders)
-		{
-			StopOrdersChanged.SafeInvoke(stopOrders);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="OrdersRegisterFailed"/>.
-		/// </summary>
-		/// <param name="fails">Информация об ошибках, которую нужно передать в событие.</param>
-		private void RaiseOrdersRegisterFailed(IEnumerable<OrderFail> fails)
-		{
-			OrdersRegisterFailed.SafeInvoke(fails);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="OrdersCancelFailed"/>.
-		/// </summary>
-		/// <param name="fails">Информация об ошибках, которую нужно передать в событие.</param>
-		private void RaiseOrdersCancelFailed(IEnumerable<OrderFail> fails)
-		{
-			OrdersCancelFailed.SafeInvoke(fails);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="StopOrdersRegisterFailed"/>.
-		/// </summary>
-		/// <param name="fails">Информация об ошибках, которую нужно передать в событие.</param>
-		private void RaiseStopOrdersRegisterFailed(IEnumerable<OrderFail> fails)
-		{
-			StopOrdersRegisterFailed.SafeInvoke(fails);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="StopOrdersCancelFailed"/>.
-		/// </summary>
-		/// <param name="fails">Информация об ошибках, которую нужно передать в событие.</param>
-		private void RaiseStopOrdersCancelFailed(IEnumerable<OrderFail> fails)
-		{
-			StopOrdersCancelFailed.SafeInvoke(fails);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="NewSecurities"/>.
-		/// </summary>
-		/// <param name="securities">Инструменты, которые нужно передать в событие.</param>
-		private void RaiseNewSecurities(IEnumerable<Security> securities)
-		{
-			NewSecurities.SafeInvoke(securities);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="SecuritiesChanged"/>.
-		/// </summary>
-		/// <param name="securities">Инструменты, которые нужно передать в событие.</param>
-		private void RaiseSecuritiesChanged(IEnumerable<Security> securities)
-		{
-			SecuritiesChanged.SafeInvoke(securities);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="SecuritiesChanged"/>.
-		/// </summary>
-		/// <param name="security">Инструмент, который нужно передать в событие.</param>
-		private void RaiseSecurityChanged(Security security)
-		{
-			RaiseSecuritiesChanged(new[] { security });
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="NewPortfolios"/>.
-		/// </summary>
-		/// <param name="portfolios">Портфели, которые нужно передать в событие.</param>
-		private void RaiseNewPortfolios(IEnumerable<Portfolio> portfolios)
-		{
-			NewPortfolios.SafeInvoke(portfolios);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="PortfoliosChanged"/>.
-		/// </summary>
-		/// <param name="portfolios">Портфели, которые нужно передать в событие.</param>
-		private void RaisePortfoliosChanged(IEnumerable<Portfolio> portfolios)
-		{
-			PortfoliosChanged.SafeInvoke(portfolios);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="NewPositions"/>.
-		/// </summary>
-		/// <param name="positions">Позиции, которые нужно передать в событие.</param>
-		private void RaiseNewPositions(IEnumerable<Position> positions)
-		{
-			NewPositions.SafeInvoke(positions);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="PositionsChanged"/>.
-		/// </summary>
-		/// <param name="positions">Позиции, которые нужно передать в событие.</param>
-		private void RaisePositionsChanged(IEnumerable<Position> positions)
-		{
-			PositionsChanged.SafeInvoke(positions);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="NewMarketDepths"/>.
-		/// </summary>
-		/// <param name="marketDepths">Стаканы, которые нужно передать в событие.</param>
-		private void RaiseNewMarketDepths(IEnumerable<MarketDepth> marketDepths)
-		{
-			NewMarketDepths.SafeInvoke(marketDepths);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="MarketDepthsChanged"/>.
-		/// </summary>
-		/// <param name="marketDepths">Стаканы, которые нужно передать в событие.</param>
-		private void RaiseMarketDepthsChanged(IEnumerable<MarketDepth> marketDepths)
-		{
-			MarketDepthsChanged.SafeInvoke(marketDepths);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="NewNews"/>.
-		/// </summary>
-		/// <param name="news">Новость.</param>
-		private void RaiseNewNews(News news)
-		{
-			NewNews.SafeInvoke(news);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="NewsChanged"/>.
-		/// </summary>
-		/// <param name="news">Новость.</param>
-		private void RaiseNewsChanged(News news)
-		{
-			NewsChanged.SafeInvoke(news);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="NewOrderLogItems"/>.
-		/// </summary>
-		/// <param name="items">Строчки лога заявок.</param>
-		private void RaiseNewOrderLogItems(IEnumerable<OrderLogItem> items)
-		{
-			NewOrderLogItems.SafeInvoke(items);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="Connected"/>.
-		/// </summary>
-		private void RaiseConnected()
-		{
-			ConnectionState = ConnectionStates.Connected;
-			Connected.SafeInvoke();
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="Disconnected"/>.
-		/// </summary>
-		private void RaiseDisconnected()
-		{
-			// адаптеры маркет-данных сами должны оповещать коннектор
-			//if (!IsMarketDataIndependent)
-			//	RaiseExportStopped();
-
-			ConnectionState = ConnectionStates.Disconnected;
-			Disconnected.SafeInvoke();
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="ConnectionError"/>.
-		/// </summary>
-		/// <param name="exception">Ошибка соединения.</param>
-		private void RaiseConnectionError(Exception exception)
-		{
-			if (exception == null)
-				throw new ArgumentNullException("exception");
-
-			// адаптеры маркет-данных сами должны оповещать коннектор
-			//if (!IsMarketDataIndependent)
-			//	RaiseExportError(exception);
-
-			ConnectionState = ConnectionStates.Failed;
-			ConnectionError.SafeInvoke(exception);
-
-			this.AddErrorLog(exception);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="Error"/>.
-		/// </summary>
-		/// <param name="exception">Ошибка обработки данных.</param>
-		private void RaiseError(Exception exception)
-		{
-			if (exception == null)
-				throw new ArgumentNullException("exception");
-
-			ErrorCount++;
-
-			this.AddErrorLog(exception);
-			Error.SafeInvoke(exception);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="MarketTimeChanged"/>.
-		/// </summary>
-		/// <param name="diff">Разница во времени, прошедшее с последнего вызова события. Первый раз событие передает значение <see cref="TimeSpan.Zero"/>.</param>
-		private void RaiseMarketTimeChanged(TimeSpan diff)
-		{
-			MarketTimeChanged.SafeInvoke(diff);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="LookupSecuritiesResult"/>.
-		/// </summary>
-		/// <param name="securities">Найденные инструменты.</param>
-		private void RaiseLookupSecuritiesResult(IEnumerable<Security> securities)
-		{
-			LookupSecuritiesResult.SafeInvoke(securities);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="LookupPortfoliosResult"/>.
-		/// </summary>
-		/// <param name="portfolios">Найденные портфели.</param>
-		private void RaiseLookupPortfoliosResult(IEnumerable<Portfolio> portfolios)
-		{
-			LookupPortfoliosResult.SafeInvoke(portfolios);
-		}
-
-		private void RaiseMarketDataSubscriptionSucceeded(Security security, MarketDataMessage message)
-		{
-			var msg = LocalizedStrings.Str690Params.Put(security.Id, message.DataType);
-
-			if (message.From != DateTimeOffset.MinValue && message.To != DateTimeOffset.MaxValue)
-				msg += LocalizedStrings.Str691Params.Put(message.From, message.To);
-
-			this.AddInfoLog(msg + ".");
-
-			MarketDataSubscriptionSucceeded.SafeInvoke(security, message.DataType);
-		}
-
-		private void RaiseMarketDataSubscriptionFailed(Security security, MarketDataTypes dataType, Exception error)
-		{
-			this.AddErrorLog(LocalizedStrings.Str634Params, security.Id, dataType, error);
-			MarketDataSubscriptionFailed.SafeInvoke(security, dataType, error);
-		}
-
-		/// <summary>
-		/// Вызвать событие <see cref="NewMessage"/>.
-		/// </summary>
-		/// <param name="message">Новое сообщение.</param>
-		/// <param name="direction">Направление сообщения.</param>
-		private void RaiseNewMessage(Message message, MessageDirections direction)
-		{
-			NewMessage.SafeInvoke(message, direction);
-		}
-
-		private void RaiseValuesChanged(Security security, IEnumerable<KeyValuePair<Level1Fields, object>> changes, DateTimeOffset serverTime, DateTime localTime)
-		{
-			ValuesChanged.SafeInvoke(security, changes, serverTime, localTime);
-		}
-
-		private void RaiseRestored()
-		{
-			Restored.SafeInvoke();
-		}
-
-		private void RaiseTimeOut()
-		{
-			TimeOut.SafeInvoke();
-		}
+	private void RaiseLevel1Received(Subscription subscription, Level1ChangeMessage message)
+	{
+		Level1Received?.Invoke(subscription, message);
 	}
 }

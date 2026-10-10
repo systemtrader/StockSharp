@@ -1,283 +1,187 @@
-namespace StockSharp.Algo.Derivatives
+namespace StockSharp.Algo.Derivatives;
+
+/// <summary>
+/// Portfolio model for calculating the values of Greeks by the Black-Scholes formula.
+/// </summary>
+public class BasketBlackScholes : BlackScholes
 {
-	using System;
-	using System.Linq;
-
-	using Ecng.Collections;
-
-	using StockSharp.Algo.Positions;
-	using StockSharp.BusinessEntities;
-	using StockSharp.Messages;
-	using StockSharp.Localization;
-
 	/// <summary>
-	/// Портфельная модель расчета значений "греков" по формуле Блэка-Шоулза.
+	/// The interface describing the internal models collection <see cref="InnerModels"/>.
 	/// </summary>
-	public class BasketBlackScholes : BlackScholes
+	public interface IInnerModelList : ISynchronizedCollection<BlackScholes>
 	{
 		/// <summary>
-		/// Модель расчета значений "греков" по формуле Блэка-Шоулза с учетом позиции.
+		/// To get the model for calculating Greeks values by the Black-Scholes formula for a particular option.
 		/// </summary>
-		public class InnerModel
-		{
-			/// <summary>
-			/// Создать <see cref="InnerModel"/>.
-			/// </summary>
-			/// <param name="model">Модель расчета значений "греков" по формуле Блэка-Шоулза.</param>
-			/// <param name="positionManager">Менеджер позиции.</param>
-			public InnerModel(BlackScholes model, IPositionManager positionManager)
-			{
-				if (model == null)
-					throw new ArgumentNullException("model");
+		/// <param name="option">Options contract.</param>
+		/// <returns>The model. If the option is not registered, then <see langword="null" /> will be returned.</returns>
+		BlackScholes this[Security option] { get; }
+	}
 
-				if (positionManager == null)
-					throw new ArgumentNullException("positionManager");
+	private sealed class InnerModelList(BasketBlackScholes parent) : CachedSynchronizedList<BlackScholes>, IInnerModelList
+	{
+		private readonly BasketBlackScholes _parent = parent ?? throw new ArgumentNullException(nameof(parent));
 
-				Model = model;
-				PositionManager = positionManager;
-			}
-
-			/// <summary>
-			/// Модель расчета значений "греков" по формуле Блэка-Шоулза.
-			/// </summary>
-			public BlackScholes Model { get; private set; }
-
-			/// <summary>
-			/// Менеджер позиции.
-			/// </summary>
-			public IPositionManager PositionManager { get; private set; }
-		}
-
-		/// <summary>
-		/// Интерфейс, описывающий коллекцию внутренних моделей <see cref="BasketBlackScholes.InnerModels"/>.
-		/// </summary>
-		public interface IInnerModelList : ISynchronizedCollection<InnerModel>
-		{
-			/// <summary>
-			/// Получить модель расчета значений "греков" по формуле Блэка-Шоулза для конкретного опциона.
-			/// </summary>
-			/// <param name="option">Опцион.</param>
-			/// <returns>Модель. Если опцион не зарегистрирован, то будет возвращено null.</returns>
-			InnerModel this[Security option] { get; }
-		}
-
-		private sealed class InnerModelList : CachedSynchronizedList<InnerModel>, IInnerModelList
-		{
-			private readonly BasketBlackScholes _parent;
-
-			public InnerModelList(BasketBlackScholes parent)
-			{
-				if (parent == null)
-					throw new ArgumentNullException("parent");
-
-				_parent = parent;
-			}
-
-			InnerModel IInnerModelList.this[Security option]
-			{
-				get
-				{
-					if (option == null)
-						throw new ArgumentNullException("option");
-
-					return this.SyncGet(c => c.FirstOrDefault(i => i.Model.Option == option));
-				}
-			}
-
-			protected override bool OnAdding(InnerModel item)
-			{
-				item.Model.RoundDecimals = _parent.RoundDecimals;
-				return base.OnAdding(item);
-			}
-
-			protected override bool OnInserting(int index, InnerModel item)
-			{
-				item.Model.RoundDecimals = _parent.RoundDecimals;
-				return base.OnInserting(index, item);
-			}
-		}
-
-		/// <summary>
-		/// Создать <see cref="BasketBlackScholes"/>.
-		/// </summary>
-		/// <param name="securityProvider">Поставщик информации об инструментах.</param>
-		/// <param name="dataProvider">Поставщик маркет-данных.</param>
-		public BasketBlackScholes(ISecurityProvider securityProvider, IMarketDataProvider dataProvider)
-			: base(securityProvider, dataProvider)
-		{
-			_innerModels = new InnerModelList(this);
-		}
-
-		private readonly InnerModelList _innerModels;
-
-		/// <summary>
-		/// Информация по опционам.
-		/// </summary>
-		public IInnerModelList InnerModels
-		{
-			get { return _innerModels; }
-		}
-
-		/// <summary>
-		/// Позиция по базовому активу.
-		/// </summary>
-		public IPositionManager UnderlyingAssetPosition { get; set; }
-
-		/// <summary>
-		/// Опцион.
-		/// </summary>
-		public override Security Option
-		{
-			get { throw new NotSupportedException(); }
-		}
-
-		private Security _underlyingAsset;
-
-		/// <summary>
-		/// Базовый актив.
-		/// </summary>
-		public override Security UnderlyingAsset
+		BlackScholes IInnerModelList.this[Security option]
 		{
 			get
 			{
-				if (_underlyingAsset == null)
-				{
-					var info = _innerModels.SyncGet(c => c.FirstOrDefault());
+				if (option == null)
+					throw new ArgumentNullException(nameof(option));
 
-					if (info == null)
-						throw new InvalidOperationException(LocalizedStrings.Str700);
-
-					_underlyingAsset = info.Model.Option.GetAsset(SecurityProvider);
-				}
-
-				return _underlyingAsset;
+				return this.SyncGet(c => c.FirstOrDefault(i => i.Option == option));
 			}
 		}
 
-		/// <summary>
-		/// Количество знаков после запятой у вычисляемых значений. По-умолчанию равно -1, что означает не округлять значения.
-		/// </summary>
-		public override int RoundDecimals
+		protected override bool OnAdding(BlackScholes item)
 		{
-			set
-			{
-				base.RoundDecimals = value;
+			item.RoundDecimals = _parent.RoundDecimals;
+			return base.OnAdding(item);
+		}
 
-				lock (_innerModels.SyncRoot)
-				{
-					_innerModels.ForEach(m => m.Model.RoundDecimals = value);
-				}
+		protected override bool OnInserting(int index, BlackScholes item)
+		{
+			item.RoundDecimals = _parent.RoundDecimals;
+			return base.OnInserting(index, item);
+		}
+	}
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="BasketBlackScholes"/>.
+	/// </summary>
+	/// <param name="dataProvider">The market data provider.</param>
+	/// <param name="positionProvider">The position provider.</param>
+	/// <param name="expirationTime">Explicit options expiration moment for the whole basket. If <c>null</c>, models' own settings are used.</param>
+	public BasketBlackScholes(IMarketDataProvider dataProvider, IPositionProvider positionProvider, DateTime? expirationTime = null)
+		: base(dataProvider, expirationTime)
+	{
+		_innerModels = new InnerModelList(this);
+		PositionProvider = positionProvider ?? throw new ArgumentNullException(nameof(positionProvider));
+	}
+
+	/// <summary>
+	/// Initializes a new instance of the <see cref="BasketBlackScholes"/> with explicit underlying.
+	/// </summary>
+	/// <param name="underlyingAsset">Underlying asset.</param>
+	/// <param name="dataProvider">The market data provider.</param>
+	/// <param name="positionProvider">The position provider.</param>
+	/// <param name="expirationTime">Explicit options expiration moment for the whole basket.</param>
+	public BasketBlackScholes(Security underlyingAsset, IMarketDataProvider dataProvider, IPositionProvider positionProvider, DateTime? expirationTime = null)
+		: base(underlyingAsset, dataProvider, expirationTime)
+	{
+		_innerModels = new InnerModelList(this);
+		UnderlyingAsset = underlyingAsset;
+		PositionProvider = positionProvider ?? throw new ArgumentNullException(nameof(positionProvider));
+	}
+
+	/// <summary>
+	/// The position provider.
+	/// </summary>
+	public IPositionProvider PositionProvider { get; set; }
+
+	private readonly InnerModelList _innerModels;
+
+	/// <summary>
+	/// Information about options.
+	/// </summary>
+	public IInnerModelList InnerModels => _innerModels;
+
+	/// <inheritdoc />
+	public override Security Option => throw new NotSupportedException();
+
+	/// <inheritdoc />
+	public override Security UnderlyingAsset
+	{
+		get
+		{
+			if (base.UnderlyingAsset == null)
+			{
+				var model = _innerModels.SyncGet(c => c.FirstOrDefault());
+
+				if (model == null)
+					throw new InvalidOperationException(LocalizedStrings.ModelNoOptions);
+
+				base.UnderlyingAsset = model.UnderlyingAsset;
+			}
+
+			return base.UnderlyingAsset;
+		}
+	}
+
+	/// <inheritdoc />
+	public override int RoundDecimals
+	{
+		set
+		{
+			base.RoundDecimals = value;
+
+			using (_innerModels.EnterScope())
+			{
+				_innerModels.ForEach(m => m.RoundDecimals = value);
 			}
 		}
+	}
 
-		private decimal GetAssetPosition()
+	/// <inheritdoc />
+	public override decimal? Delta(DateTime currentTime, decimal? deviation = null, decimal? assetPrice = null)
+	{
+		var pos = PositionProvider.Positions.Where(p => p.Security == UnderlyingAsset).Sum(p => p.CurrentValue);
+		return ProcessOptions(bs => bs.Delta(currentTime, deviation, assetPrice), deviation, true) + pos;
+	}
+
+	/// <inheritdoc />
+	public override decimal? Gamma(DateTime currentTime, decimal? deviation = null, decimal? assetPrice = null)
+	{
+		return ProcessOptions(bs => bs.Gamma(currentTime, deviation, assetPrice), deviation, true);
+	}
+
+	/// <inheritdoc />
+	public override decimal? Vega(DateTime currentTime, decimal? deviation = null, decimal? assetPrice = null)
+	{
+		return ProcessOptions(bs => bs.Vega(currentTime, deviation, assetPrice), deviation, true);
+	}
+
+	/// <inheritdoc />
+	public override decimal? Theta(DateTime currentTime, decimal? deviation = null, decimal? assetPrice = null)
+	{
+		return ProcessOptions(bs => bs.Theta(currentTime, deviation, assetPrice), deviation, true);
+	}
+
+	/// <inheritdoc />
+	public override decimal? Rho(DateTime currentTime, decimal? deviation = null, decimal? assetPrice = null)
+	{
+		return ProcessOptions(bs => bs.Rho(currentTime, deviation, assetPrice), deviation, true);
+	}
+
+	/// <inheritdoc />
+	public override decimal? Premium(DateTime currentTime, decimal? deviation = null, decimal? assetPrice = null)
+	{
+		return ProcessOptions(bs => bs.Premium(currentTime, deviation, assetPrice), deviation, true);
+	}
+
+	/// <inheritdoc />
+	public override decimal? ImpliedVolatility(DateTime currentTime, decimal premium)
+	{
+		return ProcessOptions(bs => bs.ImpliedVolatility(currentTime, premium), null, false);
+	}
+
+	/// <summary>
+	/// To sum a value over the options of the basket.
+	/// </summary>
+	/// <param name="func">The value of one option.</param>
+	/// <param name="deviation">The standard deviation the caller supplied for the whole basket, or <see langword="null" /> when each option is priced by its own quoted volatility.</param>
+	/// <param name="usePos">To weight each value by the position in that option.</param>
+	/// <returns>The sum over the options the model can price.</returns>
+	private decimal? ProcessOptions(Func<BlackScholes, decimal?> func, decimal? deviation, bool usePos)
+	{
+		return _innerModels.Cache.Sum(m =>
 		{
-			return (UnderlyingAssetPosition != null ? UnderlyingAssetPosition.Position : 0);
-		}
+			// An option is priced only when its volatility is known: the caller either states one for
+			// the whole basket, or the provider quotes one for that option.
+			if (deviation is null && DataProvider.GetSecurityValue(m.Option, Level1Fields.ImpliedVolatility) is null)
+				return null;
 
-		/// <summary>
-		/// Рассчитать дельту опциона.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="deviation">Стандартное отклонение. Если оно не указано, то используется <see cref="BlackScholes.DefaultDeviation"/>.</param>
-		/// <param name="assetPrice">Цена базового актива. Если цена не указана, то получается цена последней сделки из <see cref="BlackScholes.UnderlyingAsset"/>.</param>
-		/// <returns>Дельта опциона.</returns>
-		public override decimal Delta(DateTimeOffset currentTime, decimal? deviation = null, decimal? assetPrice = null)
-		{
-			return ProcessOptions(bs => bs.Delta(currentTime, deviation, assetPrice)) + GetAssetPosition();
-		}
-
-
-		/// <summary>
-		/// Рассчитать гамму опциона.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="deviation">Стандартное отклонение. Если оно не указано, то используется <see cref="BlackScholes.DefaultDeviation"/>.</param>
-		/// <param name="assetPrice">Цена базового актива. Если цена не указана, то получается цена последней сделки из <see cref="BlackScholes.UnderlyingAsset"/>.</param>
-		/// <returns>Гамма опциона.</returns>
-		public override decimal Gamma(DateTimeOffset currentTime, decimal? deviation = null, decimal? assetPrice = null)
-		{
-			return ProcessOptions(bs => bs.Gamma(currentTime, deviation, assetPrice));
-		}
-
-
-		/// <summary>
-		/// Рассчитать вегу опциона.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="deviation">Стандартное отклонение. Если оно не указано, то используется <see cref="BlackScholes.DefaultDeviation"/>.</param>
-		/// <param name="assetPrice">Цена базового актива. Если цена не указана, то получается цена последней сделки из <see cref="BlackScholes.UnderlyingAsset"/>.</param>
-		/// <returns>Вега опциона.</returns>
-		public override decimal Vega(DateTimeOffset currentTime, decimal? deviation = null, decimal? assetPrice = null)
-		{
-			return ProcessOptions(bs => bs.Vega(currentTime, deviation, assetPrice));
-		}
-
-		/// <summary>
-		/// Рассчитать тету опциона.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="deviation">Стандартное отклонение. Если оно не указано, то используется <see cref="BlackScholes.DefaultDeviation"/>.</param>
-		/// <param name="assetPrice">Цена базового актива. Если цена не указана, то получается цена последней сделки из <see cref="BlackScholes.UnderlyingAsset"/>.</param>
-		/// <returns>Тета опциона.</returns>
-		public override decimal Theta(DateTimeOffset currentTime, decimal? deviation = null, decimal? assetPrice = null)
-		{
-			return ProcessOptions(bs => bs.Theta(currentTime, deviation, assetPrice));
-		}
-
-		/// <summary>
-		/// Рассчитать ро опциона.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="deviation">Стандартное отклонение. Если оно не указано, то используется <see cref="BlackScholes.DefaultDeviation"/>.</param>
-		/// <param name="assetPrice">Цена базового актива. Если цена не указана, то получается цена последней сделки из <see cref="BlackScholes.UnderlyingAsset"/>.</param>
-		/// <returns>Ро опциона.</returns>
-		public override decimal Rho(DateTimeOffset currentTime, decimal? deviation = null, decimal? assetPrice = null)
-		{
-			return ProcessOptions(bs => bs.Rho(currentTime, deviation, assetPrice));
-		}
-
-		/// <summary>
-		/// Рассчитать премию опциона.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="deviation">Стандартное отклонение. Если оно не указано, то используется <see cref="BlackScholes.DefaultDeviation"/>.</param>
-		/// <param name="assetPrice">Цена базового актива. Если цена не указана, то получается цена последней сделки из <see cref="BlackScholes.UnderlyingAsset"/>.</param>
-		/// <returns>Премия опциона.</returns>
-		public override decimal Premium(DateTimeOffset currentTime, decimal? deviation = null, decimal? assetPrice = null)
-		{
-			return ProcessOptions(bs => bs.Premium(currentTime, deviation, assetPrice));
-		}
-
-		/// <summary>
-		/// Рассчитать подразумеваемую волатильность.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <param name="premium">Премия по опциону.</param>
-		/// <returns>Подразумеваевая волатильность.</returns>
-		public override decimal ImpliedVolatility(DateTimeOffset currentTime, decimal premium)
-		{
-			return ProcessOptions(bs => bs.ImpliedVolatility(currentTime, premium), false);
-		}
-
-		/// <summary>
-		/// Создать стакан волатильности.
-		/// </summary>
-		/// <param name="currentTime">Текущее время.</param>
-		/// <returns>Стакан волатильности.</returns>
-		public override MarketDepth ImpliedVolatility(DateTimeOffset currentTime)
-		{
-			throw new NotSupportedException();
-			//return UnderlyingAsset.GetMarketDepth().ImpliedVolatility(this);
-		}
-
-		private decimal ProcessOptions(Func<BlackScholes, decimal> func, bool usePos = true)
-		{
-			return _innerModels.Cache.Sum(m =>
-			{
-				var iv = (decimal?)DataProvider.GetSecurityValue(m.Model.Option, Level1Fields.ImpliedVolatility);
-				return iv == null ? 0 : func(m.Model) * (usePos ? m.PositionManager.Position : 1);
-			});
-		}
+			return func(m) * (usePos ? PositionProvider.Positions.Where(p => p.Security == m.Option).Sum(p => p.CurrentValue) : 1);
+		});
 	}
 }

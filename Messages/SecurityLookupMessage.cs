@@ -1,96 +1,178 @@
-namespace StockSharp.Messages
+namespace StockSharp.Messages;
+
+/// <summary>
+/// Message security lookup for specified criteria.
+/// </summary>
+[DataContract]
+[Serializable]
+public class SecurityLookupMessage : SecurityMessage, ISubscriptionMessage, ISecurityTypesMessage, ISecurityIdsMessage
 {
-	using System;
-	using System.Collections.Generic;
-	using System.Linq;
-	using System.Runtime.Serialization;
-
-	using Ecng.Common;
-
-	using StockSharp.Localization;
+	/// <inheritdoc />
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TransactionKey,
+		Description = LocalizedStrings.TransactionIdKey,
+		GroupName = LocalizedStrings.OptionsKey)]
+	public long TransactionId { get; set; }
 
 	/// <summary>
-	/// Сообщение поиска инструментов по заданному критерию.
+	/// Securities types.
 	/// </summary>
-	[DataContract]
-	[Serializable]
-	public class SecurityLookupMessage : SecurityMessage, IEquatable<SecurityLookupMessage>
+	[DataMember]
+	[Display(
+		ResourceType = typeof(LocalizedStrings),
+		Name = LocalizedStrings.TypeKey,
+		Description = LocalizedStrings.SecurityTypeDescKey,
+		GroupName = LocalizedStrings.OptionsKey)]
+	public SecurityTypes[] SecurityTypes { get; set; }
+
+	/// <summary>
+	/// Request only <see cref="SecurityMessage.SecurityId"/>.
+	/// </summary>
+	[DataMember]
+	public bool OnlySecurityId { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public long? Skip { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public long? Count { get; set; }
+
+	/// <inheritdoc />
+	[DataMember]
+	public FillGapsDays? FillGaps { get; set; }
+
+	private SecurityId[] _securityIds = [];
+
+	/// <summary>
+	/// Security identifiers.
+	/// </summary>
+	[DataMember]
+	public SecurityId[] SecurityIds
 	{
-		/// <summary>
-		/// Идентификатор транзакции.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.TransactionKey)]
-		[DescriptionLoc(LocalizedStrings.TransactionIdKey, true)]
-		[MainCategory]
-		public long TransactionId { get; set; }
+		get => _securityIds;
+		set => _securityIds = value ?? throw new ArgumentNullException(nameof(value));
+	}
 
-		/// <summary>
-		/// Типы инструментов.
-		/// </summary>
-		[DataMember]
-		[DisplayNameLoc(LocalizedStrings.TypeKey)]
-		[DescriptionLoc(LocalizedStrings.Str360Key)]
-		[MainCategory]
-		public IEnumerable<SecurityTypes> SecurityTypes { get; set; }
+	/// <summary>
+	/// Include expired securities.
+	/// </summary>
+	[DataMember]
+	public bool IncludeExpired { get; set; }
 
-		/// <summary>
-		/// Создать <see cref="SecurityLookupMessage"/>.
-		/// </summary>
-		public SecurityLookupMessage()
-			: base(MessageTypes.SecurityLookup)
-		{
-		}
+	/// <summary>
+	/// Disable translates the result of the request into the archive <see cref="SubscriptionFinishedMessage.Body"/>.
+	/// </summary>
+	[DataMember]
+	public bool DisableArchive { get; set; }
 
-		/// <summary>
-		/// Создать копию объекта <see cref="SecurityLookupMessage"/>.
-		/// </summary>
-		/// <returns>Копия.</returns>
-		public override Message Clone()
-		{
-			var clone = new SecurityLookupMessage
-			{
-				TransactionId = TransactionId,
-				SecurityTypes = SecurityTypes
-			};
-			
-			CopyTo(clone);
+	bool ISubscriptionMessage.SpecificItemRequest => false;
 
-			return clone;
-		}
+	/// <summary>
+	/// Initializes a new instance of the <see cref="SecurityLookupMessage"/>.
+	/// </summary>
+	public SecurityLookupMessage()
+		: base(MessageTypes.SecurityLookup)
+	{
+	}
 
-		/// <summary>
-		/// Проверить критерии поиска на эквивалентность.
-		/// </summary>
-		/// <param name="other">Другой критерий поиска, с которым необходимо сравнивать.</param>
-		/// <returns><see langword="true"/>, если критерии поиска равны, иначе, <see langword="false"/>.</returns>
-		public bool Equals(SecurityLookupMessage other)
-		{
-			if (SecurityId.Equals(other.SecurityId))
-				return true;
+	DataType IDataTypeMessage.DataType => DataType.Securities;
 
-			if (Name == other.Name && 
-				ShortName == other.ShortName && 
-				Currency == other.Currency && 
-				ExpiryDate == other.ExpiryDate && 
-				OptionType == other.OptionType &&
-				((SecurityTypes == null && other.SecurityTypes == null) ||
-				(SecurityTypes != null && other.SecurityTypes != null && SecurityTypes.SequenceEqual(other.SecurityTypes))) && 
-				SettlementDate == other.SettlementDate &&
-				Strike == other.Strike &&
-				UnderlyingSecurityCode == other.UnderlyingSecurityCode)
-				return true;
+	bool ISubscriptionMessage.FilterEnabled
+		=>
+		SecurityType != null || SecurityId != default ||
+		!Name.IsEmpty() || !ShortName.IsEmpty() ||
+		SecurityTypes?.Length > 0 || OptionType != null ||
+		Strike != null || VolumeStep != null || PriceStep != null ||
+		!CfiCode.IsEmpty() || MinVolume != null || MaxVolume != null ||
+		Multiplier != null || Decimals != null || ExpiryDate != null ||
+		SettlementDate != null || IssueDate != null || IssueSize != null ||
+		UnderlyingSecurityId != default || UnderlyingSecurityMinVolume != null ||
+		UnderlyingSecurityType != null || !Class.IsEmpty() || Currency != null ||
+		!BinaryOptionType.IsEmpty() || Shortable != null || FaceValue != null ||
+		SettlementType != null || OptionStyle != null;
 
-			return false;
-		}
+	/// <summary>
+	/// Create a copy of <see cref="SecurityLookupMessage"/>.
+	/// </summary>
+	/// <returns>Copy.</returns>
+	public override Message Clone()
+	{
+		var clone = new SecurityLookupMessage();
+		CopyTo(clone);
+		return clone;
+	}
 
-		/// <summary>
-		/// Получить строковое представление.
-		/// </summary>
-		/// <returns>Строковое представление.</returns>
-		public override string ToString()
-		{
-			return base.ToString() + ",TransId={0}".Put(TransactionId);
-		}
+	/// <summary>
+	/// Copy the message into the <paramref name="destination" />.
+	/// </summary>
+	/// <param name="destination">The object, to which copied information.</param>
+	public void CopyTo(SecurityLookupMessage destination)
+	{
+		if (destination == null)
+			throw new ArgumentNullException(nameof(destination));
+
+		destination.TransactionId = TransactionId;
+		destination.SecurityTypes = SecurityTypes?.ToArray();
+		destination.OnlySecurityId = OnlySecurityId;
+		destination.Skip = Skip;
+		destination.Count = Count;
+		destination.SecurityIds = [.. SecurityIds];
+		destination.FillGaps = FillGaps;
+		destination.IncludeExpired = IncludeExpired;
+		destination.DisableArchive = DisableArchive;
+
+		base.CopyTo(destination);
+	}
+
+	/// <inheritdoc />
+	public override string ToString()
+	{
+		var str = base.ToString() + $",TransId={TransactionId},SecId={SecurityId},Name={Name},SecType={this.GetSecurityTypes().Select(t => t.To<string>()).JoinPipe()},ExpDate={ExpiryDate}";
+
+		if (Skip != default)
+			str += $",Skip={Skip}";
+
+		if (Count != default)
+			str += $",Cnt={Count}";
+
+		if (OnlySecurityId)
+			str += $",OnlyId={OnlySecurityId}";
+
+		if (SecurityIds.Length > 0)
+			str += $",Ids={SecurityIds.Select(id => id.ToString()).JoinComma()}";
+
+		if (FillGaps is not null)
+			str += $",gaps={FillGaps}";
+
+		if (IncludeExpired)
+			str += $",expired={IncludeExpired}";
+
+		if (DisableArchive)
+			str += $",Archive={DisableArchive}";
+
+		return str;
+	}
+
+	DateTime? ISubscriptionMessage.From
+	{
+		get => null;
+		set { }
+	}
+
+	DateTime? ISubscriptionMessage.To
+	{
+		// prevent for online mode
+		get => DateTime.MaxValue;
+		set { }
+	}
+
+	bool ISubscriptionMessage.IsSubscribe
+	{
+		get => true;
+		set { }
 	}
 }
